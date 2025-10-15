@@ -1258,7 +1258,7 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
             ft = OPT_TEMPORAL_TILING[num_frames][0]
             fs = OPT_TEMPORAL_TILING[num_frames][1]
 
-        if sqrt(height * width) > 900:
+        if sqrt(height * width) > 500:
             ht = OPT_SPATIAL_TILING[height][0]
             hs = OPT_SPATIAL_TILING[height][1]
             wt = OPT_SPATIAL_TILING[width][0]

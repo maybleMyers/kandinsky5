@@ -152,7 +152,6 @@ class DiffusionTransformer3D(nn.Module):
         x = self.out_layer(visual_embed, text_embed, time_embed)
         return x
 
-    @torch.compile(mode="max-autotune-no-cudagraphs")
     def forward(
         self,
         x,
