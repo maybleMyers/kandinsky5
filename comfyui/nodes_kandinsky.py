@@ -19,7 +19,8 @@ class Kandinsky5LoadTextEmbedders:
         return {
             "required": {
                 "qwen": (os.listdir(folder_paths.get_folder_paths("text_encoders")[0]), {"default": "qwen2_5_vl_7b_instruct"}),
-                "clip": (os.listdir(folder_paths.get_folder_paths("text_encoders")[0]), {"default": "clip_text"})
+                "clip": (os.listdir(folder_paths.get_folder_paths("text_encoders")[0]), {"default": "clip_text"}),
+                "qwen_quantized": ("BOOLEAN", {"default": False})
             }
         }
     RETURN_TYPES = ("MODEL",)
@@ -30,13 +31,13 @@ class Kandinsky5LoadTextEmbedders:
 
     DESCRIPTION = "return clip and qwen text embedders"
 
-    def load_te(self, qwen, clip):
+    def load_te(self, qwen, clip, qwen_quantized):
         qwen_path = os.path.join(folder_paths.get_folder_paths("text_encoders")[0],qwen)
         clip_path = os.path.join(folder_paths.get_folder_paths("text_encoders")[0],clip)
         conf = {'qwen': {'checkpoint_path': qwen_path, 'max_length': 256},
             'clip': {'checkpoint_path': clip_path, 'max_length': 77}
         }
-        return (Kandinsky5TextEmbedder(DictConfig(conf), device='cpu'),)
+        return (Kandinsky5TextEmbedder(DictConfig(conf), device='cpu',quantized_qwen=qwen_quantized),)
 class Kandinsky5LoadDiT:
     @classmethod
     def INPUT_TYPES(s):
