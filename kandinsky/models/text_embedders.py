@@ -1,3 +1,5 @@
+import os
+import json
 import torch
 from transformers import (
     Qwen2_5_VLForConditionalGeneration,
@@ -107,6 +109,15 @@ class Qwen2_5_VLTextEmbedder:
         self.model = torch.compile(self.model, dynamic=True)
         self.mode = conf.mode
         self.processor = AutoProcessor.from_pretrained(processor_path, use_fast=True)
+
+        # For diffusers format: load chat template from model directory if not present in processor
+        if not hasattr(self.processor, 'chat_template') or self.processor.chat_template is None:
+            chat_template_path = os.path.join(conf.checkpoint_path, 'chat_template.json')
+            if os.path.exists(chat_template_path):
+                with open(chat_template_path, 'r') as f:
+                    chat_template_data = json.load(f)
+                    self.processor.chat_template = chat_template_data.get('chat_template', None)
+
         self.max_length = conf.max_length
         self.text_token_padding = text_token_padding
 
