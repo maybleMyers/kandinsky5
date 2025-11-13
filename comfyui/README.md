@@ -75,7 +75,7 @@ After loading the workflow, configure the following parameters:
 |-----------|-------------|-------------------|
 | **Prompt** | Text description for video generation | Your descriptive text |
 | **Negative Prompt** | What to exclude from generation | Unwanted elements description |
-| **Width/Height/Length** | Output video size | 768x512x121 for 5s or 768x512x241 for 10s, Width and Height should be divisisble  by 128 for 10s model. In case of image 2 video video aspect ratio is close to start image and area close to 768*512  |
+| **Width/Height/Length** | Output video size | 768x512x121 for 5s or 768x512x241 for 10s, Width and Height should be divisisble  by 128 for 10s model. In case of image 2 video aspect ratio of result is close to start image ratio and area is close to 768*512  |
 | **Steps** | Number of generation steps | 50, 16 for distilled version|
 | **CFG Scale** |  | 1.0 for distilled16steps and nocfg, 5.0 for sft and pretrain models |
 | **Scheduler Scale** | Noise scheduler scale | 5.0 for 5s, 10.0 for 10s and image 2 video |
