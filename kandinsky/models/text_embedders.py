@@ -90,6 +90,10 @@ class Qwen2_5_VLTextEmbedder:
                 bnb_4bit_quant_type="nf4"
             )
 
+        # Support separate paths for model and processor (for diffusers format)
+        # processor_path is where tokenizer/preprocessor files are located
+        processor_path = getattr(conf, 'processor_path', conf.checkpoint_path)
+
         self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
             conf.checkpoint_path,
             dtype=torch.bfloat16,
@@ -99,7 +103,7 @@ class Qwen2_5_VLTextEmbedder:
         self.model = freeze(self.model)
         self.model = torch.compile(self.model, dynamic=True)
         self.mode = conf.mode
-        self.processor = AutoProcessor.from_pretrained(conf.checkpoint_path, use_fast=True)
+        self.processor = AutoProcessor.from_pretrained(processor_path, use_fast=True)
         self.max_length = conf.max_length
         self.text_token_padding = text_token_padding
 

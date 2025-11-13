@@ -54,12 +54,13 @@ model:
     checkpoint_path: "Kandinsky-5.0-I2V-Pro-sft-5s-Diffusers/vae"
     name: "hunyuan"
 
-  # Text embedder configuration
-  # For diffusers format: use root directory so transformers can find all components
+  # Text embedder configuration for diffusers format
+  # Model weights are in text_encoder/, processor files are in tokenizer/
   text_embedder:
     qwen:
       emb_size: 3584
-      checkpoint_path: "Kandinsky-5.0-I2V-Pro-sft-5s-Diffusers"
+      checkpoint_path: "Kandinsky-5.0-I2V-Pro-sft-5s-Diffusers/text_encoder"
+      processor_path: "Kandinsky-5.0-I2V-Pro-sft-5s-Diffusers/tokenizer"
       max_length: 256
     clip:
       checkpoint_path: "Kandinsky-5.0-I2V-Pro-sft-5s-Diffusers/text_encoder_2"
