@@ -64,6 +64,7 @@ model:
       max_length: 256
     clip:
       checkpoint_path: "Kandinsky-5.0-I2V-Pro-sft-5s-Diffusers/text_encoder_2"
+      tokenizer_path: "Kandinsky-5.0-I2V-Pro-sft-5s-Diffusers/tokenizer_2"
       emb_size: 768
       max_length: 77
 

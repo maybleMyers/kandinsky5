@@ -12,9 +12,12 @@ from .utils import freeze
 
 class ClipTextEmbedder:
     def __init__(self, conf, device):
+        # Support separate paths for model and tokenizer (for diffusers format)
+        tokenizer_path = getattr(conf, 'tokenizer_path', conf.checkpoint_path)
+
         self.model = CLIPTextModel.from_pretrained(conf.checkpoint_path).to(device)
         self.model = freeze(self.model)
-        self.tokenizer = CLIPTokenizer.from_pretrained(conf.checkpoint_path)
+        self.tokenizer = CLIPTokenizer.from_pretrained(tokenizer_path)
         self.max_length = conf.max_length
 
     def __call__(self, texts):
