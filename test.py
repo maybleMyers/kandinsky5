@@ -5,7 +5,7 @@ import logging
 
 import torch
 
-from kandinsky import get_T2V_pipeline, get_I2V_pipeline
+from kandinsky import get_T2V_pipeline, get_I2V_pipeline, get_I2V_pipeline_with_block_swap
 
 
 def validate_args(args):
@@ -144,6 +144,18 @@ def parse_args():
         help="Name of the full attention algorithm to use for <=5 second generation",
         choices=["flash_attention_2", "flash_attention_3", "sdpa", "sage", "auto"]
     )
+    parser.add_argument(
+        "--enable_block_swap",
+        action='store_true',
+        default=False,
+        help="Enable block swapping for large models (e.g., 20B) to fit in limited VRAM"
+    )
+    parser.add_argument(
+        "--blocks_in_memory",
+        type=int,
+        default=6,
+        help="Number of transformer blocks to keep in GPU memory when using block swapping"
+    )
     args = parser.parse_args()
     return args
 
@@ -154,15 +166,30 @@ if __name__ == "__main__":
     validate_args(args)
 
     if "i2v" in args.config:
-        pipe = get_I2V_pipeline(
-            device_map={"dit": "cuda:0", "vae": "cuda:0",
-                        "text_embedder": "cuda:0"},
-            conf_path=args.config,
-            offload=args.offload,
-            magcache=args.magcache,
-            quantized_qwen=args.qwen_quantization,
-            attention_engine=args.attention_engine,
-        )
+        if args.enable_block_swap:
+            # Use block swapping pipeline for large models
+            pipe = get_I2V_pipeline_with_block_swap(
+                device_map={"dit": "cuda:0", "vae": "cuda:0",
+                            "text_embedder": "cuda:0"},
+                conf_path=args.config,
+                offload=args.offload,
+                magcache=args.magcache,
+                quantized_qwen=args.qwen_quantization,
+                attention_engine=args.attention_engine,
+                blocks_in_memory=args.blocks_in_memory,
+                enable_block_swap=True,
+            )
+        else:
+            # Use standard pipeline
+            pipe = get_I2V_pipeline(
+                device_map={"dit": "cuda:0", "vae": "cuda:0",
+                            "text_embedder": "cuda:0"},
+                conf_path=args.config,
+                offload=args.offload,
+                magcache=args.magcache,
+                quantized_qwen=args.qwen_quantization,
+                attention_engine=args.attention_engine,
+            )
     else:
         pipe = get_T2V_pipeline(
             device_map={"dit": "cuda:0", "vae": "cuda:0",

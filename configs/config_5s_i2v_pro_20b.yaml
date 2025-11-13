@@ -1,0 +1,79 @@
+metrics:
+  scale_factor:
+  - 1.0
+  - 2.0
+  - 2.0
+  resolution: 512
+
+model:
+  # Path to the 20B DiT weights - UPDATE THIS PATH
+  checkpoint_path: "./weights/model/kandinsky5_i2v_pro_20b_5s.safetensors"
+  num_steps: 50
+  guidance_weight: 5.0
+
+  dit_params:
+    # 20B model architecture parameters from transformer config.json
+    in_visual_dim: 16
+    out_visual_dim: 16
+    time_dim: 1024              # 20B: 1024 (vs 2B: 512)
+    patch_size:
+    - 1
+    - 2
+    - 2
+    model_dim: 4096              # 20B: 4096 (vs 2B: 1792)
+    ff_dim: 16384                # 20B: 16384 (vs 2B: 7168)
+    num_text_blocks: 4           # 20B: 4 (vs 2B: 2)
+    num_visual_blocks: 60        # 20B: 60 (vs 2B: 32)
+    axes_dims:
+    - 32                         # 20B: 32 (vs 2B: 16)
+    - 48                         # 20B: 48 (vs 2B: 24)
+    - 48                         # 20B: 48 (vs 2B: 24)
+    visual_cond: true
+    in_text_dim: 3584
+    in_text_dim2: 768
+    attention_engine: "auto"     # Can use auto, flash_attention_2, flash_attention_3, sdpa, sage
+
+  # NABLA attention parameters for 20B model
+  attention:
+    type: nabla                  # 20B uses NABLA sparse attention
+    causal: false
+    local: false
+    glob: false
+    window: 3
+    # NABLA-specific parameters from transformer config.json
+    method: "topcdf"
+    P: 0.8
+    add_sta: true
+    wT: 11
+    wW: 3
+    wH: 3
+
+  # VAE configuration (same as 2B)
+  vae:
+    checkpoint_path: "./weights/vae/"
+    name: "hunyuan"
+
+  # Text embedder configuration (same as 2B)
+  text_embedder:
+    qwen:
+      emb_size: 3584
+      checkpoint_path: "./weights/text_encoder/"
+      max_length: 256
+    clip:
+      checkpoint_path: "./weights/text_encoder2/"
+      emb_size: 768
+      max_length: 77
+
+# Block swapping configuration for 48GB VRAM
+# Enable this to fit 20B model in limited memory
+block_swap:
+  enabled: true
+  blocks_in_memory: 6           # Number of visual transformer blocks to keep in GPU (60 total)
+                                 # Adjust based on available VRAM:
+                                 # - 48GB: 4-6 blocks
+                                 # - 40GB: 3-4 blocks
+                                 # - 24GB: 2-3 blocks
+
+# MagCache not available for 20B model yet
+# magcache:
+#   mag_ratios: []
