@@ -7,8 +7,8 @@ metrics:
 
 model:
   # Path to the 20B DiT weights
-  # For diffusers format, point to the transformer subdirectory
-  checkpoint_path: "Kandinsky-5.0-I2V-Pro-sft-5s-Diffusers/transformer"
+  # For diffusers format, point to the actual .safetensors file
+  checkpoint_path: "Kandinsky-5.0-I2V-Pro-sft-5s-Diffusers/transformer/diffusion_pytorch_model.safetensors"
   num_steps: 50
   guidance_weight: 5.0
 
