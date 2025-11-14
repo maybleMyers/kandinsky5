@@ -1,3 +1,5 @@
+import os
+import json
 import torch
 from transformers import (
     Qwen2_5_VLForConditionalGeneration,
@@ -12,9 +14,12 @@ from .utils import freeze
 
 class ClipTextEmbedder:
     def __init__(self, conf, device):
+        # Support separate paths for model and tokenizer (for diffusers format)
+        tokenizer_path = getattr(conf, 'tokenizer_path', conf.checkpoint_path)
+
         self.model = CLIPTextModel.from_pretrained(conf.checkpoint_path).to(device)
         self.model = freeze(self.model)
-        self.tokenizer = CLIPTokenizer.from_pretrained(conf.checkpoint_path)
+        self.tokenizer = CLIPTokenizer.from_pretrained(tokenizer_path)
         self.max_length = conf.max_length
 
     def __call__(self, texts):
@@ -90,6 +95,10 @@ class Qwen2_5_VLTextEmbedder:
                 bnb_4bit_quant_type="nf4"
             )
 
+        # Support separate paths for model and processor (for diffusers format)
+        # processor_path is where tokenizer/preprocessor files are located
+        processor_path = getattr(conf, 'processor_path', conf.checkpoint_path)
+
         self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
             conf.checkpoint_path,
             dtype=torch.bfloat16,
@@ -99,7 +108,16 @@ class Qwen2_5_VLTextEmbedder:
         self.model = freeze(self.model)
         self.model = torch.compile(self.model, dynamic=True)
         self.mode = conf.mode
-        self.processor = AutoProcessor.from_pretrained(conf.checkpoint_path, use_fast=True)
+        self.processor = AutoProcessor.from_pretrained(processor_path, use_fast=True)
+
+        # For diffusers format: load chat template from model directory if not present in processor
+        if not hasattr(self.processor, 'chat_template') or self.processor.chat_template is None:
+            chat_template_path = os.path.join(conf.checkpoint_path, 'chat_template.json')
+            if os.path.exists(chat_template_path):
+                with open(chat_template_path, 'r') as f:
+                    chat_template_data = json.load(f)
+                    self.processor.chat_template = chat_template_data.get('chat_template', None)
+
         self.max_length = conf.max_length
         self.text_token_padding = text_token_padding
 

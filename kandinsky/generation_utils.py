@@ -15,7 +15,14 @@ def get_sparse_params(conf, batch_embeds, device):
         H // conf.model.dit_params.patch_size[1],
         W // conf.model.dit_params.patch_size[2],
     )
-    if conf.model.attention.type == "nabla":
+
+    # Check if attention config exists and is NABLA type
+    try:
+        attention_type = conf.model.attention.type
+    except (AttributeError, KeyError):
+        attention_type = None
+
+    if attention_type == "nabla":
         sta_mask = fast_sta_nabla(T, H // 8, W // 8, conf.model.attention.wT,
                                   conf.model.attention.wH, conf.model.attention.wW, device=device)
         sparse_params = {
@@ -238,7 +245,8 @@ def generate_sample(
             images = vae.decode(images).sample
             images = ((images.clamp(-1.0, 1.0) + 1.0) * 127.5).to(torch.uint8)
 
-    if offload:
+    # Offload VAE after decode to free VRAM
+    if offload or force_offload:
         vae = vae.to('cpu', non_blocking=True)
     torch.cuda.empty_cache()
 
@@ -261,6 +269,7 @@ def generate_sample_i2v(
     vae_device="cuda",
     progress=True,
     offload=False,
+    force_offload=False,  # Force offloading for block swapping
 ):
     old_mode = text_embedder.embedder.mode
     text_embedder.embedder.mode = "i2v"
@@ -270,7 +279,7 @@ def generate_sample_i2v(
         type_of_content = "image"
     else:
         type_of_content = "video"
-        
+
     with torch.no_grad():
         bs_text_embed, text_cu_seqlens, attention_mask = text_embedder.encode(
             [caption], type_of_content=type_of_content
@@ -279,9 +288,11 @@ def generate_sample_i2v(
             [negative_caption], type_of_content=type_of_content
         )
 
-    if offload:
+    # Offload text embedder after encoding to free VRAM
+    if offload or force_offload:
         text_embedder = text_embedder.to('cpu')
-        
+        torch.cuda.empty_cache()
+
     for key in bs_text_embed:
         bs_text_embed[key] = bs_text_embed[key].to(device=device)
         bs_null_text_embed[key] = bs_null_text_embed[key].to(device=device)
@@ -324,11 +335,16 @@ def generate_sample_i2v(
                 images = images.to(device=latent_visual.device, dtype=latent_visual.dtype)
                 latent_visual[:1] = images
 
-    if offload:
+    # Offload DiT before VAE decode to free up VRAM
+    # For block swapping, explicitly offload all blocks first
+    if hasattr(dit, 'offload_all_blocks'):
+        dit.offload_all_blocks()
+
+    if offload or force_offload:
         dit = dit.to('cpu', non_blocking=True)
     torch.cuda.empty_cache()
 
-    if offload:
+    if offload or force_offload:
         vae = vae.to(vae_device, non_blocking=True)
 
     with torch.no_grad():
@@ -345,7 +361,8 @@ def generate_sample_i2v(
             images = vae.decode(images).sample
             images = ((images.clamp(-1.0, 1.0) + 1.0) * 127.5).to(torch.uint8)
 
-    if offload:
+    # Offload VAE after decode to free VRAM
+    if offload or force_offload:
         vae = vae.to('cpu', non_blocking=True)
     torch.cuda.empty_cache()
 
