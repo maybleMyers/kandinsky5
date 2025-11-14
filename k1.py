@@ -6,10 +6,47 @@ import sys
 import time
 import random
 import subprocess
+import re
 from typing import Generator, List, Tuple, Optional
 import threading
 
 stop_event = threading.Event()
+
+def parse_progress_line(line: str) -> Optional[str]:
+    """Parse progress bar lines and extract useful information."""
+    line = line.strip()
+
+    if "Loading checkpoint shards:" in line:
+        match = re.search(r'(\d+)%.*?(\d+/\d+)', line)
+        if match:
+            percent = match.group(1)
+            fraction = match.group(2)
+            return f"Loading model: {percent}% ({fraction} shards)"
+
+    if "Building DiT with block swapping" in line:
+        return "Building DiT model..."
+
+    if "Loading DiT weights from" in line:
+        return "Loading DiT weights..."
+
+    match = re.search(r'(\d+)%\|.*?\|\s*(\d+)/(\d+)\s*\[.*?<([\d:]+)', line)
+    if match:
+        percent = match.group(1)
+        current = match.group(2)
+        total = match.group(3)
+        eta = match.group(4)
+        return f"Generating: {percent}% ({current}/{total} steps) - ETA: {eta}"
+
+    if "TIME ELAPSED:" in line:
+        match = re.search(r'TIME ELAPSED:\s*([\d.]+)', line)
+        if match:
+            elapsed = float(match.group(1))
+            return f"Generation completed in {elapsed:.1f}s"
+
+    if "Generated video is saved to" in line:
+        return "Video saved successfully!"
+
+    return None
 
 def generate_video(
     prompt: str,
@@ -96,6 +133,7 @@ def generate_video(
                 bufsize=1
             )
 
+            last_progress = ""
             while True:
                 if stop_event.is_set():
                     process.terminate()
@@ -109,6 +147,11 @@ def generate_video(
                 line = process.stdout.readline()
                 if line:
                     print(line.strip())
+
+                    parsed_progress = parse_progress_line(line)
+                    if parsed_progress:
+                        last_progress = parsed_progress
+                        yield all_generated_videos.copy(), status_text, last_progress
 
                 if process.poll() is not None:
                     break
