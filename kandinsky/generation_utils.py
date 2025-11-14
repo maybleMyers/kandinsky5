@@ -15,7 +15,14 @@ def get_sparse_params(conf, batch_embeds, device):
         H // conf.model.dit_params.patch_size[1],
         W // conf.model.dit_params.patch_size[2],
     )
-    if conf.model.attention.type == "nabla":
+
+    # Check if attention config exists and is NABLA type
+    try:
+        attention_type = conf.model.attention.type
+    except (AttributeError, KeyError):
+        attention_type = None
+
+    if attention_type == "nabla":
         sta_mask = fast_sta_nabla(T, H // 8, W // 8, conf.model.attention.wT,
                                   conf.model.attention.wH, conf.model.attention.wW, device=device)
         sparse_params = {
