@@ -1,10 +1,18 @@
 ## Example inference run
 This will work on a 24gb gpu with like 80GB RAM used, could maybe lower duration to use less or something.  
+
 To install I would use python 3.10 and torch 2.8.  
+python3.10 -m venv env  
 pip install torch==2.8.0+cu128 torchvision --index-url https://download.pytorch.org/whl/cu128  
+pip install -r requirements.txt   
 you need to clone the full model into the kandinsky5 folder to make it work.  
 git-lfs clone https://huggingface.co/kandinskylab/Kandinsky-5.0-I2V-Pro-sft-5s-Diffusers  
 
+to use the gui:  
+source env/bin/activate  (or env/scripts/activate if you are a windows powershell console)  
+python k1.py  
+
+To run in a shell:  
 python test.py \  
   --config ./configs/config_5s_i2v_pro_20b.yaml \  
   --prompt "A cute tabby cat is eating a bowl of wasabi in a restaurant in Guangzhou. The cat is very good at using chopsticks and proceeds to   eat the entire bowl of wasabi quickly with his chopsticks. The cat is wearing a white shirt with red accents and the cute tabby cat's shirt has the text 'spice kitten' on it. There is a large red sign in the background with '芥末' on it in white letters. A small red panda is drinking a beer beside the cat. The red panda is holding a large glass of dark beer and drinking it quickly. The panda tilts his head back and downs the entire glass of beer in one large gulp." \
