@@ -54,7 +54,9 @@ def get_first_frame_from_image(image, vae, device, alignment=16):
     image = image / 127.5 - 1.
 
     with torch.no_grad():
-        image = image.to(device=device, dtype=torch.float16).transpose(0, 1).unsqueeze(0)
+        # Use the VAE's dtype to avoid dtype mismatch
+        vae_dtype = next(vae.parameters()).dtype
+        image = image.to(device=device, dtype=vae_dtype).transpose(0, 1).unsqueeze(0)
         lat_image = vae.encode(image, opt_tiling=False).latent_dist.sample().squeeze(0).permute(1, 2, 3, 0)
         lat_image = lat_image * vae.config.scaling_factor
 
