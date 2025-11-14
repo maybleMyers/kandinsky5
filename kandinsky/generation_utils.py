@@ -290,7 +290,7 @@ def generate_sample_i2v(
 
     # Offload text embedder after encoding to free VRAM
     if offload or force_offload:
-        text_embedder = text_embedder.to('cpu', non_blocking=True)
+        text_embedder = text_embedder.to('cpu')
         torch.cuda.empty_cache()
 
     for key in bs_text_embed:
