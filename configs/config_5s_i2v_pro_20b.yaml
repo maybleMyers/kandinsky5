@@ -32,22 +32,23 @@ model:
     visual_cond: true
     in_text_dim: 3584
     in_text_dim2: 768
-    attention_engine: "auto"     # Can use auto, flash_attention_2, flash_attention_3, sdpa, sage
+    attention_engine: "sdpa"     # Using full SDPA attention (PyTorch native)
+                                 # Other options: flash_attention_2, flash_attention_3, sage
 
-  # NABLA attention parameters for 20B model
-  attention:
-    type: nabla                  # 20B uses NABLA sparse attention
-    causal: false
-    local: false
-    glob: false
-    window: 3
-    # NABLA-specific parameters from transformer config.json
-    method: "topcdf"
-    P: 0.8
-    add_sta: true
-    wT: 11
-    wW: 3
-    wH: 3
+  # Full attention (NABLA sparse attention disabled)
+  # To re-enable NABLA sparse attention, uncomment below:
+  # attention:
+  #   type: nabla
+  #   causal: false
+  #   local: false
+  #   glob: false
+  #   window: 3
+  #   method: "topcdf"
+  #   P: 0.8
+  #   add_sta: true
+  #   wT: 11
+  #   wW: 3
+  #   wH: 3
 
   # VAE configuration
   vae:
@@ -73,10 +74,11 @@ model:
 block_swap:
   enabled: true
   blocks_in_memory: 6           # Number of visual transformer blocks to keep in GPU (60 total)
+                                 # With full SDPA attention on 48GB VRAM, can use 8-12 blocks for faster inference
                                  # Adjust based on available VRAM:
-                                 # - 48GB: 4-6 blocks
-                                 # - 40GB: 3-4 blocks
-                                 # - 24GB: 2-3 blocks
+                                 # - 48GB: 8-12 blocks (full attention) or 12-18 blocks (NABLA sparse)
+                                 # - 40GB: 6-8 blocks
+                                 # - 24GB: 3-4 blocks
 
 # MagCache not available for 20B model yet
 # magcache:
