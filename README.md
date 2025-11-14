@@ -2,8 +2,8 @@
 This will work on a 24gb gpu with like 80GB RAM used, could maybe lower duration to use less or something.  
 To install I would use python 3.10 and torch 2.8.  
 pip install torch==2.8.0+cu128 torchvision --index-url https://download.pytorch.org/whl/cu128  
-you need to clone the full model into the kandinsky folder to make it work.  
-https://huggingface.co/kandinskylab/Kandinsky-5.0-I2V-Pro-sft-5s-Diffusers  
+you need to clone the full model into the kandinsky5 folder to make it work.  
+git-lfs clone https://huggingface.co/kandinskylab/Kandinsky-5.0-I2V-Pro-sft-5s-Diffusers  
 
 python test.py \  
   --config ./configs/config_5s_i2v_pro_20b.yaml \  
