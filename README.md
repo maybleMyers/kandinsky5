@@ -1,13 +1,21 @@
 ## Example inference run
+This will work on a 24gb gpu with like 80GB RAM used, could maybe lower duration to use less or something.  
+To install I would use python 3.10 and torch 2.8.  
+pip install torch==2.8.0+cu128 torchvision --index-url https://download.pytorch.org/whl/cu128  
+you need to clone the full model into the kandinsky folder to make it work.  
+https://huggingface.co/kandinskylab/Kandinsky-5.0-I2V-Pro-sft-5s-Diffusers  
 
-CUDA_VISIBLE_DEVICES=1 python test.py \
-  --config ./configs/config_5s_i2v_pro_20b.yaml \
-  --prompt "The Dragon breaths fire." \
-  --image "./assets/test_image.jpg" \
-  --video_duration 5 \
-  --enable_block_swap \
-  --seed 23982938 \
-  --blocks_in_memory 6
+python test.py \  
+  --config ./configs/config_5s_i2v_pro_20b.yaml \  
+  --prompt "A cute tabby cat is eating a bowl of wasabi in a restaurant in Guangzhou. The cat is very good at using chopsticks and proceeds to   eat the entire bowl of wasabi quickly with his chopsticks. The cat is wearing a white shirt with red accents and the cute tabby cat's shirt has the text 'spice kitten' on it. There is a large red sign in the background with '芥末' on it in white letters. A small red panda is drinking a beer beside the cat. The red panda is holding a large glass of dark beer and drinking it quickly. The panda tilts his head back and downs the entire glass of beer in one large gulp." \
+  --image "./assets/idekpero.png" \  
+  --video_duration 5 \  
+  --enable_block_swap \  
+  --seed 67 \  
+  --blocks_in_memory 2 \  
+  --output_filename 5090wasabitcat.mp4 \  
+  --sample_steps 50 \  
+  --dtype bfloat16  
 
 # Authors
 <B>Project Leader:</B> Denis Dimitrov</br>
