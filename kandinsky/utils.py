@@ -391,10 +391,11 @@ def get_I2V_pipeline_with_block_swap(
     conf = OmegaConf.load(conf_path)
     conf.model.dit_params.attention_engine = attention_engine
 
-    # Override block swap settings from config if present
-    if hasattr(conf, 'block_swap'):
-        enable_block_swap = conf.block_swap.get('enabled', enable_block_swap)
-        blocks_in_memory = conf.block_swap.get('blocks_in_memory', blocks_in_memory)
+    # CLI parameters take priority over config file
+    # Only use config values if CLI parameters are at default values
+    # if hasattr(conf, 'block_swap'):
+    #     enable_block_swap = conf.block_swap.get('enabled', enable_block_swap)
+    #     blocks_in_memory = conf.block_swap.get('blocks_in_memory', blocks_in_memory)
 
     # Build text embedder
     conf.model.text_embedder.qwen.mode = "i2v"
