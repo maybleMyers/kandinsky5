@@ -122,7 +122,11 @@ class Kandinsky5I2VPipeline:
 
         # For NABLA attention with fractal flattening, need 128-pixel alignment
         # For other attention types, 16-pixel alignment is sufficient
-        alignment = 128 if getattr(self.conf.model.attention, 'type', 'flash') == 'nabla' else 16
+        try:
+            attention_type = self.conf.model.attention.type
+        except (AttributeError, KeyError):
+            attention_type = 'flash'  # Default to flash if attention config is missing
+        alignment = 128 if attention_type == 'nabla' else 16
 
         if self.offload:
             self.vae = self.vae.to(self.device_map["vae"], non_blocking=True)
