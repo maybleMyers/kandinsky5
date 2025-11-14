@@ -1,4 +1,6 @@
 import gradio as gr
+from gradio import themes
+from gradio.themes.utils import colors
 import os
 import sys
 import time
@@ -7,13 +9,11 @@ import warnings
 import logging
 from typing import Generator, List, Tuple, Optional
 import torch
+import threading
 
 from kandinsky import get_T2V_pipeline, get_I2V_pipeline, get_I2V_pipeline_with_block_swap
 
 global_pipe = None
-stop_event = threading.Event() if 'threading' in dir() else None
-
-import threading
 stop_event = threading.Event()
 
 def disable_warnings():
@@ -179,7 +179,55 @@ def stop_generation():
     return "Stopping generation..."
 
 def create_interface():
-    with gr.Blocks() as demo:
+    with gr.Blocks(
+        theme=themes.Default(
+            primary_hue=colors.Color(
+                name="custom",
+                c50="#E6F0FF",
+                c100="#CCE0FF",
+                c200="#99C1FF",
+                c300="#66A3FF",
+                c400="#3384FF",
+                c500="#0060df",
+                c600="#0052C2",
+                c700="#003D91",
+                c800="#002961",
+                c900="#001430",
+                c950="#000A18"
+            )
+        ),
+        css="""
+        .gallery-item:first-child { border: 2px solid #4CAF50 !important; }
+        .gallery-item:first-child:hover { border-color: #45a049 !important; }
+        .green-btn {
+            background: linear-gradient(to bottom right, #2ecc71, #27ae60) !important;
+            color: white !important;
+            border: none !important;
+        }
+        .green-btn:hover {
+            background: linear-gradient(to bottom right, #27ae60, #219651) !important;
+        }
+        .refresh-btn {
+            max-width: 40px !important;
+            min-width: 40px !important;
+            height: 40px !important;
+            border-radius: 50% !important;
+            padding: 0 !important;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+        }
+        .light-blue-btn {
+            background: linear-gradient(to bottom right, #AEC6CF, #9AB8C4) !important;
+            color: #333 !important;
+            border: 1px solid #9AB8C4 !important;
+        }
+        .light-blue-btn:hover {
+            background: linear-gradient(to bottom right, #9AB8C4, #8AA9B5) !important;
+            border-color: #8AA9B5 !important;
+        }
+        """,
+    ) as demo:
         gr.Markdown("# Kandinsky 5.0 I2V Pro 20B - K1 Interface")
 
         with gr.Row():
