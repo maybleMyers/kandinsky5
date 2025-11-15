@@ -13,6 +13,7 @@ import json
 import ffmpeg
 
 stop_event = threading.Event()
+current_process = None  # Track the currently running process
 
 def parse_progress_line(line: str) -> Optional[str]:
     """Parse progress bar lines and extract useful information."""
@@ -62,20 +63,26 @@ def generate_video(
     guidance_weight: float,
     scheduler_scale: float,
     seed: int,
+    use_mixed_weights: bool,
     enable_block_swap: bool,
     blocks_in_memory: int,
     dtype_str: str,
+    text_encoder_dtype_str: str,
+    vae_dtype_str: str,
+    computation_dtype_str: str,
     save_path: str,
     batch_size: int,
 ) -> Generator[Tuple[List[Tuple[str, str]], str, str], None, None]:
-    global stop_event
+    global stop_event, current_process
     stop_event.clear()
+    current_process = None
 
     os.makedirs(save_path, exist_ok=True)
     all_generated_videos = []
 
     for i in range(int(batch_size)):
         if stop_event.is_set():
+            current_process = None
             yield all_generated_videos, "Generation stopped by user.", ""
             return
 
@@ -108,6 +115,16 @@ def generate_video(
             "--dtype", dtype_str,
         ]
 
+        if text_encoder_dtype_str:
+            command.extend(["--text_encoder_dtype", text_encoder_dtype_str])
+        if vae_dtype_str:
+            command.extend(["--vae_dtype", vae_dtype_str])
+        if computation_dtype_str:
+            command.extend(["--computation_dtype", computation_dtype_str])
+
+        if use_mixed_weights:
+            command.append("--use_mixed_weights")
+
         if negative_prompt:
             command.extend(["--negative_prompt", str(negative_prompt)])
 
@@ -119,6 +136,7 @@ def generate_video(
 
         if mode == "i2v":
             if not input_image:
+                current_process = None
                 yield all_generated_videos, "Error: Input image required for i2v mode.", ""
                 return
             command.extend(["--image", str(input_image)])
@@ -147,6 +165,9 @@ def generate_video(
                 bufsize=1
             )
 
+            # Track this as the current process so stop button can terminate it
+            current_process = process
+
             last_progress = ""
             while True:
                 if stop_event.is_set():
@@ -155,6 +176,7 @@ def generate_video(
                         process.wait(timeout=5)
                     except subprocess.TimeoutExpired:
                         process.kill()
+                    current_process = None
                     yield all_generated_videos, "Generation stopped by user.", ""
                     return
 
@@ -170,6 +192,8 @@ def generate_video(
                 if process.poll() is not None:
                     break
 
+            # Clear current process when done
+            current_process = None
             return_code = process.returncode
 
             elapsed = time.perf_counter() - start_time
@@ -189,9 +213,13 @@ def generate_video(
                     "guidance_weight": guidance_weight,
                     "scheduler_scale": scheduler_scale,
                     "seed": current_seed,
+                    "use_mixed_weights": use_mixed_weights,
                     "enable_block_swap": enable_block_swap,
                     "blocks_in_memory": int(blocks_in_memory) if enable_block_swap else None,
                     "dtype": dtype_str,
+                    "text_encoder_dtype": text_encoder_dtype_str if text_encoder_dtype_str else None,
+                    "vae_dtype": vae_dtype_str if vae_dtype_str else None,
+                    "computation_dtype": computation_dtype_str if computation_dtype_str else None,
                     "config_file": config_file,
                 }
                 try:
@@ -205,18 +233,36 @@ def generate_video(
                 yield all_generated_videos.copy(), status_text, progress_msg
             else:
                 error_msg = f"Error: Generation failed with return code {return_code}"
+                current_process = None
                 yield all_generated_videos, error_msg, ""
                 return
 
         except Exception as e:
+            current_process = None
             yield all_generated_videos, f"Error during generation: {str(e)}", ""
             return
 
+    current_process = None
     yield all_generated_videos, "All generations complete!", ""
 
 def stop_generation():
-    global stop_event
+    global stop_event, current_process
     stop_event.set()
+
+    # Immediately terminate the current process if it exists
+    if current_process is not None:
+        try:
+            current_process.terminate()
+            # Give it a moment to terminate gracefully
+            try:
+                current_process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                # Force kill if it doesn't terminate
+                current_process.kill()
+                current_process.wait()
+        except Exception as e:
+            print(f"Error stopping process: {e}")
+
     return "Stopping generation..."
 
 def extract_video_metadata(video_path: str) -> Dict:
@@ -415,10 +461,18 @@ def create_interface():
 
             with gr.Accordion("Model Settings & Performance", open=True):
                 with gr.Row():
+                    use_mixed_weights = gr.Checkbox(label="Use Mixed Weights", value=False, info="Preserve fp32 for critical layers (norms, embeddings)")
+                with gr.Row():
                     enable_block_swap = gr.Checkbox(label="Enable Block Swap", value=True, info="Required for 24GB GPUs")
                     blocks_in_memory = gr.Slider(minimum=1, maximum=60, step=1, label="Blocks in Memory", value=2, info="Number of transformer blocks to keep in GPU memory")
                 with gr.Row():
-                    dtype_select = gr.Radio(choices=["bfloat16", "float16", "float32"], label="Data Type", value="bfloat16")
+                    dtype_select = gr.Radio(choices=["bfloat16", "float16", "float32"], label="Default Data Type", value="bfloat16", info="Used for all components if specific dtypes not set")
+                with gr.Accordion("Advanced: Component-Specific Data Types", open=False):
+                    gr.Markdown("Override dtypes for individual components. Leave empty to use default dtype.")
+                    with gr.Row():
+                        text_encoder_dtype_select = gr.Dropdown(choices=["", "bfloat16", "float16", "float32"], label="Text Encoder dtype", value="", info="Empty = use default")
+                        vae_dtype_select = gr.Dropdown(choices=["", "bfloat16", "float16", "float32"], label="VAE dtype", value="", info="Empty = use default")
+                        computation_dtype_select = gr.Dropdown(choices=["", "bfloat16", "float16", "float32"], label="Computation dtype", value="", info="Empty = use default")
                 save_path = gr.Textbox(label="Save Path", value="outputs")
 
             random_seed_btn.click(
@@ -432,7 +486,8 @@ def create_interface():
                     prompt, negative_prompt, input_image, mode,
                     width, height, video_duration, sample_steps,
                     guidance_weight, scheduler_scale, seed,
-                    enable_block_swap, blocks_in_memory, dtype_select,
+                    use_mixed_weights, enable_block_swap, blocks_in_memory, dtype_select,
+                    text_encoder_dtype_select, vae_dtype_select, computation_dtype_select,
                     save_path, batch_size
                 ],
                 outputs=[output, batch_progress, progress_text]

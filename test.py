@@ -152,7 +152,34 @@ def parse_args():
         type=str,
         default="bfloat16",
         choices=["float32", "float16", "bfloat16"],
-        help="Data type for model weights (default: bfloat16). Use bfloat16 for best memory efficiency with minimal quality loss."
+        help="Data type for model weights (default: bfloat16). Use bfloat16 for best memory efficiency with minimal quality loss. This sets all dtypes if specific ones are not provided."
+    )
+    parser.add_argument(
+        "--text_encoder_dtype",
+        type=str,
+        default=None,
+        choices=["float32", "float16", "bfloat16"],
+        help="Data type specifically for text encoder. If not set, uses --dtype value."
+    )
+    parser.add_argument(
+        "--vae_dtype",
+        type=str,
+        default=None,
+        choices=["float32", "float16", "bfloat16"],
+        help="Data type specifically for VAE. If not set, uses --dtype value."
+    )
+    parser.add_argument(
+        "--computation_dtype",
+        type=str,
+        default=None,
+        choices=["float32", "float16", "bfloat16"],
+        help="Data type for activations/computations. If not set, uses --dtype value."
+    )
+    parser.add_argument(
+        "--use_mixed_weights",
+        action='store_true',
+        default=False,
+        help="Use mixed precision weights - preserve fp32 for critical layers (norms, embeddings) while using specified dtype for activations. Prevents dtype conversion errors."
     )
     args = parser.parse_args()
     return args
@@ -169,6 +196,11 @@ if __name__ == "__main__":
         "bfloat16": torch.bfloat16,
     }
     model_dtype = dtype_map[args.dtype]
+
+    # Set individual component dtypes (fall back to model_dtype if not specified)
+    text_encoder_dtype = dtype_map[args.text_encoder_dtype] if args.text_encoder_dtype else model_dtype
+    vae_dtype = dtype_map[args.vae_dtype] if args.vae_dtype else model_dtype
+    computation_dtype = dtype_map[args.computation_dtype] if args.computation_dtype else model_dtype
 
     # Determine model type from config filename
     is_i2v = "i2v" in args.config.lower()
@@ -188,6 +220,10 @@ if __name__ == "__main__":
                 blocks_in_memory=args.blocks_in_memory,
                 enable_block_swap=True,
                 dtype=model_dtype,
+                use_mixed_weights=args.use_mixed_weights,
+                text_encoder_dtype=text_encoder_dtype,
+                vae_dtype=vae_dtype,
+                computation_dtype=computation_dtype,
             )
         else:
             # Use standard I2V pipeline
@@ -200,6 +236,10 @@ if __name__ == "__main__":
                 quantized_qwen=args.qwen_quantization,
                 attention_engine=args.attention_engine,
                 dtype=model_dtype,
+                use_mixed_weights=args.use_mixed_weights,
+                text_encoder_dtype=text_encoder_dtype,
+                vae_dtype=vae_dtype,
+                computation_dtype=computation_dtype,
             )
     else:  # T2V
         if is_t2v_pro and args.enable_block_swap:
@@ -216,6 +256,10 @@ if __name__ == "__main__":
                 blocks_in_memory=args.blocks_in_memory,
                 enable_block_swap=True,
                 dtype=model_dtype,
+                use_mixed_weights=args.use_mixed_weights,
+                text_encoder_dtype=text_encoder_dtype,
+                vae_dtype=vae_dtype,
+                computation_dtype=computation_dtype,
             )
         else:
             # Use standard T2V pipeline
@@ -228,6 +272,10 @@ if __name__ == "__main__":
                 quantized_qwen=args.qwen_quantization,
                 attention_engine=args.attention_engine,
                 dtype=model_dtype,
+                use_mixed_weights=args.use_mixed_weights,
+                text_encoder_dtype=text_encoder_dtype,
+                vae_dtype=vae_dtype,
+                computation_dtype=computation_dtype,
             )
 
     if args.output_filename is None:
