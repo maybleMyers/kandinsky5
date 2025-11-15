@@ -119,14 +119,6 @@ class Kandinsky5T2VPipeline:
 
             seed = seed.item()
 
-        if self.resolution != 512:
-            raise NotImplementedError("Only 512 resolution is available for now")
-
-        if (height, width) not in self.RESOLUTIONS[self.resolution]:
-            raise ValueError(
-                f"Wrong height, width pair. Available (height, width) are: {self.RESOLUTIONS[self.resolution]}"
-            )
-
         # PREPARATION
         num_frames = 1 if time_length == 0 else time_length * 24 // 4 + 1
 
