@@ -130,17 +130,21 @@ class Kandinsky5I2VPipeline:
             attention_type = 'flash'  # Default to flash if attention config is missing
         alignment = 128 if attention_type == 'nabla' else 16
 
-        if self.offload:
+        # Load VAE for encoding if using offload or block swap
+        force_offload = hasattr(self.dit, 'enable_block_swap') and self.dit.enable_block_swap
+        if self.offload or force_offload:
             self.vae = self.vae.to(self.device_map["vae"], non_blocking=True)
         image, image_lat, k = get_first_frame_from_image(image, self.vae, self.device_map["vae"], alignment=alignment)
-        if self.offload:
+        if self.offload or force_offload:
             self.vae = self.vae.to("cpu", non_blocking=True)
 
         caption = text
         if expand_prompts:
             transformers.set_seed(seed)
             if self.local_dit_rank == 0:
-                if self.offload:
+                # Load text embedder if using offload or block swap (which keeps models on CPU initially)
+                force_offload = hasattr(self.dit, 'enable_block_swap') and self.dit.enable_block_swap
+                if self.offload or force_offload:
                     self.text_embedder = self.text_embedder.to(self.device_map["text_embedder"])
                 caption = self.text_embedder.embedder.expand_text_prompt(caption, image, device=self.device_map["text_embedder"])
             if self.world_size > 1:

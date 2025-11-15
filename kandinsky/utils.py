@@ -410,6 +410,7 @@ def get_I2V_pipeline_with_block_swap(
     #     blocks_in_memory = conf.block_swap.get('blocks_in_memory', blocks_in_memory)
 
     # Build text embedder
+    # For block swap, always keep text encoder on CPU initially to save VRAM
     conf.model.text_embedder.qwen.mode = "i2v"
     text_embedder = get_text_embedder(
         conf.model.text_embedder,
@@ -418,13 +419,16 @@ def get_I2V_pipeline_with_block_swap(
         text_token_padding=text_token_padding,
         dtype=dtype
     )
-    if not offload:
+    # Keep text encoder on CPU when block swapping - it will be loaded on-demand during generation
+    if not offload and not enable_block_swap:
         text_embedder = text_embedder.to(device=device_map["text_embedder"])
 
     # Build VAE
+    # For block swap, always keep VAE on CPU initially to save VRAM
     vae = build_vae(conf.model.vae, dtype=dtype)
     vae = vae.eval()
-    if not offload:
+    # Keep VAE on CPU when block swapping - it will be loaded on-demand during generation
+    if not offload and not enable_block_swap:
         vae = vae.to(device=device_map["vae"], dtype=dtype)
 
     # Build DiT with block swapping
@@ -549,6 +553,7 @@ def get_T2V_pipeline_with_block_swap(
     conf.model.dit_params.attention_engine = attention_engine
 
     # Build text embedder - T2V mode
+    # For block swap, always keep text encoder on CPU initially to save VRAM
     conf.model.text_embedder.qwen.mode = "t2v"
     text_embedder = get_text_embedder(
         conf.model.text_embedder,
@@ -557,13 +562,16 @@ def get_T2V_pipeline_with_block_swap(
         text_token_padding=text_token_padding,
         dtype=dtype
     )
-    if not offload:
+    # Keep text encoder on CPU when block swapping - it will be loaded on-demand during generation
+    if not offload and not enable_block_swap:
         text_embedder = text_embedder.to(device=device_map["text_embedder"])
 
     # Build VAE
+    # For block swap, always keep VAE on CPU initially to save VRAM
     vae = build_vae(conf.model.vae, dtype=dtype)
     vae = vae.eval()
-    if not offload:
+    # Keep VAE on CPU when block swapping - it will be loaded on-demand during generation
+    if not offload and not enable_block_swap:
         vae = vae.to(device=device_map["vae"], dtype=dtype)
 
     # Build DiT with block swapping

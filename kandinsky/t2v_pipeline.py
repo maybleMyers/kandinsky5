@@ -126,7 +126,9 @@ class Kandinsky5T2VPipeline:
         if expand_prompts:
             transformers.set_seed(seed)
             if self.local_dit_rank == 0:
-                if self.offload:
+                # Load text embedder if using offload or block swap (which keeps models on CPU initially)
+                force_offload = hasattr(self.dit, 'enable_block_swap') and self.dit.enable_block_swap
+                if self.offload or force_offload:
                     self.text_embedder = self.text_embedder.to(self.device_map["text_embedder"])
                 caption = self.expand_prompt(caption)
             if self.world_size > 1:
