@@ -40,8 +40,19 @@ def get_T2V_pipeline(
     attention_engine: str = "auto",
     dtype: torch.dtype = torch.bfloat16,
     use_mixed_weights: bool = False,
+    text_encoder_dtype: torch.dtype = None,
+    vae_dtype: torch.dtype = None,
+    computation_dtype: torch.dtype = None,
 ) -> Kandinsky5T2VPipeline:
     assert resolution in [512]
+
+    # Set component dtypes (fall back to dtype if not specified)
+    if text_encoder_dtype is None:
+        text_encoder_dtype = dtype
+    if vae_dtype is None:
+        vae_dtype = dtype
+    if computation_dtype is None:
+        computation_dtype = dtype
 
     if not isinstance(device_map, dict):
         device_map = {"dit": device_map, "vae": device_map, "text_embedder": device_map}
@@ -106,14 +117,14 @@ def get_T2V_pipeline(
     conf.model.text_embedder.qwen.mode = "t2v"
     text_embedder = get_text_embedder(conf.model.text_embedder, device=device_map["text_embedder"],
                                       quantized_qwen=quantized_qwen, text_token_padding=text_token_padding,
-                                      dtype=dtype)
+                                      dtype=text_encoder_dtype)
     if not offload:
         text_embedder = text_embedder.to(device=device_map["text_embedder"])
 
-    vae = build_vae(conf.model.vae, dtype=dtype)
+    vae = build_vae(conf.model.vae, dtype=vae_dtype)
     vae = vae.eval()
     if not offload:
-        vae = vae.to(device=device_map["vae"], dtype=dtype)
+        vae = vae.to(device=device_map["vae"], dtype=vae_dtype)
 
     dit = get_dit(conf.model.dit_params)
 
@@ -131,7 +142,7 @@ def get_T2V_pipeline(
         # Preserve original weight dtypes for mixed precision
         print("Using mixed weights mode - preserving original weight dtypes (fp32 for critical layers)")
     else:
-        state_dict = {k: v.to(dtype) if v.dtype in [torch.float32, torch.float16, torch.bfloat16] else v
+        state_dict = {k: v.to(computation_dtype) if v.dtype in [torch.float32, torch.float16, torch.bfloat16] else v
                       for k, v in state_dict.items()}
     dit.load_state_dict(state_dict, assign=True)
 
@@ -140,7 +151,7 @@ def get_T2V_pipeline(
             # For mixed weights, move to device without dtype conversion
             dit = dit.to(device_map["dit"])
         else:
-            dit = dit.to(device_map["dit"], dtype=dtype)
+            dit = dit.to(device_map["dit"], dtype=computation_dtype)
 
     if world_size > 1:
         dit = parallelize_dit(dit, device_mesh["tensor_parallel"])
@@ -172,7 +183,18 @@ def get_I2V_pipeline(
     attention_engine: str = "auto",
     dtype: torch.dtype = torch.bfloat16,
     use_mixed_weights: bool = False,
+    text_encoder_dtype: torch.dtype = None,
+    vae_dtype: torch.dtype = None,
+    computation_dtype: torch.dtype = None,
 ) -> Kandinsky5T2VPipeline:
+    # Set component dtypes (fall back to dtype if not specified)
+    if text_encoder_dtype is None:
+        text_encoder_dtype = dtype
+    if vae_dtype is None:
+        vae_dtype = dtype
+    if computation_dtype is None:
+        computation_dtype = dtype
+
     if not isinstance(device_map, dict):
         device_map = {"dit": device_map, "vae": device_map, "text_embedder": device_map}
 
@@ -236,14 +258,14 @@ def get_I2V_pipeline(
     conf.model.text_embedder.qwen.mode = "i2v"
     text_embedder = get_text_embedder(conf.model.text_embedder, device=device_map["text_embedder"],
                                       quantized_qwen=quantized_qwen, text_token_padding=text_token_padding,
-                                      dtype=dtype)
+                                      dtype=text_encoder_dtype)
     if not offload:
         text_embedder = text_embedder.to(device=device_map["text_embedder"])
 
-    vae = build_vae(conf.model.vae, dtype=dtype)
+    vae = build_vae(conf.model.vae, dtype=vae_dtype)
     vae = vae.eval()
     if not offload:
-        vae = vae.to(device=device_map["vae"], dtype=dtype)
+        vae = vae.to(device=device_map["vae"], dtype=vae_dtype)
 
     dit = get_dit(conf.model.dit_params)
 
@@ -261,7 +283,7 @@ def get_I2V_pipeline(
         # Preserve original weight dtypes for mixed precision
         print("Using mixed weights mode - preserving original weight dtypes (fp32 for critical layers)")
     else:
-        state_dict = {k: v.to(dtype) if v.dtype in [torch.float32, torch.float16, torch.bfloat16] else v
+        state_dict = {k: v.to(computation_dtype) if v.dtype in [torch.float32, torch.float16, torch.bfloat16] else v
                       for k, v in state_dict.items()}
     dit.load_state_dict(state_dict, assign=True)
 
@@ -270,7 +292,7 @@ def get_I2V_pipeline(
             # For mixed weights, move to device without dtype conversion
             dit = dit.to(device_map["dit"])
         else:
-            dit = dit.to(device_map["dit"], dtype=dtype)
+            dit = dit.to(device_map["dit"], dtype=computation_dtype)
 
     if world_size > 1:
         dit = parallelize_dit(dit, device_mesh["tensor_parallel"])
@@ -367,6 +389,9 @@ def get_I2V_pipeline_with_block_swap(
     enable_block_swap: bool = True,
     dtype: torch.dtype = torch.bfloat16,
     use_mixed_weights: bool = False,
+    text_encoder_dtype: torch.dtype = None,
+    vae_dtype: torch.dtype = None,
+    computation_dtype: torch.dtype = None,
 ) -> Kandinsky5I2VPipeline:
     """
     Get I2V pipeline with block swapping support for large models (e.g., 20B).
@@ -392,6 +417,14 @@ def get_I2V_pipeline_with_block_swap(
     Returns:
         Kandinsky5I2VPipeline with block-swapping enabled DiT
     """
+    # Set component dtypes (fall back to dtype if not specified)
+    if text_encoder_dtype is None:
+        text_encoder_dtype = dtype
+    if vae_dtype is None:
+        vae_dtype = dtype
+    if computation_dtype is None:
+        computation_dtype = dtype
+
     if not isinstance(device_map, dict):
         device_map = {"dit": device_map, "vae": device_map, "text_embedder": device_map}
 
@@ -437,7 +470,7 @@ def get_I2V_pipeline_with_block_swap(
         device="cpu" if enable_block_swap else device_map["text_embedder"],
         quantized_qwen=quantized_qwen,
         text_token_padding=text_token_padding,
-        dtype=dtype
+        dtype=text_encoder_dtype
     )
     # Move to GPU only if not using offload or block swap
     if not offload and not enable_block_swap:
@@ -445,11 +478,11 @@ def get_I2V_pipeline_with_block_swap(
 
     # Build VAE
     # For block swap, VAE is built on CPU by default
-    vae = build_vae(conf.model.vae, dtype=dtype)
+    vae = build_vae(conf.model.vae, dtype=vae_dtype)
     vae = vae.eval()
     # Move to GPU only if not using offload or block swap
     if not offload and not enable_block_swap:
-        vae = vae.to(device=device_map["vae"], dtype=dtype)
+        vae = vae.to(device=device_map["vae"], dtype=vae_dtype)
 
     # Build DiT with block swapping
     print(f"Building DiT with block swapping: enabled={enable_block_swap}, blocks_in_memory={blocks_in_memory}")
@@ -476,7 +509,7 @@ def get_I2V_pipeline_with_block_swap(
         # Preserve original weight dtypes for mixed precision
         print("Using mixed weights mode - preserving original weight dtypes (fp32 for critical layers)")
     else:
-        state_dict = {k: v.to(dtype) if v.dtype in [torch.float32, torch.float16, torch.bfloat16] else v
+        state_dict = {k: v.to(computation_dtype) if v.dtype in [torch.float32, torch.float16, torch.bfloat16] else v
                       for k, v in state_dict.items()}
     dit.load_state_dict(state_dict, assign=True)
 
@@ -487,7 +520,7 @@ def get_I2V_pipeline_with_block_swap(
             # For mixed weights, move to device without dtype conversion
             dit = dit.to(device_map["dit"])
         else:
-            dit = dit.to(device_map["dit"], dtype=dtype)
+            dit = dit.to(device_map["dit"], dtype=computation_dtype)
 
     if world_size > 1:
         if enable_block_swap:
@@ -525,6 +558,9 @@ def get_T2V_pipeline_with_block_swap(
     enable_block_swap: bool = True,
     dtype: torch.dtype = torch.bfloat16,
     use_mixed_weights: bool = False,
+    text_encoder_dtype: torch.dtype = None,
+    vae_dtype: torch.dtype = None,
+    computation_dtype: torch.dtype = None,
 ) -> Kandinsky5T2VPipeline:
     """
     Get T2V pipeline with block swapping support for large models (e.g., 20B).
@@ -552,6 +588,14 @@ def get_T2V_pipeline_with_block_swap(
         Kandinsky5T2VPipeline with block-swapping enabled DiT
     """
     assert resolution in [512]
+
+    # Set component dtypes (fall back to dtype if not specified)
+    if text_encoder_dtype is None:
+        text_encoder_dtype = dtype
+    if vae_dtype is None:
+        vae_dtype = dtype
+    if computation_dtype is None:
+        computation_dtype = dtype
 
     if not isinstance(device_map, dict):
         device_map = {"dit": device_map, "vae": device_map, "text_embedder": device_map}
@@ -592,7 +636,7 @@ def get_T2V_pipeline_with_block_swap(
         device="cpu" if enable_block_swap else device_map["text_embedder"],
         quantized_qwen=quantized_qwen,
         text_token_padding=text_token_padding,
-        dtype=dtype
+        dtype=text_encoder_dtype
     )
     # Move to GPU only if not using offload or block swap
     if not offload and not enable_block_swap:
@@ -600,11 +644,11 @@ def get_T2V_pipeline_with_block_swap(
 
     # Build VAE
     # For block swap, VAE is built on CPU by default
-    vae = build_vae(conf.model.vae, dtype=dtype)
+    vae = build_vae(conf.model.vae, dtype=vae_dtype)
     vae = vae.eval()
     # Move to GPU only if not using offload or block swap
     if not offload and not enable_block_swap:
-        vae = vae.to(device=device_map["vae"], dtype=dtype)
+        vae = vae.to(device=device_map["vae"], dtype=vae_dtype)
 
     # Build DiT with block swapping
     print(f"Building DiT with block swapping: enabled={enable_block_swap}, blocks_in_memory={blocks_in_memory}")
@@ -631,7 +675,7 @@ def get_T2V_pipeline_with_block_swap(
         # Preserve original weight dtypes for mixed precision
         print("Using mixed weights mode - preserving original weight dtypes (fp32 for critical layers)")
     else:
-        state_dict = {k: v.to(dtype) if v.dtype in [torch.float32, torch.float16, torch.bfloat16] else v
+        state_dict = {k: v.to(computation_dtype) if v.dtype in [torch.float32, torch.float16, torch.bfloat16] else v
                       for k, v in state_dict.items()}
     dit.load_state_dict(state_dict, assign=True)
 
@@ -642,7 +686,7 @@ def get_T2V_pipeline_with_block_swap(
             # For mixed weights, move to device without dtype conversion
             dit = dit.to(device_map["dit"])
         else:
-            dit = dit.to(device_map["dit"], dtype=dtype)
+            dit = dit.to(device_map["dit"], dtype=computation_dtype)
 
     if world_size > 1:
         if enable_block_swap:
