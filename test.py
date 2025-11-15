@@ -5,7 +5,7 @@ import logging
 
 import torch
 
-from kandinsky import get_T2V_pipeline, get_I2V_pipeline, get_I2V_pipeline_with_block_swap
+from kandinsky import get_T2V_pipeline, get_I2V_pipeline, get_I2V_pipeline_with_block_swap, get_T2V_pipeline_with_block_swap
 
 
 def validate_args(args):
@@ -180,9 +180,13 @@ if __name__ == "__main__":
     }
     model_dtype = dtype_map[args.dtype]
 
-    if "i2v" in args.config:
+    # Determine model type from config filename
+    is_i2v = "i2v" in args.config.lower()
+    is_t2v_pro = "t2v" in args.config.lower() and ("pro" in args.config.lower() or "20b" in args.config.lower())
+
+    if is_i2v:
         if args.enable_block_swap:
-            # Use block swapping pipeline for large models
+            # Use block swapping pipeline for large I2V models
             pipe = get_I2V_pipeline_with_block_swap(
                 device_map={"dit": "cuda:0", "vae": "cuda:0",
                             "text_embedder": "cuda:0"},
@@ -196,7 +200,7 @@ if __name__ == "__main__":
                 dtype=model_dtype,
             )
         else:
-            # Use standard pipeline
+            # Use standard I2V pipeline
             pipe = get_I2V_pipeline(
                 device_map={"dit": "cuda:0", "vae": "cuda:0",
                             "text_embedder": "cuda:0"},
@@ -207,23 +211,40 @@ if __name__ == "__main__":
                 attention_engine=args.attention_engine,
                 dtype=model_dtype,
             )
-    else:
-        pipe = get_T2V_pipeline(
-            device_map={"dit": "cuda:0", "vae": "cuda:0",
-                        "text_embedder": "cuda:0"},
-            conf_path=args.config,
-            offload=args.offload,
-            magcache=args.magcache,
-            quantized_qwen=args.qwen_quantization,
-            attention_engine=args.attention_engine,
-            dtype=model_dtype,
-        )
+    else:  # T2V
+        if is_t2v_pro and args.enable_block_swap:
+            # Use block swapping pipeline for T2V Pro (20B model)
+            pipe = get_T2V_pipeline_with_block_swap(
+                device_map={"dit": "cuda:0", "vae": "cuda:0",
+                            "text_embedder": "cuda:0"},
+                resolution=512,
+                conf_path=args.config,
+                offload=args.offload,
+                magcache=args.magcache,
+                quantized_qwen=args.qwen_quantization,
+                attention_engine=args.attention_engine,
+                blocks_in_memory=args.blocks_in_memory,
+                enable_block_swap=True,
+                dtype=model_dtype,
+            )
+        else:
+            # Use standard T2V pipeline
+            pipe = get_T2V_pipeline(
+                device_map={"dit": "cuda:0", "vae": "cuda:0",
+                            "text_embedder": "cuda:0"},
+                conf_path=args.config,
+                offload=args.offload,
+                magcache=args.magcache,
+                quantized_qwen=args.qwen_quantization,
+                attention_engine=args.attention_engine,
+                dtype=model_dtype,
+            )
 
     if args.output_filename is None:
         args.output_filename = "./" + args.prompt.replace(" ", "_") + ".mp4"
 
     start_time = time.perf_counter()
-    if "i2v" in args.config:
+    if is_i2v:
         x = pipe(args.prompt,
                  image=args.image,
                  time_length=args.video_duration,
@@ -233,7 +254,7 @@ if __name__ == "__main__":
                  expand_prompts=args.expand_prompt,
                  save_path=args.output_filename,
                  seed=args.seed)
-    else:
+    else:  # T2V
         x = pipe(args.prompt,
              time_length=args.video_duration,
              width=args.width,

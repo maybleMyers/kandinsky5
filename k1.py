@@ -89,9 +89,15 @@ def generate_video(
         timestamp = int(time.time())
         output_filename = os.path.join(save_path, f"k1_{mode}_{timestamp}_{current_seed}.mp4")
 
+        # Select config file based on mode
+        if mode == "i2v":
+            config_file = "./configs/config_5s_i2v_pro_20b.yaml"
+        else:  # t2v
+            config_file = "./configs/config_5s_t2v_pro_20b.yaml"
+
         command = [
             sys.executable, "test.py",
-            "--config", "./configs/config_5s_i2v_pro_20b.yaml",
+            "--config", config_file,
             "--prompt", str(prompt),
             "--video_duration", str(video_duration),
             "--sample_steps", str(sample_steps),
@@ -121,6 +127,12 @@ def generate_video(
         if enable_block_swap:
             command.append("--enable_block_swap")
             command.extend(["--blocks_in_memory", str(int(blocks_in_memory))])
+
+        # Print the command for debugging/transparency
+        print("\n" + "="*80)
+        print(f"LAUNCHING COMMAND (Batch {i+1}/{batch_size}):")
+        print(" ".join(command))
+        print("="*80 + "\n")
 
         try:
             start_time = time.perf_counter()
