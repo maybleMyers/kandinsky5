@@ -66,6 +66,9 @@ def generate_video(
     enable_block_swap: bool,
     blocks_in_memory: int,
     dtype_str: str,
+    text_encoder_dtype_str: str,
+    vae_dtype_str: str,
+    computation_dtype_str: str,
     save_path: str,
     batch_size: int,
 ) -> Generator[Tuple[List[Tuple[str, str]], str, str], None, None]:
@@ -108,6 +111,13 @@ def generate_video(
             "--output_filename", output_filename,
             "--dtype", dtype_str,
         ]
+
+        if text_encoder_dtype_str:
+            command.extend(["--text_encoder_dtype", text_encoder_dtype_str])
+        if vae_dtype_str:
+            command.extend(["--vae_dtype", vae_dtype_str])
+        if computation_dtype_str:
+            command.extend(["--computation_dtype", computation_dtype_str])
 
         if use_mixed_weights:
             command.append("--use_mixed_weights")
@@ -197,6 +207,9 @@ def generate_video(
                     "enable_block_swap": enable_block_swap,
                     "blocks_in_memory": int(blocks_in_memory) if enable_block_swap else None,
                     "dtype": dtype_str,
+                    "text_encoder_dtype": text_encoder_dtype_str if text_encoder_dtype_str else None,
+                    "vae_dtype": vae_dtype_str if vae_dtype_str else None,
+                    "computation_dtype": computation_dtype_str if computation_dtype_str else None,
                     "config_file": config_file,
                 }
                 try:
@@ -425,7 +438,13 @@ def create_interface():
                     enable_block_swap = gr.Checkbox(label="Enable Block Swap", value=True, info="Required for 24GB GPUs")
                     blocks_in_memory = gr.Slider(minimum=1, maximum=60, step=1, label="Blocks in Memory", value=2, info="Number of transformer blocks to keep in GPU memory")
                 with gr.Row():
-                    dtype_select = gr.Radio(choices=["bfloat16", "float16", "float32"], label="Data Type", value="bfloat16")
+                    dtype_select = gr.Radio(choices=["bfloat16", "float16", "float32"], label="Default Data Type", value="bfloat16", info="Used for all components if specific dtypes not set")
+                with gr.Accordion("Advanced: Component-Specific Data Types", open=False):
+                    gr.Markdown("Override dtypes for individual components. Leave empty to use default dtype.")
+                    with gr.Row():
+                        text_encoder_dtype_select = gr.Dropdown(choices=["", "bfloat16", "float16", "float32"], label="Text Encoder dtype", value="", info="Empty = use default")
+                        vae_dtype_select = gr.Dropdown(choices=["", "bfloat16", "float16", "float32"], label="VAE dtype", value="", info="Empty = use default")
+                        computation_dtype_select = gr.Dropdown(choices=["", "bfloat16", "float16", "float32"], label="Computation dtype", value="", info="Empty = use default")
                 save_path = gr.Textbox(label="Save Path", value="outputs")
 
             random_seed_btn.click(
@@ -440,6 +459,7 @@ def create_interface():
                     width, height, video_duration, sample_steps,
                     guidance_weight, scheduler_scale, seed,
                     use_mixed_weights, enable_block_swap, blocks_in_memory, dtype_select,
+                    text_encoder_dtype_select, vae_dtype_select, computation_dtype_select,
                     save_path, batch_size
                 ],
                 outputs=[output, batch_progress, progress_text]
