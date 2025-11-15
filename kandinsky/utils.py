@@ -456,7 +456,9 @@ def get_I2V_pipeline_with_block_swap(
                   for k, v in state_dict.items()}
     dit.load_state_dict(state_dict, assign=True)
 
-    if not offload:
+    # Keep DiT on CPU when using offload OR block swap
+    # For block swap, DiT will be loaded on-demand during generation
+    if not offload and not enable_block_swap:
         dit = dit.to(device_map["dit"], dtype=dtype)
 
     if world_size > 1:
@@ -599,7 +601,9 @@ def get_T2V_pipeline_with_block_swap(
                   for k, v in state_dict.items()}
     dit.load_state_dict(state_dict, assign=True)
 
-    if not offload:
+    # Keep DiT on CPU when using offload OR block swap
+    # For block swap, DiT will be loaded on-demand during generation
+    if not offload and not enable_block_swap:
         dit = dit.to(device_map["dit"], dtype=dtype)
 
     if world_size > 1:
