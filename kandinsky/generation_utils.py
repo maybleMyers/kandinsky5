@@ -2,9 +2,71 @@ import os
 os.environ["TOKENIZERS_PARALLELISM"] = "False"
 
 import torch
-from tqdm import tqdm 
+from tqdm import tqdm
 
 from .models.utils import fast_sta_nabla
+
+def log_vram_usage(stage_name, dit=None, vae=None, text_embedder=None):
+    """Log VRAM usage and model locations for debugging."""
+    if not torch.cuda.is_available():
+        return
+
+    # Get VRAM info
+    allocated = torch.cuda.memory_allocated() / 1024**3
+    reserved = torch.cuda.memory_reserved() / 1024**3
+    free, total = torch.cuda.mem_get_info()
+    free_gb = free / 1024**3
+    total_gb = total / 1024**3
+
+    print(f"\n{'='*80}")
+    print(f"VRAM USAGE AT: {stage_name}")
+    print(f"{'='*80}")
+    print(f"Allocated: {allocated:.2f} GB")
+    print(f"Reserved:  {reserved:.2f} GB")
+    print(f"Free:      {free_gb:.2f} GB / {total_gb:.2f} GB")
+
+    # Check model locations
+    print(f"\nModel Locations:")
+
+    if dit is not None:
+        if hasattr(dit, 'enable_block_swap') and dit.enable_block_swap:
+            # Check DiT non-block components
+            dit_device = next(dit.time_embeddings.parameters()).device
+            print(f"  DiT (non-block components): {dit_device}")
+            print(f"  DiT blocks in GPU: {len(dit._blocks_on_gpu) if hasattr(dit, '_blocks_on_gpu') else 'N/A'}")
+            print(f"  DiT total blocks: {dit.num_visual_blocks if hasattr(dit, 'num_visual_blocks') else 'N/A'}")
+        else:
+            try:
+                dit_device = next(dit.parameters()).device
+                print(f"  DiT: {dit_device}")
+            except:
+                print(f"  DiT: Unable to determine device")
+
+    if vae is not None:
+        try:
+            vae_device = next(vae.parameters()).device
+            print(f"  VAE: {vae_device}")
+        except:
+            print(f"  VAE: Unable to determine device")
+
+    if text_embedder is not None:
+        try:
+            # Check if text embedder models still exist
+            if hasattr(text_embedder, 'embedder') and hasattr(text_embedder.embedder, 'model'):
+                qwen_device = next(text_embedder.embedder.model.parameters()).device
+                print(f"  Text Encoder (Qwen): {qwen_device}")
+            else:
+                print(f"  Text Encoder (Qwen): Deleted/Not loaded")
+
+            if hasattr(text_embedder, 'clip_embedder') and hasattr(text_embedder.clip_embedder, 'model'):
+                clip_device = next(text_embedder.clip_embedder.model.parameters()).device
+                print(f"  Text Encoder (CLIP): {clip_device}")
+            else:
+                print(f"  Text Encoder (CLIP): Deleted/Not loaded")
+        except:
+            print(f"  Text Encoder: Unable to determine device")
+
+    print(f"{'='*80}\n")
 
 
 def get_sparse_params(conf, batch_embeds, device):
@@ -209,6 +271,9 @@ def generate_sample(
     text_rope_pos = torch.arange(text_cu_seqlens)
     null_text_rope_pos = torch.arange(null_text_cu_seqlens)
 
+    # Log VRAM before DiT inference
+    log_vram_usage("BEFORE DiT INFERENCE (T2V)", dit=dit, vae=vae, text_embedder=None)
+
     if offload or force_offload:
         dit.to(device, non_blocking=True)
 
@@ -243,6 +308,9 @@ def generate_sample(
         dit = dit.to('cpu', non_blocking=True)
     torch.cuda.empty_cache()
 
+    # Log VRAM after DiT offload, before VAE decode
+    log_vram_usage("AFTER DiT OFFLOAD, BEFORE VAE DECODE (T2V)", dit=dit, vae=vae, text_embedder=None)
+
     if offload or force_offload:
         vae = vae.to(vae_device, non_blocking=True)
 
@@ -259,6 +327,9 @@ def generate_sample(
             images = (images / vae.config.scaling_factor).permute(0, 4, 1, 2, 3)
             images = vae.decode(images).sample
             images = ((images.clamp(-1.0, 1.0) + 1.0) * 127.5).to(torch.uint8)
+
+    # Log VRAM after VAE decode, before VAE offload
+    log_vram_usage("AFTER VAE DECODE, BEFORE OFFLOAD (T2V)", dit=dit, vae=vae, text_embedder=None)
 
     # Offload VAE after decode to free VRAM
     if offload or force_offload:
@@ -329,6 +400,9 @@ def generate_sample_i2v(
     text_rope_pos = torch.arange(text_cu_seqlens)
     null_text_rope_pos = torch.arange(null_text_cu_seqlens)
 
+    # Log VRAM before DiT inference
+    log_vram_usage("BEFORE DiT INFERENCE (I2V)", dit=dit, vae=vae, text_embedder=None)
+
     if offload:
         dit.to(device, non_blocking=True)
 
@@ -366,6 +440,9 @@ def generate_sample_i2v(
         dit = dit.to('cpu', non_blocking=True)
     torch.cuda.empty_cache()
 
+    # Log VRAM after DiT offload, before VAE decode
+    log_vram_usage("AFTER DiT OFFLOAD, BEFORE VAE DECODE (I2V)", dit=dit, vae=vae, text_embedder=None)
+
     if offload or force_offload:
         vae = vae.to(vae_device, non_blocking=True)
 
@@ -382,6 +459,9 @@ def generate_sample_i2v(
             images = (images / vae.config.scaling_factor).permute(0, 4, 1, 2, 3)
             images = vae.decode(images).sample
             images = ((images.clamp(-1.0, 1.0) + 1.0) * 127.5).to(torch.uint8)
+
+    # Log VRAM after VAE decode, before VAE offload
+    log_vram_usage("AFTER VAE DECODE, BEFORE OFFLOAD (I2V)", dit=dit, vae=vae, text_embedder=None)
 
     # Offload VAE after decode to free VRAM
     if offload or force_offload:
