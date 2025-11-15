@@ -119,14 +119,6 @@ class Kandinsky5T2VPipeline:
 
             seed = seed.item()
 
-        if self.resolution != 512:
-            raise NotImplementedError("Only 512 resolution is available for now")
-
-        if (height, width) not in self.RESOLUTIONS[self.resolution]:
-            raise ValueError(
-                f"Wrong height, width pair. Available (height, width) are: {self.RESOLUTIONS[self.resolution]}"
-            )
-
         # PREPARATION
         num_frames = 1 if time_length == 0 else time_length * 24 // 4 + 1
 
@@ -134,7 +126,9 @@ class Kandinsky5T2VPipeline:
         if expand_prompts:
             transformers.set_seed(seed)
             if self.local_dit_rank == 0:
-                if self.offload:
+                # Load text embedder if using offload or block swap (which keeps models on CPU initially)
+                force_offload = hasattr(self.dit, 'enable_block_swap') and self.dit.enable_block_swap
+                if self.offload or force_offload:
                     self.text_embedder = self.text_embedder.to(self.device_map["text_embedder"])
                 caption = self.expand_prompt(caption)
             if self.world_size > 1:
@@ -166,7 +160,12 @@ class Kandinsky5T2VPipeline:
             offload=self.offload,
             force_offload=force_offload
         )
+
+        # Delete text encoder to free RAM - it's no longer needed
+        del self.text_embedder
         torch.cuda.empty_cache()
+        import gc
+        gc.collect()
 
         # RESULTS
         if self.local_dit_rank == 0:

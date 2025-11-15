@@ -410,21 +410,25 @@ def get_I2V_pipeline_with_block_swap(
     #     blocks_in_memory = conf.block_swap.get('blocks_in_memory', blocks_in_memory)
 
     # Build text embedder
+    # For block swap, always keep text encoder on CPU initially to save VRAM
     conf.model.text_embedder.qwen.mode = "i2v"
     text_embedder = get_text_embedder(
         conf.model.text_embedder,
-        device=device_map["text_embedder"],
+        device="cpu" if enable_block_swap else device_map["text_embedder"],
         quantized_qwen=quantized_qwen,
         text_token_padding=text_token_padding,
         dtype=dtype
     )
-    if not offload:
+    # Move to GPU only if not using offload or block swap
+    if not offload and not enable_block_swap:
         text_embedder = text_embedder.to(device=device_map["text_embedder"])
 
     # Build VAE
+    # For block swap, VAE is built on CPU by default
     vae = build_vae(conf.model.vae, dtype=dtype)
     vae = vae.eval()
-    if not offload:
+    # Move to GPU only if not using offload or block swap
+    if not offload and not enable_block_swap:
         vae = vae.to(device=device_map["vae"], dtype=dtype)
 
     # Build DiT with block swapping
@@ -452,7 +456,9 @@ def get_I2V_pipeline_with_block_swap(
                   for k, v in state_dict.items()}
     dit.load_state_dict(state_dict, assign=True)
 
-    if not offload:
+    # Keep DiT on CPU when using offload OR block swap
+    # For block swap, DiT will be loaded on-demand during generation
+    if not offload and not enable_block_swap:
         dit = dit.to(device_map["dit"], dtype=dtype)
 
     if world_size > 1:
@@ -549,21 +555,25 @@ def get_T2V_pipeline_with_block_swap(
     conf.model.dit_params.attention_engine = attention_engine
 
     # Build text embedder - T2V mode
+    # For block swap, always keep text encoder on CPU initially to save VRAM
     conf.model.text_embedder.qwen.mode = "t2v"
     text_embedder = get_text_embedder(
         conf.model.text_embedder,
-        device=device_map["text_embedder"],
+        device="cpu" if enable_block_swap else device_map["text_embedder"],
         quantized_qwen=quantized_qwen,
         text_token_padding=text_token_padding,
         dtype=dtype
     )
-    if not offload:
+    # Move to GPU only if not using offload or block swap
+    if not offload and not enable_block_swap:
         text_embedder = text_embedder.to(device=device_map["text_embedder"])
 
     # Build VAE
+    # For block swap, VAE is built on CPU by default
     vae = build_vae(conf.model.vae, dtype=dtype)
     vae = vae.eval()
-    if not offload:
+    # Move to GPU only if not using offload or block swap
+    if not offload and not enable_block_swap:
         vae = vae.to(device=device_map["vae"], dtype=dtype)
 
     # Build DiT with block swapping
@@ -591,7 +601,9 @@ def get_T2V_pipeline_with_block_swap(
                   for k, v in state_dict.items()}
     dit.load_state_dict(state_dict, assign=True)
 
-    if not offload:
+    # Keep DiT on CPU when using offload OR block swap
+    # For block swap, DiT will be loaded on-demand during generation
+    if not offload and not enable_block_swap:
         dit = dit.to(device_map["dit"], dtype=dtype)
 
     if world_size > 1:

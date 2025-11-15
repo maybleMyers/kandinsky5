@@ -15,6 +15,68 @@ torch._dynamo.config.verbose = True
 
 MAX_AREA = 768*512
 
+def log_vram_usage(stage_name, dit=None, vae=None, text_embedder=None):
+    """Log VRAM usage and model locations for debugging."""
+    if not torch.cuda.is_available():
+        return
+
+    # Get VRAM info
+    allocated = torch.cuda.memory_allocated() / 1024**3
+    reserved = torch.cuda.memory_reserved() / 1024**3
+    free, total = torch.cuda.mem_get_info()
+    free_gb = free / 1024**3
+    total_gb = total / 1024**3
+
+    print(f"\n{'='*80}")
+    print(f"VRAM USAGE AT: {stage_name}")
+    print(f"{'='*80}")
+    print(f"Allocated: {allocated:.2f} GB")
+    print(f"Reserved:  {reserved:.2f} GB")
+    print(f"Free:      {free_gb:.2f} GB / {total_gb:.2f} GB")
+
+    # Check model locations
+    print(f"\nModel Locations:")
+
+    if dit is not None:
+        if hasattr(dit, 'enable_block_swap') and dit.enable_block_swap:
+            # Check DiT non-block components
+            dit_device = next(dit.time_embeddings.parameters()).device
+            print(f"  DiT (non-block components): {dit_device}")
+            print(f"  DiT blocks in GPU: {len(dit._blocks_on_gpu) if hasattr(dit, '_blocks_on_gpu') else 'N/A'}")
+            print(f"  DiT total blocks: {dit.num_visual_blocks if hasattr(dit, 'num_visual_blocks') else 'N/A'}")
+        else:
+            try:
+                dit_device = next(dit.parameters()).device
+                print(f"  DiT: {dit_device}")
+            except:
+                print(f"  DiT: Unable to determine device")
+
+    if vae is not None:
+        try:
+            vae_device = next(vae.parameters()).device
+            print(f"  VAE: {vae_device}")
+        except:
+            print(f"  VAE: Unable to determine device")
+
+    if text_embedder is not None:
+        try:
+            # Check if text embedder models still exist
+            if hasattr(text_embedder, 'embedder') and hasattr(text_embedder.embedder, 'model'):
+                qwen_device = next(text_embedder.embedder.model.parameters()).device
+                print(f"  Text Encoder (Qwen): {qwen_device}")
+            else:
+                print(f"  Text Encoder (Qwen): Deleted/Not loaded")
+
+            if hasattr(text_embedder, 'clip_embedder') and hasattr(text_embedder.clip_embedder, 'model'):
+                clip_device = next(text_embedder.clip_embedder.model.parameters()).device
+                print(f"  Text Encoder (CLIP): {clip_device}")
+            else:
+                print(f"  Text Encoder (CLIP): Deleted/Not loaded")
+        except:
+            print(f"  Text Encoder: Unable to determine device")
+
+    print(f"{'='*80}\n")
+
 def resize_image(image, max_area, alignment=16):
     """
     Resize image to fit within max_area while maintaining aspect ratio.
@@ -130,17 +192,34 @@ class Kandinsky5I2VPipeline:
             attention_type = 'flash'  # Default to flash if attention config is missing
         alignment = 128 if attention_type == 'nabla' else 16
 
-        if self.offload:
+        # Load VAE for encoding if using offload or block swap
+        force_offload = hasattr(self.dit, 'enable_block_swap') and self.dit.enable_block_swap
+
+        # Log VRAM before VAE encoding
+        log_vram_usage("BEFORE VAE ENCODE (I2V)", dit=self.dit, vae=self.vae, text_embedder=self.text_embedder)
+
+        if self.offload or force_offload:
             self.vae = self.vae.to(self.device_map["vae"], non_blocking=True)
+
         image, image_lat, k = get_first_frame_from_image(image, self.vae, self.device_map["vae"], alignment=alignment)
-        if self.offload:
+
+        # Log VRAM after VAE encoding, before offload
+        log_vram_usage("AFTER VAE ENCODE, BEFORE OFFLOAD (I2V)", dit=self.dit, vae=self.vae, text_embedder=self.text_embedder)
+
+        if self.offload or force_offload:
             self.vae = self.vae.to("cpu", non_blocking=True)
+            torch.cuda.empty_cache()
+
+        # Log VRAM after VAE offload
+        log_vram_usage("AFTER VAE OFFLOAD (I2V)", dit=self.dit, vae=self.vae, text_embedder=self.text_embedder)
 
         caption = text
         if expand_prompts:
             transformers.set_seed(seed)
             if self.local_dit_rank == 0:
-                if self.offload:
+                # Load text embedder if using offload or block swap (which keeps models on CPU initially)
+                force_offload = hasattr(self.dit, 'enable_block_swap') and self.dit.enable_block_swap
+                if self.offload or force_offload:
                     self.text_embedder = self.text_embedder.to(self.device_map["text_embedder"])
                 caption = self.text_embedder.embedder.expand_text_prompt(caption, image, device=self.device_map["text_embedder"])
             if self.world_size > 1:
@@ -173,7 +252,12 @@ class Kandinsky5I2VPipeline:
             offload=self.offload,
             force_offload=force_offload
         )
+
+        # Delete text encoder to free RAM - it's no longer needed
+        del self.text_embedder
         torch.cuda.empty_cache()
+        import gc
+        gc.collect()
 
         if k > 16:
             h, w = images.shape[-2:]

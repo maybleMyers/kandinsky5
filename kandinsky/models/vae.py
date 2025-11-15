@@ -5,6 +5,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from tqdm import tqdm
 
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.utils.accelerate_utils import apply_forward_hook
@@ -968,24 +969,26 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
         blend_width = self.tile_sample_min_width - self.tile_sample_stride_width
 
         rows = []
-        for i in range(
-            0, height - tile_latent_min_height + 1, tile_latent_stride_height
-        ):
-            row = []
-            for j in range(
-                0, width - tile_latent_min_width + 1, tile_latent_stride_width
-            ):
-                tile = z[
-                    :,
-                    :,
-                    :,
-                    i : i + tile_latent_min_height,
-                    j : j + tile_latent_min_width,
-                ]
-                tile = self.post_quant_conv(tile)
-                decoded = self.decoder(tile).clone()
-                row.append(decoded)
-            rows.append(row)
+        i_range = list(range(0, height - tile_latent_min_height + 1, tile_latent_stride_height))
+        j_range = list(range(0, width - tile_latent_min_width + 1, tile_latent_stride_width))
+        total_tiles = len(i_range) * len(j_range)
+
+        with tqdm(total=total_tiles, desc="VAE spatial tiling", unit="tile") as pbar:
+            for i in i_range:
+                row = []
+                for j in j_range:
+                    tile = z[
+                        :,
+                        :,
+                        :,
+                        i : i + tile_latent_min_height,
+                        j : j + tile_latent_min_width,
+                    ]
+                    tile = self.post_quant_conv(tile)
+                    decoded = self.decoder(tile).clone()
+                    row.append(decoded)
+                    pbar.update(1)
+                rows.append(row)
 
         result_rows = []
         for i, row in enumerate(rows):
@@ -1085,11 +1088,13 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
         )
 
         row = []
-        for i in range(
+        temporal_chunks = list(range(
             0,
             num_frames - tile_latent_min_num_frames + 1,
             tile_latent_stride_num_frames,
-        ):
+        ))
+
+        for i in tqdm(temporal_chunks, desc="VAE temporal decoding", unit="chunk"):
             tile = z[:, :, i : i + tile_latent_min_num_frames + 1, :, :]
             if self.use_tiling and (
                 tile.shape[-1] > tile_latent_min_width

@@ -59,14 +59,12 @@ def parse_args():
         "--width",
         type=int,
         default=768,
-        choices=[768, 512],
         help="Width of the video in pixels"
     )
     parser.add_argument(
         "--height",
         type=int,
         default=512,
-        choices=[768, 512],
         help="Height of the video in pixels"
     )
     parser.add_argument(
@@ -163,7 +161,6 @@ def parse_args():
 if __name__ == "__main__":
     disable_warnings()
     args = parse_args()
-    validate_args(args)
 
     # Convert string dtype to torch dtype
     dtype_map = {
