@@ -39,6 +39,7 @@ def get_T2V_pipeline(
     text_token_padding: bool = True,
     attention_engine: str = "auto",
     dtype: torch.dtype = torch.bfloat16,
+    use_mixed_weights: bool = False,
 ) -> Kandinsky5T2VPipeline:
     assert resolution in [512]
 
@@ -125,13 +126,21 @@ def get_T2V_pipeline(
         set_magcache_params(dit, mag_ratios, num_steps, no_cfg)
 
     state_dict = load_file(conf.model.checkpoint_path)
-    # Convert state dict to specified dtype
-    state_dict = {k: v.to(dtype) if v.dtype in [torch.float32, torch.float16, torch.bfloat16] else v
-                  for k, v in state_dict.items()}
+    # Convert state dict to specified dtype (unless using mixed weights)
+    if use_mixed_weights:
+        # Preserve original weight dtypes for mixed precision
+        print("Using mixed weights mode - preserving original weight dtypes (fp32 for critical layers)")
+    else:
+        state_dict = {k: v.to(dtype) if v.dtype in [torch.float32, torch.float16, torch.bfloat16] else v
+                      for k, v in state_dict.items()}
     dit.load_state_dict(state_dict, assign=True)
 
     if not offload:
-        dit = dit.to(device_map["dit"], dtype=dtype)
+        if use_mixed_weights:
+            # For mixed weights, move to device without dtype conversion
+            dit = dit.to(device_map["dit"])
+        else:
+            dit = dit.to(device_map["dit"], dtype=dtype)
 
     if world_size > 1:
         dit = parallelize_dit(dit, device_mesh["tensor_parallel"])
@@ -162,6 +171,7 @@ def get_I2V_pipeline(
     text_token_padding: bool = True,
     attention_engine: str = "auto",
     dtype: torch.dtype = torch.bfloat16,
+    use_mixed_weights: bool = False,
 ) -> Kandinsky5T2VPipeline:
     if not isinstance(device_map, dict):
         device_map = {"dit": device_map, "vae": device_map, "text_embedder": device_map}
@@ -246,13 +256,21 @@ def get_I2V_pipeline(
         set_magcache_params(dit, mag_ratios, num_steps, no_cfg)
 
     state_dict = load_file(conf.model.checkpoint_path)
-    # Convert state dict to specified dtype
-    state_dict = {k: v.to(dtype) if v.dtype in [torch.float32, torch.float16, torch.bfloat16] else v
-                  for k, v in state_dict.items()}
+    # Convert state dict to specified dtype (unless using mixed weights)
+    if use_mixed_weights:
+        # Preserve original weight dtypes for mixed precision
+        print("Using mixed weights mode - preserving original weight dtypes (fp32 for critical layers)")
+    else:
+        state_dict = {k: v.to(dtype) if v.dtype in [torch.float32, torch.float16, torch.bfloat16] else v
+                      for k, v in state_dict.items()}
     dit.load_state_dict(state_dict, assign=True)
 
     if not offload:
-        dit = dit.to(device_map["dit"], dtype=dtype)
+        if use_mixed_weights:
+            # For mixed weights, move to device without dtype conversion
+            dit = dit.to(device_map["dit"])
+        else:
+            dit = dit.to(device_map["dit"], dtype=dtype)
 
     if world_size > 1:
         dit = parallelize_dit(dit, device_mesh["tensor_parallel"])
@@ -348,6 +366,7 @@ def get_I2V_pipeline_with_block_swap(
     blocks_in_memory: int = 4,
     enable_block_swap: bool = True,
     dtype: torch.dtype = torch.bfloat16,
+    use_mixed_weights: bool = False,
 ) -> Kandinsky5I2VPipeline:
     """
     Get I2V pipeline with block swapping support for large models (e.g., 20B).
@@ -368,6 +387,7 @@ def get_I2V_pipeline_with_block_swap(
         blocks_in_memory: Number of transformer blocks to keep in GPU memory
         enable_block_swap: Enable block swapping (set False to disable for debugging)
         dtype: Data type for model weights (default: torch.bfloat16)
+        use_mixed_weights: Preserve original weight dtypes (fp32 for critical layers)
 
     Returns:
         Kandinsky5I2VPipeline with block-swapping enabled DiT
@@ -451,15 +471,23 @@ def get_I2V_pipeline_with_block_swap(
 
     print(f"Loading DiT weights from {conf.model.checkpoint_path}")
     state_dict = load_file(conf.model.checkpoint_path)
-    # Convert state dict to specified dtype
-    state_dict = {k: v.to(dtype) if v.dtype in [torch.float32, torch.float16, torch.bfloat16] else v
-                  for k, v in state_dict.items()}
+    # Convert state dict to specified dtype (unless using mixed weights)
+    if use_mixed_weights:
+        # Preserve original weight dtypes for mixed precision
+        print("Using mixed weights mode - preserving original weight dtypes (fp32 for critical layers)")
+    else:
+        state_dict = {k: v.to(dtype) if v.dtype in [torch.float32, torch.float16, torch.bfloat16] else v
+                      for k, v in state_dict.items()}
     dit.load_state_dict(state_dict, assign=True)
 
     # Keep DiT on CPU when using offload OR block swap
     # For block swap, DiT will be loaded on-demand during generation
     if not offload and not enable_block_swap:
-        dit = dit.to(device_map["dit"], dtype=dtype)
+        if use_mixed_weights:
+            # For mixed weights, move to device without dtype conversion
+            dit = dit.to(device_map["dit"])
+        else:
+            dit = dit.to(device_map["dit"], dtype=dtype)
 
     if world_size > 1:
         if enable_block_swap:
@@ -496,6 +524,7 @@ def get_T2V_pipeline_with_block_swap(
     blocks_in_memory: int = 6,
     enable_block_swap: bool = True,
     dtype: torch.dtype = torch.bfloat16,
+    use_mixed_weights: bool = False,
 ) -> Kandinsky5T2VPipeline:
     """
     Get T2V pipeline with block swapping support for large models (e.g., 20B).
@@ -517,6 +546,7 @@ def get_T2V_pipeline_with_block_swap(
         blocks_in_memory: Number of transformer blocks to keep in GPU memory
         enable_block_swap: Enable block swapping (set False to disable for debugging)
         dtype: Data type for model weights (default: torch.bfloat16)
+        use_mixed_weights: Preserve original weight dtypes (fp32 for critical layers)
 
     Returns:
         Kandinsky5T2VPipeline with block-swapping enabled DiT
@@ -596,15 +626,23 @@ def get_T2V_pipeline_with_block_swap(
 
     print(f"Loading DiT weights from {conf.model.checkpoint_path}")
     state_dict = load_file(conf.model.checkpoint_path)
-    # Convert state dict to specified dtype
-    state_dict = {k: v.to(dtype) if v.dtype in [torch.float32, torch.float16, torch.bfloat16] else v
-                  for k, v in state_dict.items()}
+    # Convert state dict to specified dtype (unless using mixed weights)
+    if use_mixed_weights:
+        # Preserve original weight dtypes for mixed precision
+        print("Using mixed weights mode - preserving original weight dtypes (fp32 for critical layers)")
+    else:
+        state_dict = {k: v.to(dtype) if v.dtype in [torch.float32, torch.float16, torch.bfloat16] else v
+                      for k, v in state_dict.items()}
     dit.load_state_dict(state_dict, assign=True)
 
     # Keep DiT on CPU when using offload OR block swap
     # For block swap, DiT will be loaded on-demand during generation
     if not offload and not enable_block_swap:
-        dit = dit.to(device_map["dit"], dtype=dtype)
+        if use_mixed_weights:
+            # For mixed weights, move to device without dtype conversion
+            dit = dit.to(device_map["dit"])
+        else:
+            dit = dit.to(device_map["dit"], dtype=dtype)
 
     if world_size > 1:
         if enable_block_swap:

@@ -154,6 +154,12 @@ def parse_args():
         choices=["float32", "float16", "bfloat16"],
         help="Data type for model weights (default: bfloat16). Use bfloat16 for best memory efficiency with minimal quality loss."
     )
+    parser.add_argument(
+        "--use_mixed_weights",
+        action='store_true',
+        default=False,
+        help="Use mixed precision weights - preserve fp32 for critical layers (norms, embeddings) while using specified dtype for activations. Prevents dtype conversion errors."
+    )
     args = parser.parse_args()
     return args
 
@@ -188,6 +194,7 @@ if __name__ == "__main__":
                 blocks_in_memory=args.blocks_in_memory,
                 enable_block_swap=True,
                 dtype=model_dtype,
+                use_mixed_weights=args.use_mixed_weights,
             )
         else:
             # Use standard I2V pipeline
@@ -200,6 +207,7 @@ if __name__ == "__main__":
                 quantized_qwen=args.qwen_quantization,
                 attention_engine=args.attention_engine,
                 dtype=model_dtype,
+                use_mixed_weights=args.use_mixed_weights,
             )
     else:  # T2V
         if is_t2v_pro and args.enable_block_swap:
@@ -216,6 +224,7 @@ if __name__ == "__main__":
                 blocks_in_memory=args.blocks_in_memory,
                 enable_block_swap=True,
                 dtype=model_dtype,
+                use_mixed_weights=args.use_mixed_weights,
             )
         else:
             # Use standard T2V pipeline
@@ -228,6 +237,7 @@ if __name__ == "__main__":
                 quantized_qwen=args.qwen_quantization,
                 attention_engine=args.attention_engine,
                 dtype=model_dtype,
+                use_mixed_weights=args.use_mixed_weights,
             )
 
     if args.output_filename is None:
