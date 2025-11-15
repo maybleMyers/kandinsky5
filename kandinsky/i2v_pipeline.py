@@ -252,7 +252,12 @@ class Kandinsky5I2VPipeline:
             offload=self.offload,
             force_offload=force_offload
         )
+
+        # Delete text encoder to free RAM - it's no longer needed
+        del self.text_embedder
         torch.cuda.empty_cache()
+        import gc
+        gc.collect()
 
         if k > 16:
             h, w = images.shape[-2:]

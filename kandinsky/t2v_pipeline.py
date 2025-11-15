@@ -160,7 +160,12 @@ class Kandinsky5T2VPipeline:
             offload=self.offload,
             force_offload=force_offload
         )
+
+        # Delete text encoder to free RAM - it's no longer needed
+        del self.text_embedder
         torch.cuda.empty_cache()
+        import gc
+        gc.collect()
 
         # RESULTS
         if self.local_dit_rank == 0:
