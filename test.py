@@ -8,13 +8,6 @@ import torch
 from kandinsky import get_T2V_pipeline, get_I2V_pipeline, get_I2V_pipeline_with_block_swap, get_T2V_pipeline_with_block_swap
 
 
-def validate_args(args):
-    size = (args.width, args.height)
-    supported_sizes = [(512, 512), (512, 768), (768, 512)]
-    if not size in supported_sizes:
-        raise NotImplementedError(
-            f"Provided size of video is not supported: {size}")
-
 
 def disable_warnings():
     warnings.filterwarnings("ignore")
