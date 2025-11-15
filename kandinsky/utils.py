@@ -414,20 +414,20 @@ def get_I2V_pipeline_with_block_swap(
     conf.model.text_embedder.qwen.mode = "i2v"
     text_embedder = get_text_embedder(
         conf.model.text_embedder,
-        device=device_map["text_embedder"],
+        device="cpu" if enable_block_swap else device_map["text_embedder"],
         quantized_qwen=quantized_qwen,
         text_token_padding=text_token_padding,
         dtype=dtype
     )
-    # Keep text encoder on CPU when block swapping - it will be loaded on-demand during generation
+    # Move to GPU only if not using offload or block swap
     if not offload and not enable_block_swap:
         text_embedder = text_embedder.to(device=device_map["text_embedder"])
 
     # Build VAE
-    # For block swap, always keep VAE on CPU initially to save VRAM
+    # For block swap, VAE is built on CPU by default
     vae = build_vae(conf.model.vae, dtype=dtype)
     vae = vae.eval()
-    # Keep VAE on CPU when block swapping - it will be loaded on-demand during generation
+    # Move to GPU only if not using offload or block swap
     if not offload and not enable_block_swap:
         vae = vae.to(device=device_map["vae"], dtype=dtype)
 
@@ -557,20 +557,20 @@ def get_T2V_pipeline_with_block_swap(
     conf.model.text_embedder.qwen.mode = "t2v"
     text_embedder = get_text_embedder(
         conf.model.text_embedder,
-        device=device_map["text_embedder"],
+        device="cpu" if enable_block_swap else device_map["text_embedder"],
         quantized_qwen=quantized_qwen,
         text_token_padding=text_token_padding,
         dtype=dtype
     )
-    # Keep text encoder on CPU when block swapping - it will be loaded on-demand during generation
+    # Move to GPU only if not using offload or block swap
     if not offload and not enable_block_swap:
         text_embedder = text_embedder.to(device=device_map["text_embedder"])
 
     # Build VAE
-    # For block swap, always keep VAE on CPU initially to save VRAM
+    # For block swap, VAE is built on CPU by default
     vae = build_vae(conf.model.vae, dtype=dtype)
     vae = vae.eval()
-    # Keep VAE on CPU when block swapping - it will be loaded on-demand during generation
+    # Move to GPU only if not using offload or block swap
     if not offload and not enable_block_swap:
         vae = vae.to(device=device_map["vae"], dtype=dtype)
 
