@@ -2,8 +2,11 @@ import argparse
 import time
 import warnings
 import logging
+import os
+import tempfile
 
 import torch
+from PIL import Image
 
 from kandinsky import get_T2V_pipeline, get_I2V_pipeline, get_I2V_pipeline_with_block_swap, get_T2V_pipeline_with_block_swap
 
@@ -20,6 +23,56 @@ def disable_warnings():
         guards=False,
         recompiles=False
     )
+
+
+def resize_image_to_resolution(image_path, target_width, target_height):
+    """
+    Resize image to target resolution while maintaining aspect ratio and ensuring
+    dimensions are multiples of 32.
+
+    Args:
+        image_path: Path to the input image
+        target_width: Target width (should be multiple of 32)
+        target_height: Target height (should be multiple of 32)
+
+    Returns:
+        Path to the resized image (temporary file)
+    """
+    try:
+        img = Image.open(image_path)
+        original_width, original_height = img.size
+
+        # Ensure target dimensions are multiples of 32
+        target_width = (target_width // 32) * 32
+        target_height = (target_height // 32) * 32
+        target_width = max(64, target_width)
+        target_height = max(64, target_height)
+
+        # Check if resizing is needed
+        if original_width == target_width and original_height == target_height:
+            print(f"Image already at target resolution: {target_width}x{target_height}")
+            return image_path
+
+        print(f"Resizing image from {original_width}x{original_height} to {target_width}x{target_height}")
+
+        # Resize the image
+        resized_img = img.resize((target_width, target_height), Image.LANCZOS)
+
+        # Save to temporary file
+        temp_dir = tempfile.gettempdir()
+        temp_filename = f"resized_input_{os.path.basename(image_path)}"
+        temp_path = os.path.join(temp_dir, temp_filename)
+
+        # Preserve the image format
+        resized_img.save(temp_path, format=img.format if img.format else 'PNG')
+        print(f"Resized image saved to: {temp_path}")
+
+        return temp_path
+
+    except Exception as e:
+        print(f"Error resizing image: {e}")
+        print(f"Using original image: {image_path}")
+        return image_path
 
 
 def parse_args():
@@ -283,8 +336,14 @@ if __name__ == "__main__":
 
     start_time = time.perf_counter()
     if is_i2v:
+        # Resize image if width and height are specified
+        image_to_use = args.image
+        if args.width and args.height:
+            print(f"Resizing input image to {args.width}x{args.height} for i2v mode")
+            image_to_use = resize_image_to_resolution(args.image, args.width, args.height)
+
         x = pipe(args.prompt,
-                 image=args.image,
+                 image=image_to_use,
                  time_length=args.video_duration,
                  num_steps=args.sample_steps,
                  guidance_weight=args.guidance_weight,

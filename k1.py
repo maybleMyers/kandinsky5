@@ -140,6 +140,9 @@ def generate_video(
                 yield all_generated_videos, "Error: Input image required for i2v mode.", ""
                 return
             command.extend(["--image", str(input_image)])
+            # Pass width and height for i2v mode to resize the input image
+            command.extend(["--width", str(int(width))])
+            command.extend(["--height", str(int(height))])
         else:
             command.extend(["--width", str(int(width))])
             command.extend(["--height", str(int(height))])
@@ -206,8 +209,8 @@ def generate_video(
                     "prompt": prompt,
                     "negative_prompt": negative_prompt,
                     "image_path": os.path.basename(input_image) if input_image else None,
-                    "width": int(width) if mode == "t2v" else None,
-                    "height": int(height) if mode == "t2v" else None,
+                    "width": int(width),
+                    "height": int(height),
                     "video_duration": video_duration,
                     "sample_steps": sample_steps,
                     "guidance_weight": guidance_weight,
@@ -353,6 +356,98 @@ def extract_video_details(video_path: str) -> Tuple[dict, str]:
     # Return both the updated metadata and a status message
     return metadata, "Video details extracted successfully"
 
+def calculate_width_from_height(height, original_dims):
+    """Calculate width based on height maintaining aspect ratio (divisible by 32)"""
+    if not original_dims or height is None:
+        return gr.update()
+    try:
+        # Ensure height is an integer and divisible by 32
+        height = int(height)
+        if height <= 0:
+            return gr.update()
+        height = (height // 32) * 32
+        height = max(64, height)  # Min height (64 is divisible by 32)
+
+        orig_w, orig_h = map(int, original_dims.split('x'))
+        if orig_h == 0:
+            return gr.update()
+        aspect_ratio = orig_w / orig_h
+        # Calculate new width, rounding to the nearest multiple of 32
+        new_width = round((height * aspect_ratio) / 32) * 32
+        return gr.update(value=max(64, new_width))  # Ensure minimum size
+
+    except Exception as e:
+        print(f"Error calculating width: {e}")
+        return gr.update()
+
+def calculate_height_from_width(width, original_dims):
+    """Calculate height based on width maintaining aspect ratio (divisible by 32)"""
+    if not original_dims or width is None:
+        return gr.update()
+    try:
+        # Ensure width is an integer and divisible by 32
+        width = int(width)
+        if width <= 0:
+            return gr.update()
+        width = (width // 32) * 32
+        width = max(64, width)  # Min width (64 is divisible by 32)
+
+        orig_w, orig_h = map(int, original_dims.split('x'))
+        if orig_w == 0:
+            return gr.update()
+        aspect_ratio = orig_w / orig_h
+        # Calculate new height, rounding to the nearest multiple of 32
+        new_height = round((width / aspect_ratio) / 32) * 32
+        return gr.update(value=max(64, new_height))  # Ensure minimum size
+
+    except Exception as e:
+        print(f"Error calculating height: {e}")
+        return gr.update()
+
+def update_resolution_from_scale(scale, original_dims):
+    """Update dimensions based on scale percentage (divisible by 32)"""
+    if not original_dims:
+        return gr.update(), gr.update()
+    try:
+        scale = float(scale) if scale is not None else 100.0
+        if scale <= 0:
+            scale = 100.0
+
+        orig_w, orig_h = map(int, original_dims.split('x'))
+        scale_factor = scale / 100.0
+
+        # Calculate and round to the nearest multiple of 32
+        new_w = round((orig_w * scale_factor) / 32) * 32
+        new_h = round((orig_h * scale_factor) / 32) * 32
+
+        # Ensure minimum size (must be multiple of 32)
+        new_w = max(64, new_w)  # 64 is divisible by 32
+        new_h = max(64, new_h)
+
+        return gr.update(value=new_w), gr.update(value=new_h)
+    except Exception as e:
+        print(f"Error updating from scale: {e}")
+        return gr.update(), gr.update()
+
+def update_image_dimensions(image_path):
+    """Update original dimensions when image is uploaded"""
+    if image_path is None:
+        return "", gr.update(), gr.update()
+    try:
+        from PIL import Image
+        img = Image.open(image_path)
+        w, h = img.size
+        original_dims_str = f"{w}x{h}"
+        # Calculate dimensions snapped to nearest multiple of 32 while maintaining aspect ratio
+        new_w = round(w / 32) * 32
+        new_h = round(h / 32) * 32
+        new_w = max(64, new_w)
+        new_h = max(64, new_h)
+        return original_dims_str, gr.update(value=new_w), gr.update(value=new_h)
+    except Exception as e:
+        print(f"Error reading image dimensions: {e}")
+        return "", gr.update(), gr.update()
+
 def create_interface():
     with gr.Blocks(
         theme=themes.Default(
@@ -441,9 +536,24 @@ def create_interface():
                         value="i2v",
                         info="Select generation mode: i2v (image-to-video) or t2v (text-to-video)"
                     )
+
+                    # Hidden state to store original image dimensions
+                    original_dims = gr.State(value="")
+
+                    gr.Markdown("### Resolution Settings")
+                    scale_slider = gr.Slider(
+                        minimum=1, maximum=200, value=100, step=1,
+                        label="Scale % (adjusts resolution while maintaining aspect ratio)",
+                        info="Scale the input image dimensions. Works for both i2v and t2v modes."
+                    )
                     with gr.Row():
-                        width = gr.Number(label="Width", value=768, step=32, interactive=True)
-                        height = gr.Number(label="Height", value=512, step=32, interactive=True)
+                        width = gr.Number(label="Width", value=768, step=32, interactive=True,
+                                        info="Must be divisible by 32")
+                        calc_height_btn = gr.Button("→", size="sm")
+                        calc_width_btn = gr.Button("←", size="sm")
+                        height = gr.Number(label="Height", value=512, step=32, interactive=True,
+                                         info="Must be divisible by 32")
+
                     video_duration = gr.Slider(minimum=1, maximum=10, step=1, label="Video Duration (seconds)", value=5)
                     sample_steps = gr.Slider(minimum=1, maximum=100, step=1, label="Sampling Steps", value=50)
                     guidance_weight = gr.Slider(minimum=1.0, maximum=20.0, step=0.1, label="Guidance Weight", value=5.0)
@@ -478,6 +588,31 @@ def create_interface():
             random_seed_btn.click(
                 fn=lambda: random.randint(0, 2**32 - 1),
                 outputs=[seed]
+            )
+
+            # Resolution control event handlers
+            input_image.change(
+                fn=update_image_dimensions,
+                inputs=[input_image],
+                outputs=[original_dims, width, height]
+            )
+
+            scale_slider.change(
+                fn=update_resolution_from_scale,
+                inputs=[scale_slider, original_dims],
+                outputs=[width, height]
+            )
+
+            calc_width_btn.click(
+                fn=calculate_width_from_height,
+                inputs=[height, original_dims],
+                outputs=[width]
+            )
+
+            calc_height_btn.click(
+                fn=calculate_height_from_width,
+                inputs=[width, original_dims],
+                outputs=[height]
             )
 
             generate_btn.click(
