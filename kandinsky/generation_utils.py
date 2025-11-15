@@ -403,7 +403,7 @@ def generate_sample_i2v(
     # Log VRAM before DiT inference
     log_vram_usage("BEFORE DiT INFERENCE (I2V)", dit=dit, vae=vae, text_embedder=None)
 
-    if offload:
+    if offload or force_offload:
         dit.to(device, non_blocking=True)
 
     with torch.no_grad():
