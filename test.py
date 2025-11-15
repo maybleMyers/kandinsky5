@@ -5,12 +5,15 @@ import logging
 
 import torch
 
-from kandinsky import get_T2V_pipeline, get_I2V_pipeline
+from kandinsky import get_T2V_pipeline, get_I2V_pipeline, get_T2I_pipeline
 
 
 def validate_args(args):
     size = (args.width, args.height)
-    supported_sizes = [(512, 512), (512, 768), (768, 512)]
+    if "t2i" in args.config:
+        supported_sizes = [(1024, 1024), (640, 1408), (1408, 640), (768, 1280), (1280, 768), (896, 1152), (1152, 896)]
+    else:
+        supported_sizes = [(512, 512), (512, 768), (768, 512)]
     if not size in supported_sizes:
         raise NotImplementedError(
             f"Provided size of video is not supported: {size}")
@@ -66,14 +69,12 @@ def parse_args():
         "--width",
         type=int,
         default=768,
-        choices=[768, 512],
         help="Width of the video in pixels"
     )
     parser.add_argument(
         "--height",
         type=int,
         default=512,
-        choices=[768, 512],
         help="Height of the video in pixels"
     )
     parser.add_argument(
@@ -109,7 +110,7 @@ def parse_args():
     parser.add_argument(
         "--output_filename",
         type=str,
-        default="./test.mp4",
+        default=None,
         help="Name of the resulting file"
     )
     parser.add_argument(
@@ -153,10 +154,21 @@ if __name__ == "__main__":
     args = parse_args()
     validate_args(args)
 
-    if "i2v" in args.config:
+    device_map = {"dit": "cuda:0", "vae": "cuda:0",
+                  "text_embedder": "cuda:0"}
+
+    if "t2i" in args.config:
+        pipe = get_T2I_pipeline(
+            device_map=device_map,
+            conf_path=args.config,
+            offload=args.offload,
+            magcache=args.magcache,
+            quantized_qwen=args.qwen_quantization,
+            attention_engine=args.attention_engine,
+        )
+    elif "i2v" in args.config:
         pipe = get_I2V_pipeline(
-            device_map={"dit": "cuda:0", "vae": "cuda:0",
-                        "text_embedder": "cuda:0"},
+            device_map=device_map,
             conf_path=args.config,
             offload=args.offload,
             magcache=args.magcache,
@@ -165,8 +177,7 @@ if __name__ == "__main__":
         )
     else:
         pipe = get_T2V_pipeline(
-            device_map={"dit": "cuda:0", "vae": "cuda:0",
-                        "text_embedder": "cuda:0"},
+            device_map=device_map,
             conf_path=args.config,
             offload=args.offload,
             magcache=args.magcache,
@@ -175,10 +186,26 @@ if __name__ == "__main__":
         )
 
     if args.output_filename is None:
-        args.output_filename = "./" + args.prompt.replace(" ", "_") + ".mp4"
+        args.output_filename = "./" + args.prompt.replace(" ", "_")
+        if len(args.output_filename) > 32:
+            args.output_filename = args.output_filename[:32]
+        if "i2v" in args.config or "t2v" in args.config:
+            args.output_filename = args.output_filename + ".mp4"
+        else:
+            args.output_filename = args.output_filename + ".png"
 
     start_time = time.perf_counter()
-    if "i2v" in args.config:
+    if "t2i" in args.config:
+        x = pipe(args.prompt,
+                 width=args.width,
+                 height=args.height,
+                 num_steps=args.sample_steps,
+                 guidance_weight=args.guidance_weight,
+                 scheduler_scale=args.scheduler_scale,
+                 expand_prompts=args.expand_prompt,
+                 save_path=args.output_filename,
+                 seed=args.seed)
+    elif "i2v" in args.config:
         x = pipe(args.prompt,
                  image=args.image,
                  time_length=args.video_duration,
@@ -190,15 +217,14 @@ if __name__ == "__main__":
                  seed=args.seed)
     else:
         x = pipe(args.prompt,
-             time_length=args.video_duration,
-             width=args.width,
-             height=args.height,
-             num_steps=args.sample_steps,
-             guidance_weight=args.guidance_weight,
-             scheduler_scale=args.scheduler_scale,
-             expand_prompts=args.expand_prompt,
-             save_path=args.output_filename,
-             seed=args.seed)
+                 time_length=args.video_duration,
+                 width=args.width,
+                 height=args.height,
+                 num_steps=args.sample_steps,
+                 guidance_weight=args.guidance_weight,
+                 scheduler_scale=args.scheduler_scale,
+                 expand_prompts=args.expand_prompt,
+                 save_path=args.output_filename,
+                 seed=args.seed)
     print(f"TIME ELAPSED: {time.perf_counter() - start_time}")
-    print(f"Generated video is saved to {args.output_filename}")
-    
+    print(f"Generated file is saved to {args.output_filename}")

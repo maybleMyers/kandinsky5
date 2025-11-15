@@ -1224,7 +1224,7 @@ def build_vae(conf):
         )
     elif conf.name == "flux":
         from diffusers.models import AutoencoderKL
-        vae = AutoencoderKL.from_pretrained(conf.checkpoint_path, subfolder="vae", torch_dtype=torch.bfloat16)
+        vae = AutoencoderKL.from_pretrained(conf.checkpoint_path, subfolder="flux/vae", torch_dtype=torch.bfloat16)
         return vae
     else:
         assert False, f"unknown vae name {conf.name}"

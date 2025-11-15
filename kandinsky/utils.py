@@ -104,7 +104,7 @@ def get_T2V_pipeline(
                                       quantized_qwen=quantized_qwen, text_token_padding=text_token_padding)
     if not offload: 
         text_embedder = text_embedder.to( device=device_map["text_embedder"]) 
-    
+
     vae = build_vae(conf.model.vae)
     vae = vae.eval()
     if not offload:
@@ -308,9 +308,9 @@ def get_T2I_pipeline(
         vae_path = snapshot_download(
             repo_id="black-forest-labs/FLUX.1-dev",
             allow_patterns="vae/*",
-            local_dir=cache_dir,
+            local_dir=os.path.join(cache_dir, "flux"),
         )
-        vae_path = os.path.join(cache_dir, "vae/")
+        vae_path = os.path.join(cache_dir, "flux", "vae")
 
     if text_encoder_path is None and conf_path is None:
         text_encoder_path = snapshot_download(

@@ -31,7 +31,7 @@ model:
     glob: false
     window: 3
   vae:
-    checkpoint_path: "./weights/vae/"
+    checkpoint_path: "./weights/flux/vae/"
     name: "flux"
   text_embedder:
     qwen: 
