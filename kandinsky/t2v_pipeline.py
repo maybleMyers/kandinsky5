@@ -145,6 +145,8 @@ class Kandinsky5T2VPipeline:
         shape = (1, num_frames, height // 8, width // 8, 16)
 
         # GENERATION
+        # Force offloading when block swapping is enabled to maximize VRAM
+        force_offload = hasattr(self.dit, 'enable_block_swap') and self.dit.enable_block_swap
         images = generate_sample(
             shape,
             caption,
@@ -161,7 +163,8 @@ class Kandinsky5T2VPipeline:
             vae_device=self.device_map["vae"],
             text_embedder_device=self.device_map["text_embedder"],
             progress=progress,
-            offload=self.offload
+            offload=self.offload,
+            force_offload=force_offload
         )
         torch.cuda.empty_cache()
 

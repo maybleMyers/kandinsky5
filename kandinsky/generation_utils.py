@@ -167,6 +167,7 @@ def generate_sample(
     text_embedder_device="cuda",
     progress=True,
     offload=False,
+    force_offload=False,  # Force offloading for block swapping
 ):
     bs, duration, height, width, dim = shape
     if duration == 1:
@@ -184,7 +185,7 @@ def generate_sample(
 
     # Clean up text embedder after encoding to free VRAM and RAM
     # Text embedder is no longer needed after this point
-    if offload:
+    if offload or force_offload:
         text_embedder = text_embedder.to('cpu')
     # Delete text embedder components to free memory
     del text_embedder.embedder.model
@@ -208,9 +209,9 @@ def generate_sample(
     text_rope_pos = torch.arange(text_cu_seqlens)
     null_text_rope_pos = torch.arange(null_text_cu_seqlens)
 
-    if offload:
+    if offload or force_offload:
         dit.to(device, non_blocking=True)
-        
+
     with torch.no_grad():
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             latent_visual = generate(
@@ -232,12 +233,17 @@ def generate_sample(
                 attention_mask=attention_mask,
                 null_attention_mask=null_attention_mask,
             )
-            
-    if offload:
+
+    # Offload DiT before VAE decode to free up VRAM
+    # For block swapping, explicitly offload all blocks first
+    if hasattr(dit, 'offload_all_blocks'):
+        dit.offload_all_blocks()
+
+    if offload or force_offload:
         dit = dit.to('cpu', non_blocking=True)
     torch.cuda.empty_cache()
 
-    if offload:
+    if offload or force_offload:
         vae = vae.to(vae_device, non_blocking=True)
 
     with torch.no_grad():
