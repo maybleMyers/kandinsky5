@@ -13,6 +13,7 @@ import json
 import ffmpeg
 
 stop_event = threading.Event()
+current_process = None  # Track the currently running process
 
 def parse_progress_line(line: str) -> Optional[str]:
     """Parse progress bar lines and extract useful information."""
@@ -72,14 +73,16 @@ def generate_video(
     save_path: str,
     batch_size: int,
 ) -> Generator[Tuple[List[Tuple[str, str]], str, str], None, None]:
-    global stop_event
+    global stop_event, current_process
     stop_event.clear()
+    current_process = None
 
     os.makedirs(save_path, exist_ok=True)
     all_generated_videos = []
 
     for i in range(int(batch_size)):
         if stop_event.is_set():
+            current_process = None
             yield all_generated_videos, "Generation stopped by user.", ""
             return
 
@@ -133,6 +136,7 @@ def generate_video(
 
         if mode == "i2v":
             if not input_image:
+                current_process = None
                 yield all_generated_videos, "Error: Input image required for i2v mode.", ""
                 return
             command.extend(["--image", str(input_image)])
@@ -161,6 +165,9 @@ def generate_video(
                 bufsize=1
             )
 
+            # Track this as the current process so stop button can terminate it
+            current_process = process
+
             last_progress = ""
             while True:
                 if stop_event.is_set():
@@ -169,6 +176,7 @@ def generate_video(
                         process.wait(timeout=5)
                     except subprocess.TimeoutExpired:
                         process.kill()
+                    current_process = None
                     yield all_generated_videos, "Generation stopped by user.", ""
                     return
 
@@ -184,6 +192,8 @@ def generate_video(
                 if process.poll() is not None:
                     break
 
+            # Clear current process when done
+            current_process = None
             return_code = process.returncode
 
             elapsed = time.perf_counter() - start_time
@@ -223,18 +233,36 @@ def generate_video(
                 yield all_generated_videos.copy(), status_text, progress_msg
             else:
                 error_msg = f"Error: Generation failed with return code {return_code}"
+                current_process = None
                 yield all_generated_videos, error_msg, ""
                 return
 
         except Exception as e:
+            current_process = None
             yield all_generated_videos, f"Error during generation: {str(e)}", ""
             return
 
+    current_process = None
     yield all_generated_videos, "All generations complete!", ""
 
 def stop_generation():
-    global stop_event
+    global stop_event, current_process
     stop_event.set()
+
+    # Immediately terminate the current process if it exists
+    if current_process is not None:
+        try:
+            current_process.terminate()
+            # Give it a moment to terminate gracefully
+            try:
+                current_process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                # Force kill if it doesn't terminate
+                current_process.kill()
+                current_process.wait()
+        except Exception as e:
+            print(f"Error stopping process: {e}")
+
     return "Stopping generation..."
 
 def extract_video_metadata(video_path: str) -> Dict:
