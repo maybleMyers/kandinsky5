@@ -283,7 +283,7 @@ def create_interface():
                     width = gr.Number(label="Width", value=768, step=32, interactive=True)
                     height = gr.Number(label="Height", value=512, step=32, interactive=True)
                 video_duration = gr.Slider(minimum=1, maximum=10, step=1, label="Video Duration (seconds)", value=5)
-                sample_steps = gr.Slider(minimum=4, maximum=100, step=1, label="Sampling Steps", value=50)
+                sample_steps = gr.Slider(minimum=1, maximum=100, step=1, label="Sampling Steps", value=50)
                 guidance_weight = gr.Slider(minimum=1.0, maximum=20.0, step=0.1, label="Guidance Weight", value=5.0)
                 scheduler_scale = gr.Slider(minimum=0.0, maximum=20.0, step=0.1, label="Scheduler Scale", value=5.0)
                 with gr.Row():
