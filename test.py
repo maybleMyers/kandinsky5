@@ -234,6 +234,59 @@ def parse_args():
         default=False,
         help="Use mixed precision weights - preserve fp32 for critical layers (norms, embeddings) while using specified dtype for activations. Prevents dtype conversion errors."
     )
+    parser.add_argument(
+        "--checkpoint_path",
+        type=str,
+        default=None,
+        help="Override DiT model checkpoint path from config. Provide path to your .safetensors file."
+    )
+
+    # NABLA sparse attention configuration
+    parser.add_argument(
+        "--attention_type",
+        type=str,
+        default=None,
+        choices=["auto", "flash", "nabla"],
+        help="Attention type: 'flash' for full attention, 'nabla' for sparse attention, 'auto' uses config default."
+    )
+    parser.add_argument(
+        "--nabla_P",
+        type=float,
+        default=0.9,
+        help="NABLA attention: Top-k probability threshold (default: 0.9)"
+    )
+    parser.add_argument(
+        "--nabla_wT",
+        type=int,
+        default=11,
+        help="NABLA attention: Temporal window size (default: 11 for 10s, 7 for 5s)"
+    )
+    parser.add_argument(
+        "--nabla_wW",
+        type=int,
+        default=3,
+        help="NABLA attention: Width window size (default: 3)"
+    )
+    parser.add_argument(
+        "--nabla_wH",
+        type=int,
+        default=3,
+        help="NABLA attention: Height window size (default: 3)"
+    )
+    parser.add_argument(
+        "--nabla_method",
+        type=str,
+        default="topcdf",
+        choices=["topcdf"],
+        help="NABLA attention: Selection method (default: topcdf)"
+    )
+    parser.add_argument(
+        "--nabla_add_sta",
+        action='store_true',
+        default=True,
+        help="NABLA attention: Add spatial-temporal attention (default: True)"
+    )
+
     args = parser.parse_args()
     return args
 
@@ -255,6 +308,26 @@ if __name__ == "__main__":
     vae_dtype = dtype_map[args.vae_dtype] if args.vae_dtype else model_dtype
     computation_dtype = dtype_map[args.computation_dtype] if args.computation_dtype else model_dtype
 
+    # Build attention config override if attention_type is specified
+    attention_config = None
+    if args.attention_type and args.attention_type != "auto":
+        attention_config = {
+            "type": args.attention_type,
+            "causal": False,
+            "local": False,
+            "glob": False,
+            "window": 3,
+        }
+        if args.attention_type == "nabla":
+            attention_config.update({
+                "P": args.nabla_P,
+                "wT": args.nabla_wT,
+                "wW": args.nabla_wW,
+                "wH": args.nabla_wH,
+                "add_sta": args.nabla_add_sta,
+                "method": args.nabla_method,
+            })
+
     # Determine model type from config filename
     is_i2v = "i2v" in args.config.lower()
     is_t2v_pro = "t2v" in args.config.lower() and ("pro" in args.config.lower() or "20b" in args.config.lower())
@@ -266,6 +339,8 @@ if __name__ == "__main__":
                 device_map={"dit": "cuda:0", "vae": "cuda:0",
                             "text_embedder": "cuda:0"},
                 conf_path=args.config,
+                checkpoint_path_override=args.checkpoint_path,
+                attention_config_override=attention_config,
                 offload=args.offload,
                 magcache=args.magcache,
                 quantized_qwen=args.qwen_quantization,
@@ -284,6 +359,8 @@ if __name__ == "__main__":
                 device_map={"dit": "cuda:0", "vae": "cuda:0",
                             "text_embedder": "cuda:0"},
                 conf_path=args.config,
+                checkpoint_path_override=args.checkpoint_path,
+                attention_config_override=attention_config,
                 offload=args.offload,
                 magcache=args.magcache,
                 quantized_qwen=args.qwen_quantization,
@@ -302,6 +379,8 @@ if __name__ == "__main__":
                             "text_embedder": "cuda:0"},
                 resolution=512,
                 conf_path=args.config,
+                checkpoint_path_override=args.checkpoint_path,
+                attention_config_override=attention_config,
                 offload=args.offload,
                 magcache=args.magcache,
                 quantized_qwen=args.qwen_quantization,
@@ -320,6 +399,8 @@ if __name__ == "__main__":
                 device_map={"dit": "cuda:0", "vae": "cuda:0",
                             "text_embedder": "cuda:0"},
                 conf_path=args.config,
+                checkpoint_path_override=args.checkpoint_path,
+                attention_config_override=attention_config,
                 offload=args.offload,
                 magcache=args.magcache,
                 quantized_qwen=args.qwen_quantization,
