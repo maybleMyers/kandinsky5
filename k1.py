@@ -57,6 +57,7 @@ def generate_video(
     input_image: str,
     mode: str,
     model_config: str,
+    dit_checkpoint_path: str,
     attention_engine: str,
     width: int,
     height: int,
@@ -126,6 +127,10 @@ def generate_video(
         # Add attention engine if specified
         if attention_engine and attention_engine != "auto":
             command.extend(["--attention_engine", attention_engine])
+
+        # Add DiT checkpoint path if specified
+        if dit_checkpoint_path and dit_checkpoint_path.strip():
+            command.extend(["--checkpoint_path", dit_checkpoint_path.strip()])
 
         if text_encoder_dtype_str:
             command.extend(["--text_encoder_dtype", text_encoder_dtype_str])
@@ -237,6 +242,7 @@ def generate_video(
                     "computation_dtype": computation_dtype_str if computation_dtype_str else None,
                     "config_file": config_file,
                     "model_config": model_config,
+                    "dit_checkpoint_path": dit_checkpoint_path if dit_checkpoint_path and dit_checkpoint_path.strip() else None,
                     "attention_engine": attention_engine,
                 }
                 try:
@@ -572,6 +578,13 @@ def create_interface():
                         info="Select attention implementation. 'auto' uses config default. Flash attention is faster for Lite models. SDPA works well for Pro models."
                     )
 
+                    dit_checkpoint_path = gr.Textbox(
+                        label="DiT Checkpoint Path (optional)",
+                        value="",
+                        placeholder="./weights/model/kandinsky5pro_t2v_sft_10s.safetensors",
+                        info="Override DiT model checkpoint path. Leave empty to use config default. Provide path to your .safetensors file."
+                    )
+
                     # Hidden state to store original image dimensions
                     original_dims = gr.State(value="")
 
@@ -653,7 +666,7 @@ def create_interface():
             generate_btn.click(
                 fn=generate_video,
                 inputs=[
-                    prompt, negative_prompt, input_image, mode, model_config, attention_engine,
+                    prompt, negative_prompt, input_image, mode, model_config, dit_checkpoint_path, attention_engine,
                     width, height, video_duration, sample_steps,
                     guidance_weight, scheduler_scale, seed,
                     use_mixed_weights, enable_block_swap, blocks_in_memory, dtype_select,

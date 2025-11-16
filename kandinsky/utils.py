@@ -32,6 +32,7 @@ def get_T2V_pipeline(
     text_encoder2_path: str = None,
     vae_path: str = None,
     conf_path: str = None,
+    checkpoint_path_override: str = None,
     offload: bool = False,
     magcache: bool = False,
     quantized_qwen: bool = False,
@@ -135,7 +136,9 @@ def get_T2V_pipeline(
             no_cfg = True
         set_magcache_params(dit, mag_ratios, num_steps, no_cfg)
 
-    state_dict = load_file(conf.model.checkpoint_path)
+    # Use checkpoint_path_override if provided, otherwise use config value
+    checkpoint_path = checkpoint_path_override if checkpoint_path_override else conf.model.checkpoint_path
+    state_dict = load_file(checkpoint_path)
     # Convert state dict to specified dtype (unless using mixed weights)
     if use_mixed_weights:
         # Preserve original weight dtypes for mixed precision
@@ -175,6 +178,7 @@ def get_I2V_pipeline(
     text_encoder2_path: str = None,
     vae_path: str = None,
     conf_path: str = None,
+    checkpoint_path_override: str = None,
     offload: bool = False,
     magcache: bool = False,
     quantized_qwen: bool = False,
@@ -276,7 +280,9 @@ def get_I2V_pipeline(
             no_cfg = True
         set_magcache_params(dit, mag_ratios, num_steps, no_cfg)
 
-    state_dict = load_file(conf.model.checkpoint_path)
+    # Use checkpoint_path_override if provided, otherwise use config value
+    checkpoint_path = checkpoint_path_override if checkpoint_path_override else conf.model.checkpoint_path
+    state_dict = load_file(checkpoint_path)
     # Convert state dict to specified dtype (unless using mixed weights)
     if use_mixed_weights:
         # Preserve original weight dtypes for mixed precision
@@ -317,6 +323,7 @@ def get_T2I_pipeline(
     text_encoder2_path: str = None,
     vae_path: str = None,
     conf_path: str = None,
+    checkpoint_path_override: str = None,
     offload: bool = False,
     magcache: bool = False,
     quantized_qwen: bool = False,
@@ -406,7 +413,9 @@ def get_T2I_pipeline(
             no_cfg = True
         set_magcache_params(dit, mag_ratios, num_steps, no_cfg)
 
-    state_dict = load_file(conf.model.checkpoint_path)
+    # Use checkpoint_path_override if provided, otherwise use config value
+    checkpoint_path = checkpoint_path_override if checkpoint_path_override else conf.model.checkpoint_path
+    state_dict = load_file(checkpoint_path)
     dit.load_state_dict(state_dict, assign=True)
 
     if not offload:
@@ -561,6 +570,7 @@ def get_I2V_pipeline_with_block_swap(
     text_encoder2_path: str = None,
     vae_path: str = None,
     conf_path: str = None,
+    checkpoint_path_override: str = None,
     offload: bool = False,
     magcache: bool = False,
     quantized_qwen: bool = False,
@@ -684,7 +694,9 @@ def get_I2V_pipeline_with_block_swap(
         set_magcache_params(dit, mag_ratios, num_steps, no_cfg)
 
     print(f"Loading DiT weights from {conf.model.checkpoint_path}")
-    state_dict = load_file(conf.model.checkpoint_path)
+    # Use checkpoint_path_override if provided, otherwise use config value
+    checkpoint_path = checkpoint_path_override if checkpoint_path_override else conf.model.checkpoint_path
+    state_dict = load_file(checkpoint_path)
     # Convert state dict to specified dtype (unless using mixed weights)
     if use_mixed_weights:
         # Preserve original weight dtypes for mixed precision
@@ -730,6 +742,7 @@ def get_T2V_pipeline_with_block_swap(
     text_encoder2_path: str = None,
     vae_path: str = None,
     conf_path: str = None,
+    checkpoint_path_override: str = None,
     offload: bool = False,
     magcache: bool = False,
     quantized_qwen: bool = False,
@@ -850,7 +863,9 @@ def get_T2V_pipeline_with_block_swap(
         set_magcache_params(dit, mag_ratios, num_steps, no_cfg)
 
     print(f"Loading DiT weights from {conf.model.checkpoint_path}")
-    state_dict = load_file(conf.model.checkpoint_path)
+    # Use checkpoint_path_override if provided, otherwise use config value
+    checkpoint_path = checkpoint_path_override if checkpoint_path_override else conf.model.checkpoint_path
+    state_dict = load_file(checkpoint_path)
     # Convert state dict to specified dtype (unless using mixed weights)
     if use_mixed_weights:
         # Preserve original weight dtypes for mixed precision

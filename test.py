@@ -234,6 +234,12 @@ def parse_args():
         default=False,
         help="Use mixed precision weights - preserve fp32 for critical layers (norms, embeddings) while using specified dtype for activations. Prevents dtype conversion errors."
     )
+    parser.add_argument(
+        "--checkpoint_path",
+        type=str,
+        default=None,
+        help="Override DiT model checkpoint path from config. Provide path to your .safetensors file."
+    )
     args = parser.parse_args()
     return args
 
@@ -266,6 +272,7 @@ if __name__ == "__main__":
                 device_map={"dit": "cuda:0", "vae": "cuda:0",
                             "text_embedder": "cuda:0"},
                 conf_path=args.config,
+                checkpoint_path_override=args.checkpoint_path,
                 offload=args.offload,
                 magcache=args.magcache,
                 quantized_qwen=args.qwen_quantization,
@@ -284,6 +291,7 @@ if __name__ == "__main__":
                 device_map={"dit": "cuda:0", "vae": "cuda:0",
                             "text_embedder": "cuda:0"},
                 conf_path=args.config,
+                checkpoint_path_override=args.checkpoint_path,
                 offload=args.offload,
                 magcache=args.magcache,
                 quantized_qwen=args.qwen_quantization,
@@ -302,6 +310,7 @@ if __name__ == "__main__":
                             "text_embedder": "cuda:0"},
                 resolution=512,
                 conf_path=args.config,
+                checkpoint_path_override=args.checkpoint_path,
                 offload=args.offload,
                 magcache=args.magcache,
                 quantized_qwen=args.qwen_quantization,
@@ -320,6 +329,7 @@ if __name__ == "__main__":
                 device_map={"dit": "cuda:0", "vae": "cuda:0",
                             "text_embedder": "cuda:0"},
                 conf_path=args.config,
+                checkpoint_path_override=args.checkpoint_path,
                 offload=args.offload,
                 magcache=args.magcache,
                 quantized_qwen=args.qwen_quantization,
