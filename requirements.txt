@@ -27,3 +27,4 @@ numpy
 bitsandbytes
 peft
 gradio >= 4.0
+ffmpeg
