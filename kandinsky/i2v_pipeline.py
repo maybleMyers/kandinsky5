@@ -80,8 +80,8 @@ def log_vram_usage(stage_name, dit=None, vae=None, text_embedder=None):
 
 def resize_image(image, max_area, alignment=16):
     """
-    Resize image to fit within max_area while maintaining aspect ratio.
-    Also enforces per-dimension limits to stay within RoPE position embeddings range.
+    Resize image to fit within limits while maintaining aspect ratio.
+    Only downscales - never upscales. This respects user's resolution settings.
 
     Args:
         image: Input tensor image
@@ -96,6 +96,13 @@ def resize_image(image, max_area, alignment=16):
     """
     h, w = image.shape[2:]
     area = h * w
+
+    # Check if we need to resize at all
+    if area <= max_area and h <= MAX_DIMENSION and w <= MAX_DIMENSION:
+        # Image is within limits, no resize needed
+        return image, 1.0
+
+    # Need to downscale - calculate scale factor
     k = sqrt(max_area / area) / alignment
     new_h = int(floor(h * k) * alignment)
     new_w = int(floor(w * k) * alignment)
