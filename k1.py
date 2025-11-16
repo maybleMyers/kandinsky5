@@ -59,6 +59,11 @@ def generate_video(
     model_config: str,
     dit_checkpoint_path: str,
     attention_engine: str,
+    attention_type: str,
+    nabla_P: float,
+    nabla_wT: int,
+    nabla_wW: int,
+    nabla_wH: int,
     width: int,
     height: int,
     video_duration: int,
@@ -131,6 +136,16 @@ def generate_video(
         # Add DiT checkpoint path if specified
         if dit_checkpoint_path and dit_checkpoint_path.strip():
             command.extend(["--checkpoint_path", dit_checkpoint_path.strip()])
+
+        # Add attention type and NABLA parameters if specified
+        if attention_type and attention_type != "auto":
+            command.extend(["--attention_type", attention_type])
+            if attention_type == "nabla":
+                command.extend(["--nabla_P", str(nabla_P)])
+                command.extend(["--nabla_wT", str(int(nabla_wT))])
+                command.extend(["--nabla_wW", str(int(nabla_wW))])
+                command.extend(["--nabla_wH", str(int(nabla_wH))])
+                command.append("--nabla_add_sta")
 
         if text_encoder_dtype_str:
             command.extend(["--text_encoder_dtype", text_encoder_dtype_str])
@@ -244,6 +259,11 @@ def generate_video(
                     "model_config": model_config,
                     "dit_checkpoint_path": dit_checkpoint_path if dit_checkpoint_path and dit_checkpoint_path.strip() else None,
                     "attention_engine": attention_engine,
+                    "attention_type": attention_type if attention_type != "auto" else None,
+                    "nabla_P": nabla_P if attention_type == "nabla" else None,
+                    "nabla_wT": int(nabla_wT) if attention_type == "nabla" else None,
+                    "nabla_wW": int(nabla_wW) if attention_type == "nabla" else None,
+                    "nabla_wH": int(nabla_wH) if attention_type == "nabla" else None,
                 }
                 try:
                     add_metadata_to_video(output_filename, params_for_meta)
@@ -578,6 +598,37 @@ def create_interface():
                         info="Select attention implementation. 'auto' uses config default. Flash attention is faster for Lite models. SDPA works well for Pro models."
                     )
 
+                    with gr.Accordion("NABLA Sparse Attention Settings", open=False):
+                        gr.Markdown("Configure NABLA sparse attention for memory-efficient long video generation. Recommended for 10s models.")
+                        attention_type = gr.Dropdown(
+                            label="Attention Type",
+                            choices=["auto", "flash", "nabla"],
+                            value="auto",
+                            info="'auto' uses config default, 'flash' for full attention, 'nabla' for sparse attention (better for 10s videos)"
+                        )
+                        with gr.Row():
+                            nabla_P = gr.Slider(
+                                minimum=0.5, maximum=1.0, value=0.9, step=0.05,
+                                label="NABLA P (Probability Threshold)",
+                                info="Top-k probability threshold. Higher = more tokens kept (0.9 recommended)"
+                            )
+                        with gr.Row():
+                            nabla_wT = gr.Slider(
+                                minimum=3, maximum=21, value=11, step=2,
+                                label="NABLA wT (Temporal Window)",
+                                info="Temporal window size. Use 11 for 10s, 7 for 5s"
+                            )
+                            nabla_wW = gr.Slider(
+                                minimum=1, maximum=7, value=3, step=2,
+                                label="NABLA wW (Width Window)",
+                                info="Width window size (default: 3)"
+                            )
+                            nabla_wH = gr.Slider(
+                                minimum=1, maximum=7, value=3, step=2,
+                                label="NABLA wH (Height Window)",
+                                info="Height window size (default: 3)"
+                            )
+
                     dit_checkpoint_path = gr.Textbox(
                         label="DiT Checkpoint Path (optional)",
                         value="",
@@ -667,6 +718,7 @@ def create_interface():
                 fn=generate_video,
                 inputs=[
                     prompt, negative_prompt, input_image, mode, model_config, dit_checkpoint_path, attention_engine,
+                    attention_type, nabla_P, nabla_wT, nabla_wW, nabla_wH,
                     width, height, video_duration, sample_steps,
                     guidance_weight, scheduler_scale, seed,
                     use_mixed_weights, enable_block_swap, blocks_in_memory, dtype_select,

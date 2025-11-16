@@ -33,6 +33,7 @@ def get_T2V_pipeline(
     vae_path: str = None,
     conf_path: str = None,
     checkpoint_path_override: str = None,
+    attention_config_override: dict = None,
     offload: bool = False,
     magcache: bool = False,
     quantized_qwen: bool = False,
@@ -114,6 +115,12 @@ def get_T2V_pipeline(
         conf = OmegaConf.load(conf_path)
     conf.model.dit_params.attention_engine = attention_engine
 
+    # Override attention config if provided
+    if attention_config_override is not None:
+        if not hasattr(conf.model, 'attention'):
+            conf.model.attention = {}
+        conf.model.attention.update(attention_config_override)
+
     conf.model.text_embedder.qwen.mode = "t2v"
     text_embedder = get_text_embedder(conf.model.text_embedder, device=device_map["text_embedder"],
                                       quantized_qwen=quantized_qwen, text_token_padding=text_token_padding,
@@ -179,6 +186,7 @@ def get_I2V_pipeline(
     vae_path: str = None,
     conf_path: str = None,
     checkpoint_path_override: str = None,
+    attention_config_override: dict = None,
     offload: bool = False,
     magcache: bool = False,
     quantized_qwen: bool = False,
@@ -258,6 +266,12 @@ def get_I2V_pipeline(
         conf = OmegaConf.load(conf_path)
     conf.model.dit_params.attention_engine = attention_engine
 
+    # Override attention config if provided
+    if attention_config_override is not None:
+        if not hasattr(conf.model, 'attention'):
+            conf.model.attention = {}
+        conf.model.attention.update(attention_config_override)
+
     conf.model.text_embedder.qwen.mode = "i2v"
     text_embedder = get_text_embedder(conf.model.text_embedder, device=device_map["text_embedder"],
                                       quantized_qwen=quantized_qwen, text_token_padding=text_token_padding,
@@ -324,6 +338,7 @@ def get_T2I_pipeline(
     vae_path: str = None,
     conf_path: str = None,
     checkpoint_path_override: str = None,
+    attention_config_override: dict = None,
     offload: bool = False,
     magcache: bool = False,
     quantized_qwen: bool = False,
@@ -571,6 +586,7 @@ def get_I2V_pipeline_with_block_swap(
     vae_path: str = None,
     conf_path: str = None,
     checkpoint_path_override: str = None,
+    attention_config_override: dict = None,
     offload: bool = False,
     magcache: bool = False,
     quantized_qwen: bool = False,
@@ -646,6 +662,12 @@ def get_I2V_pipeline_with_block_swap(
 
     conf = OmegaConf.load(conf_path)
     conf.model.dit_params.attention_engine = attention_engine
+
+    # Override attention config if provided
+    if attention_config_override is not None:
+        if not hasattr(conf.model, 'attention'):
+            conf.model.attention = {}
+        conf.model.attention.update(attention_config_override)
 
     # CLI parameters take priority over config file
     # Only use config values if CLI parameters are at default values
@@ -743,6 +765,7 @@ def get_T2V_pipeline_with_block_swap(
     vae_path: str = None,
     conf_path: str = None,
     checkpoint_path_override: str = None,
+    attention_config_override: dict = None,
     offload: bool = False,
     magcache: bool = False,
     quantized_qwen: bool = False,
@@ -821,6 +844,12 @@ def get_T2V_pipeline_with_block_swap(
 
     conf = OmegaConf.load(conf_path)
     conf.model.dit_params.attention_engine = attention_engine
+
+    # Override attention config if provided
+    if attention_config_override is not None:
+        if not hasattr(conf.model, 'attention'):
+            conf.model.attention = {}
+        conf.model.attention.update(attention_config_override)
 
     # Build text embedder - T2V mode
     # For block swap, always keep text encoder on CPU initially to save VRAM
