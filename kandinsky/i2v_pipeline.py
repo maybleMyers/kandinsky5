@@ -14,6 +14,7 @@ torch._dynamo.config.suppress_errors = True
 torch._dynamo.config.verbose = True
 
 MAX_AREA = 2048*2048
+MAX_DIMENSION = 2048  # Maximum pixels per dimension to fit within RoPE max_pos=128
 
 def log_vram_usage(stage_name, dit=None, vae=None, text_embedder=None):
     """Log VRAM usage and model locations for debugging."""
@@ -80,17 +81,40 @@ def log_vram_usage(stage_name, dit=None, vae=None, text_embedder=None):
 def resize_image(image, max_area, alignment=16):
     """
     Resize image to fit within max_area while maintaining aspect ratio.
+    Also enforces per-dimension limits to stay within RoPE position embeddings range.
 
     Args:
         image: Input tensor image
         max_area: Maximum allowed area (height * width)
         alignment: Pixel alignment requirement (default 16, use 128 for NABLA attention)
+
+    Note:
+        For the 20B model with patch_size [1,2,2] and RoPE max_pos=128:
+        - Max patches per dimension: 128
+        - Max latent dimension: 128 * 2 = 256
+        - Max pixel dimension: 256 * 8 = 2048 pixels
     """
     h, w = image.shape[2:]
     area = h * w
     k = sqrt(max_area / area) / alignment
     new_h = int(floor(h * k) * alignment)
     new_w = int(floor(w * k) * alignment)
+
+    # Enforce per-dimension limit to stay within RoPE max_pos
+    # RoPE3D has max_pos=(128, 128, 128) for (T, H, W) dimensions
+    # With patch_size [1, 2, 2] and VAE 8x compression: max = 128 * 2 * 8 = 2048 pixels
+    if new_h > MAX_DIMENSION or new_w > MAX_DIMENSION:
+        # Scale down to fit within per-dimension limit
+        scale_h = MAX_DIMENSION / new_h if new_h > MAX_DIMENSION else 1.0
+        scale_w = MAX_DIMENSION / new_w if new_w > MAX_DIMENSION else 1.0
+        scale = min(scale_h, scale_w)
+
+        new_h = int(floor(new_h * scale / alignment) * alignment)
+        new_w = int(floor(new_w * scale / alignment) * alignment)
+
+        # Recalculate k for the final scale
+        k = new_h / h
+
     return F.resize(image, (new_h, new_w)), k
 
 
