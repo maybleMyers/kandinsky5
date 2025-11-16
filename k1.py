@@ -56,6 +56,8 @@ def generate_video(
     negative_prompt: str,
     input_image: str,
     mode: str,
+    model_config: str,
+    attention_engine: str,
     width: int,
     height: int,
     video_duration: int,
@@ -98,11 +100,17 @@ def generate_video(
         timestamp = int(time.time())
         output_filename = os.path.join(save_path, f"k1_{mode}_{timestamp}_{current_seed}.mp4")
 
-        # Select config file based on mode
-        if mode == "i2v":
-            config_file = "./configs/config_5s_i2v_pro_20b.yaml"
-        else:  # t2v
-            config_file = "./configs/config_5s_t2v_pro_20b.yaml"
+        # Select config file based on model_config selection
+        config_map = {
+            "5s Lite (T2V)": "./configs/config_5s_sft.yaml",
+            "10s Lite (T2V)": "./configs/config_10s_sft.yaml",
+            "5s Pro 20B (T2V)": "./configs/config_5s_t2v_pro_20b.yaml",
+            "10s Pro 20B (T2V)": "./configs/config_10s_t2v_pro_20b.yaml",
+            "5s Pro 20B (I2V)": "./configs/config_5s_i2v_pro_20b.yaml",
+            "5s Lite (I2V)": "./configs/config_5s_i2v.yaml",
+        }
+
+        config_file = config_map.get(model_config, "./configs/config_5s_t2v_pro_20b.yaml")
 
         command = [
             sys.executable, "test.py",
@@ -114,6 +122,10 @@ def generate_video(
             "--output_filename", output_filename,
             "--dtype", dtype_str,
         ]
+
+        # Add attention engine if specified
+        if attention_engine and attention_engine != "auto":
+            command.extend(["--attention_engine", attention_engine])
 
         if text_encoder_dtype_str:
             command.extend(["--text_encoder_dtype", text_encoder_dtype_str])
@@ -224,6 +236,8 @@ def generate_video(
                     "vae_dtype": vae_dtype_str if vae_dtype_str else None,
                     "computation_dtype": computation_dtype_str if computation_dtype_str else None,
                     "config_file": config_file,
+                    "model_config": model_config,
+                    "attention_engine": attention_engine,
                 }
                 try:
                     add_metadata_to_video(output_filename, params_for_meta)
@@ -537,6 +551,27 @@ def create_interface():
                         info="Select generation mode: i2v (image-to-video) or t2v (text-to-video)"
                     )
 
+                    model_config = gr.Dropdown(
+                        label="Model Configuration",
+                        choices=[
+                            "5s Lite (T2V)",
+                            "10s Lite (T2V)",
+                            "5s Pro 20B (T2V)",
+                            "10s Pro 20B (T2V)",
+                            "5s Pro 20B (I2V)",
+                            "5s Lite (I2V)"
+                        ],
+                        value="5s Pro 20B (I2V)",
+                        info="Select model configuration. Pro models require more VRAM but offer better quality. 10s models support longer videos."
+                    )
+
+                    attention_engine = gr.Dropdown(
+                        label="Attention Engine",
+                        choices=["auto", "flash_attention_2", "flash_attention_3", "sdpa", "sage"],
+                        value="auto",
+                        info="Select attention implementation. 'auto' uses config default. Flash attention is faster for Lite models. SDPA works well for Pro models."
+                    )
+
                     # Hidden state to store original image dimensions
                     original_dims = gr.State(value="")
 
@@ -618,7 +653,7 @@ def create_interface():
             generate_btn.click(
                 fn=generate_video,
                 inputs=[
-                    prompt, negative_prompt, input_image, mode,
+                    prompt, negative_prompt, input_image, mode, model_config, attention_engine,
                     width, height, video_duration, sample_steps,
                     guidance_weight, scheduler_scale, seed,
                     use_mixed_weights, enable_block_swap, blocks_in_memory, dtype_select,
