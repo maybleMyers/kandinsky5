@@ -715,9 +715,9 @@ def get_I2V_pipeline_with_block_swap(
             no_cfg = True
         set_magcache_params(dit, mag_ratios, num_steps, no_cfg)
 
-    print(f"Loading DiT weights from {conf.model.checkpoint_path}")
     # Use checkpoint_path_override if provided, otherwise use config value
     checkpoint_path = checkpoint_path_override if checkpoint_path_override else conf.model.checkpoint_path
+    print(f"Loading DiT weights from {checkpoint_path}")
     state_dict = load_file(checkpoint_path)
     # Convert state dict to specified dtype (unless using mixed weights)
     if use_mixed_weights:
@@ -891,9 +891,9 @@ def get_T2V_pipeline_with_block_swap(
             no_cfg = True
         set_magcache_params(dit, mag_ratios, num_steps, no_cfg)
 
-    print(f"Loading DiT weights from {conf.model.checkpoint_path}")
     # Use checkpoint_path_override if provided, otherwise use config value
     checkpoint_path = checkpoint_path_override if checkpoint_path_override else conf.model.checkpoint_path
+    print(f"Loading DiT weights from {checkpoint_path}")
     state_dict = load_file(checkpoint_path)
     # Convert state dict to specified dtype (unless using mixed weights)
     if use_mixed_weights:
