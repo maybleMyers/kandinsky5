@@ -13,7 +13,7 @@ from .generation_utils import generate_sample_i2v
 torch._dynamo.config.suppress_errors = True
 torch._dynamo.config.verbose = True
 
-MAX_AREA = 768*512
+MAX_AREA = 2048*2048
 
 def log_vram_usage(stage_name, dit=None, vae=None, text_embedder=None):
     """Log VRAM usage and model locations for debugging."""
