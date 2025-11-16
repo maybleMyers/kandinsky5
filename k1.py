@@ -141,6 +141,13 @@ def generate_video(
         if attention_type and attention_type != "auto":
             command.extend(["--attention_type", attention_type])
             if attention_type == "nabla":
+                # NABLA requires 128-pixel alignment for i2v
+                if mode == "i2v":
+                    width = (int(width) // 128) * 128
+                    height = (int(height) // 128) * 128
+                    width = max(128, width)
+                    height = max(128, height)
+
                 command.extend(["--nabla_P", str(nabla_P)])
                 command.extend(["--nabla_wT", str(int(nabla_wT))])
                 command.extend(["--nabla_wW", str(int(nabla_wW))])
@@ -599,7 +606,12 @@ def create_interface():
                     )
 
                     with gr.Accordion("NABLA Sparse Attention Settings", open=False):
-                        gr.Markdown("Configure NABLA sparse attention for memory-efficient long video generation. Recommended for 10s models.")
+                        gr.Markdown("""
+                        Configure NABLA sparse attention for memory-efficient long video generation. Recommended for 10s models.
+
+                        **Important for i2v:** NABLA requires resolution divisible by 128 pixels (e.g., 512, 640, 768, 1024, 1280, 1536, 1920, 2048).
+                        Invalid resolutions will be automatically rounded down to the nearest multiple of 128.
+                        """)
                         attention_type = gr.Dropdown(
                             label="Attention Type",
                             choices=["auto", "flash", "nabla"],
@@ -653,7 +665,7 @@ def create_interface():
                         height = gr.Number(label="Height", value=512, step=32, interactive=True,
                                          info="Must be divisible by 32")
 
-                    video_duration = gr.Slider(minimum=1, maximum=10, step=1, label="Video Duration (seconds)", value=5)
+                    video_duration = gr.Slider(minimum=1, maximum=30, step=1, label="Video Duration (seconds)", value=5)
                     sample_steps = gr.Slider(minimum=1, maximum=100, step=1, label="Sampling Steps", value=50)
                     guidance_weight = gr.Slider(minimum=1.0, maximum=20.0, step=0.1, label="Guidance Weight", value=5.0)
                     scheduler_scale = gr.Slider(minimum=0.0, maximum=20.0, step=0.1, label="Scheduler Scale", value=5.0)

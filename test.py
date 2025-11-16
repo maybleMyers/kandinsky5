@@ -25,28 +25,33 @@ def disable_warnings():
     )
 
 
-def resize_image_to_resolution(image_path, target_width, target_height):
+def resize_image_to_resolution(image_path, target_width, target_height, alignment=32):
     """
     Resize image to target resolution while maintaining aspect ratio and ensuring
-    dimensions are multiples of 32.
+    dimensions are multiples of alignment.
 
     Args:
         image_path: Path to the input image
-        target_width: Target width (should be multiple of 32)
-        target_height: Target height (should be multiple of 32)
+        target_width: Target width (will be rounded to alignment)
+        target_height: Target height (will be rounded to alignment)
+        alignment: Pixel alignment (32 for standard, 128 for NABLA)
 
     Returns:
         Path to the resized image (temporary file)
+
+    Note:
+        NABLA attention requires 128-pixel alignment due to fractal flattening.
+        Standard attention only requires 32-pixel alignment.
     """
     try:
         img = Image.open(image_path)
         original_width, original_height = img.size
 
-        # Ensure target dimensions are multiples of 32
-        target_width = (target_width // 32) * 32
-        target_height = (target_height // 32) * 32
-        target_width = max(64, target_width)
-        target_height = max(64, target_height)
+        # Ensure target dimensions are multiples of alignment
+        target_width = (target_width // alignment) * alignment
+        target_height = (target_height // alignment) * alignment
+        target_width = max(alignment * 2, target_width)  # Minimum 2x alignment
+        target_height = max(alignment * 2, target_height)
 
         # Check if resizing is needed
         if original_width == target_width and original_height == target_height:
@@ -420,8 +425,10 @@ if __name__ == "__main__":
         # Resize image if width and height are specified
         image_to_use = args.image
         if args.width and args.height:
-            print(f"Resizing input image to {args.width}x{args.height} for i2v mode")
-            image_to_use = resize_image_to_resolution(args.image, args.width, args.height)
+            # NABLA attention requires 128-pixel alignment, others need 32
+            alignment = 128 if args.attention_type == "nabla" else 32
+            print(f"Resizing input image to {args.width}x{args.height} for i2v mode (alignment: {alignment})")
+            image_to_use = resize_image_to_resolution(args.image, args.width, args.height, alignment)
 
         x = pipe(args.prompt,
                  image=image_to_use,
