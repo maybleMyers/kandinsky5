@@ -230,6 +230,7 @@ def generate_sample(
     progress=True,
     offload=False,
     force_offload=False,  # Force offloading for block swapping
+    image_vae=False,
 ):
     bs, duration, height, width, dim = shape
     if duration == 1:
@@ -258,8 +259,8 @@ def generate_sample(
     gc.collect()
 
     for key in bs_text_embed:
-        bs_text_embed[key] = bs_text_embed[key].to(device=device)
-        bs_null_text_embed[key] = bs_null_text_embed[key].to(device=device)
+        bs_text_embed[key] = bs_text_embed[key].to(device=device,dtype=torch.bfloat16)
+        bs_null_text_embed[key] = bs_null_text_embed[key].to(device=device,dtype=torch.bfloat16)
     text_cu_seqlens = text_cu_seqlens.to(device=device)[-1].item()
     null_text_cu_seqlens = null_text_cu_seqlens.to(device=device)[-1].item()
 
@@ -325,6 +326,8 @@ def generate_sample(
             )
             images = images.to(device=vae_device)
             images = (images / vae.config.scaling_factor).permute(0, 4, 1, 2, 3)
+            if image_vae:
+                images = images[:,:,0]
             images = vae.decode(images).sample
             images = ((images.clamp(-1.0, 1.0) + 1.0) * 127.5).to(torch.uint8)
 
@@ -357,7 +360,6 @@ def generate_sample_i2v(
     offload=False,
     force_offload=False,  # Force offloading for block swapping
 ):
-    old_mode = text_embedder.embedder.mode
     text_embedder.embedder.mode = "i2v"
 
     bs, duration, height, width, dim = shape
