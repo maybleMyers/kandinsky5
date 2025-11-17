@@ -23,8 +23,55 @@ from tqdm import tqdm
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from kandinsky.models.int8_utils import should_quantize_layer
 from RamTorch.kernels.int8_matmul import act_quant
+import re
+
+# Layer patterns that should be quantized (from kandinsky/models/int8_utils.py)
+INCLUDE_PATTERNS = [
+    # FeedForward MLP layers
+    r'.*feed_forward\.in_layer.*',
+    r'.*feed_forward\.out_layer.*',
+    r'.*mlp\.fc1.*',
+    r'.*mlp\.fc2.*',
+
+    # Self-attention layers
+    r'.*self_attention\.to_query.*',
+    r'.*self_attention\.to_key.*',
+    r'.*self_attention\.to_value.*',
+    r'.*self_attention\.out_layer.*',
+
+    # Cross-attention layers
+    r'.*cross_attention\.to_query.*',
+    r'.*cross_attention\.to_key.*',
+    r'.*cross_attention\.to_value.*',
+    r'.*cross_attention\.out_layer.*',
+]
+
+# Layer patterns that should NOT be quantized
+EXCLUDE_PATTERNS = [
+    # Normalization layers
+    r'.*norm.*',
+    r'.*ln.*',
+    r'.*layernorm.*',
+    r'.*rmsnorm.*',
+    r'.*groupnorm.*',
+
+    # Embedding layers
+    r'.*embed.*',
+    r'.*embeddings.*',
+    r'.*time_embeddings.*',
+    r'.*text_embeddings.*',
+    r'.*visual_embeddings.*',
+    r'.*pooled_text_embeddings.*',
+    r'.*rope.*',
+
+    # Modulation layers (adaptive normalization)
+    r'.*modulation.*',
+
+    # Output layers (critical for quality)
+    r'.*final_layer.*',
+]
+
 
 def convert_weight_to_int8(weight: torch.Tensor, block_size: int = 128):
     """
@@ -64,15 +111,24 @@ def should_convert_layer(key: str) -> bool:
     Returns:
         True if layer should be quantized
     """
-    # Extract layer name from key
-    # Remove ".weight" suffix
+    # Only convert weight tensors, not biases or other parameters
     if not key.endswith('.weight'):
         return False
 
     layer_name = key.rsplit('.weight', 1)[0]
 
-    # Check if it's a quantizable layer
-    return should_quantize_layer(layer_name)
+    # First check exclude patterns (highest priority)
+    for pattern in EXCLUDE_PATTERNS:
+        if re.match(pattern, layer_name, re.IGNORECASE):
+            return False
+
+    # Then check include patterns
+    for pattern in INCLUDE_PATTERNS:
+        if re.match(pattern, layer_name, re.IGNORECASE):
+            return True
+
+    # Default: don't convert
+    return False
 
 
 def convert_checkpoint_to_int8(
