@@ -12,11 +12,8 @@ Created on Mon Mar 10 16:47:29 2025
 import os
 import torch
 import av
+import numpy as np
 from PIL import Image
-from .utils import load_torch_file
-from blissful_tuner.utils import BlissfulLogger
-
-logger = BlissfulLogger(__name__, "#8e00ed")
 
 
 class LatentPreviewer():
@@ -44,7 +41,7 @@ class LatentPreviewer():
 
         if self.mode == "taehv":
             from .taehv import TAEHV
-            ####logger.info(f"Loading TAEHV: {args.preview_vae}...")
+            from .utils import load_torch_file
             if os.path.exists(args.preview_vae):
                 tae_sd = load_torch_file(args.preview_vae, safe_load=True, device=args.device)
             else:
@@ -86,9 +83,8 @@ class LatentPreviewer():
                 # Permute from (3, H, W) to (H, W, 3) for PIL.
                 frame_np = frame.permute(1, 2, 0).numpy()
                 Image.fromarray(frame_np).save(target_img)
-                ####logger.info(f"LatentPreviewer: Successfully saved single frame preview to {target_img}")
-            except Exception as e:
-                logger.error(f"LatentPreviewer: Error saving single frame preview to {target_img}: {e}", exc_info=True)
+            except Exception:
+                pass
             return
 
         # Otherwise, write out as a video.
@@ -120,37 +116,30 @@ class LatentPreviewer():
                     video_frame = av.VideoFrame.from_ndarray(frame_np, format="rgb24")
                     for packet in stream.encode(video_frame):
                         container.mux(packet)
-                except Exception as e_encode:
-                     logger.error(f"LatentPreviewer: Error encoding frame {frame_idx} for {target}: {e_encode}", exc_info=True)
-                     break # Stop trying to encode if one frame fails critically
+                except Exception:
+                     break
 
             # Flush out any remaining packets and close.
             #####logger.info(f"LatentPreviewer: Flushing stream for {target}")
             for packet in stream.encode(): # Flush stream
                 container.mux(packet)
             
-            container.close() # Close container
-            container = None # Indicate successful close
-            ####logger.info(f"LatentPreviewer: Successfully finished writing preview video: {target}")
-            if not os.path.exists(target) or os.path.getsize(target) == 0:
-                logger.error(f"LatentPreviewer: Video file {target} was NOT created or is empty after closing.")
+            container.close()
+            container = None
 
-        except Exception as e_container:
-            logger.error(f"LatentPreviewer: Error opening/writing MP4 container {target}: {e_container}", exc_info=True)
+        except Exception:
+            pass
         finally:
-            if container is not None: # If container was opened but not closed due to error
+            if container is not None:
                 try:
-                    logger.warning(f"LatentPreviewer: Closing container for {target} in finally block due to earlier error.")
                     container.close()
-                except Exception as e_close_finally:
-                    logger.error(f"LatentPreviewer: Error closing container in finally block for {target}: {e_close_finally}", exc_info=True)
+                except Exception:
+                    pass
 
     @torch.inference_mode()
     def subtract_original_and_normalize(self, noisy_latents, current_step):
-        # Ensure original_latents and timesteps_percent were initialized
         if not hasattr(self, 'original_latents') or not hasattr(self, 'timesteps_percent'):
-             logger.warning("Cannot subtract noise: original_latents or timesteps_percent not initialized.")
-             return noisy_latents # Return original if we can't process
+             return noisy_latents
 
         # Compute what percent of original noise is remaining
         noise_remaining = self.timesteps_percent[current_step].to(device=noisy_latents.device)
@@ -175,28 +164,19 @@ class LatentPreviewer():
         # For now, let's assume noisy_latents arrives in the correct shape from run_sampling.
         # The primary goal here is to fix the AttributeError.
 
-        if noisy_latents.ndim == 4: # Expecting [C,F,H,W] from run_sampling
-            processed_noisy_latents = noisy_latents.unsqueeze(0) # Add batch for subtract
-        elif noisy_latents.ndim == 5: # Already [B,C,F,H,W]
+        if noisy_latents.ndim == 4:
+            processed_noisy_latents = noisy_latents.unsqueeze(0)
+        elif noisy_latents.ndim == 5:
             processed_noisy_latents = noisy_latents
         else:
-            logger.error(f"LatentPreviewer.preview: noisy_latents has unexpected ndim {noisy_latents.ndim}.")
-            return # Don't proceed if shape is wrong
+            return
 
-        # Apply subtraction only if enabled AND necessary inputs are available
         if self.subtract_noise and hasattr(self, 'original_latents') and hasattr(self, 'timesteps_percent') and current_step is not None:
-            # Defensive check for S2V-like temporal dimension mismatch before subtraction
-            if processed_noisy_latents.shape[2] > self.original_latents.shape[1] and \
-               self.model_type == "wan": 
+            if processed_noisy_latents.shape[2] > self.original_latents.shape[1] and self.model_type == "wan":
                 num_extra_frames = processed_noisy_latents.shape[2] - self.original_latents.shape[1]
-                logger.warning(
-                    f"LatentPreviewer.preview: Trimming {num_extra_frames} frames from processed_noisy_latents (F={processed_noisy_latents.shape[2]}) "
-                    f"to match self.original_latents (F={self.original_latents.shape[1]}) for S2V-like preview."
-                )
                 processed_noisy_latents_for_sub = processed_noisy_latents[:, :, :-num_extra_frames, :, :]
             else:
                 processed_noisy_latents_for_sub = processed_noisy_latents
-            
             denoisy_latents = self.subtract_original_and_normalize(processed_noisy_latents_for_sub, current_step)
         else:
             denoisy_latents = processed_noisy_latents
@@ -276,17 +256,11 @@ class LatentPreviewer():
             # No 'framepack' key needed, will map to 'hunyuan' below
         }
 
-        # --- FIX: Determine the correct parameter key ---
-        # Use 'hunyuan' parameters if the model type is 'framepack'
         params_key = "hunyuan" if self.model_type == "framepack" else self.model_type
         if params_key not in model_params:
-             logger.error(f"Unsupported model type '{self.model_type}' (key '{params_key}') for latent2rgb.")
-             # Optionally return a black image or raise error
-             # Returning black image of expected shape might prevent further crashes
-             b, c_or_f, t_or_c, h, w = latents.shape # Get shape
-             num_frames = t_or_c if self.model_type == "framepack" else c_or_f # Estimate frame dim
+             b, c_or_f, t_or_c, h, w = latents.shape
+             num_frames = t_or_c if self.model_type == "framepack" else c_or_f
              return torch.zeros((num_frames, 3, h * self.scale_factor, w * self.scale_factor), device='cpu')
-             # raise KeyError(f"Unsupported model type '{self.model_type}' (key '{params_key}') for latent2rgb decoding.")
 
         latent_rgb_factors_data = model_params[params_key]["rgb_factors"]
         latent_rgb_factors_bias_data = model_params[params_key]["bias"]
@@ -332,9 +306,7 @@ class LatentPreviewer():
             rgb = torch.nn.functional.linear(extracted, latent_rgb_factors, bias=latent_rgb_factors_bias) # shape = (H, W, 3)
             latent_images.append(rgb)
 
-        # Stack frames into (F, H, W, 3)
-        if not latent_images: # Handle case where loop might not run
-             logger.warning("No latent images generated in decode_latent2rgb.")
+        if not latent_images:
              b, c_or_f, t_or_c, h, w = latents.shape
              num_frames = t_or_c if self.model_type == "framepack" else c_or_f
              return torch.zeros((num_frames, 3, h * self.scale_factor, w * self.scale_factor), device='cpu')
