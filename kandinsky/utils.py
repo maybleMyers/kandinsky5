@@ -163,7 +163,12 @@ def get_T2V_pipeline(
                       for k, v in state_dict.items()}
 
     if use_int8:
-        print("INT8 quantization enabled - converting FP32 weights to INT8 during loading (this may take a moment)...")
+        # Check if checkpoint is already quantized
+        has_int8_weights = any('weight_int8' in k for k in state_dict.keys())
+        if has_int8_weights:
+            print("INT8 quantization enabled - loading pre-quantized INT8 checkpoint...")
+        else:
+            print("INT8 quantization enabled - converting FP32 weights to INT8 during loading (this may take a moment)...")
         # Use strict=False to allow custom _load_from_state_dict to handle weight conversion
         dit.load_state_dict(state_dict, assign=True, strict=False)
     else:
@@ -328,7 +333,12 @@ def get_I2V_pipeline(
                       for k, v in state_dict.items()}
 
     if use_int8:
-        print("INT8 quantization enabled - converting FP32 weights to INT8 during loading (this may take a moment)...")
+        # Check if checkpoint is already quantized
+        has_int8_weights = any('weight_int8' in k for k in state_dict.keys())
+        if has_int8_weights:
+            print("INT8 quantization enabled - loading pre-quantized INT8 checkpoint...")
+        else:
+            print("INT8 quantization enabled - converting FP32 weights to INT8 during loading (this may take a moment)...")
         # Use strict=False to allow custom _load_from_state_dict to handle weight conversion
         dit.load_state_dict(state_dict, assign=True, strict=False)
     else:
@@ -765,7 +775,12 @@ def get_I2V_pipeline_with_block_swap(
                       for k, v in state_dict.items()}
 
     if use_int8:
-        print("INT8 quantization enabled - converting FP32 weights to INT8 during loading (this may take a moment)...")
+        # Check if checkpoint is already quantized
+        has_int8_weights = any('weight_int8' in k for k in state_dict.keys())
+        if has_int8_weights:
+            print("INT8 quantization enabled - loading pre-quantized INT8 checkpoint...")
+        else:
+            print("INT8 quantization enabled - converting FP32 weights to INT8 during loading (this may take a moment)...")
         # Use strict=False to allow custom _load_from_state_dict to handle weight conversion
         dit.load_state_dict(state_dict, assign=True, strict=False)
     else:
@@ -956,7 +971,12 @@ def get_T2V_pipeline_with_block_swap(
                       for k, v in state_dict.items()}
 
     if use_int8:
-        print("INT8 quantization enabled - converting FP32 weights to INT8 during loading (this may take a moment)...")
+        # Check if checkpoint is already quantized
+        has_int8_weights = any('weight_int8' in k for k in state_dict.keys())
+        if has_int8_weights:
+            print("INT8 quantization enabled - loading pre-quantized INT8 checkpoint...")
+        else:
+            print("INT8 quantization enabled - converting FP32 weights to INT8 during loading (this may take a moment)...")
         # Use strict=False to allow custom _load_from_state_dict to handle weight conversion
         dit.load_state_dict(state_dict, assign=True, strict=False)
     else:

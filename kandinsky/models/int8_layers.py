@@ -109,6 +109,7 @@ class Int8Linear(nn.Module):
 
         This intercepts the loading process to check if we're loading FP32 weights
         (which have 'weight' key) and converts them to INT8 format.
+        Also handles pre-quantized checkpoints that already have INT8 weights.
         """
         weight_key = prefix + 'weight'
         weight_int8_key = prefix + 'weight_int8'
@@ -130,6 +131,9 @@ class Int8Linear(nn.Module):
                 missing_keys.remove(weight_int8_key)
             if weight_scales_key in missing_keys:
                 missing_keys.remove(weight_scales_key)
+        elif weight_int8_key in state_dict:
+            # Loading from pre-quantized checkpoint - mark as quantized
+            self._is_quantized = True
 
         # Call parent's _load_from_state_dict for remaining parameters (like bias)
         super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
