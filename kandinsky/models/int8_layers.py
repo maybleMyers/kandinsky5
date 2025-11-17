@@ -87,12 +87,12 @@ class Int8Linear(nn.Module):
         )
 
         # Register per-block scale factors
-        # Shape: [out_features // block_size, in_features // block_size]
-        num_blocks_out = out_features // block_size
-        num_blocks_in = in_features // block_size
+        # Block-wise quantization along last dimension only
+        # Shape: [out_features, in_features // block_size]
+        num_blocks = in_features // block_size
         self.register_buffer(
             'weight_scales',
-            torch.ones(num_blocks_out, num_blocks_in, dtype=torch.float32)
+            torch.ones(out_features, num_blocks, dtype=torch.float32)
         )
 
         # Bias stays in original dtype
