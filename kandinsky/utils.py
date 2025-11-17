@@ -161,6 +161,10 @@ def get_T2V_pipeline(
     else:
         state_dict = {k: v.to(computation_dtype) if v.dtype in [torch.float32, torch.float16, torch.bfloat16] else v
                       for k, v in state_dict.items()}
+
+    if use_int8:
+        print("INT8 quantization enabled - converting FP32 weights to INT8 during loading (this may take a moment)...")
+
     dit.load_state_dict(state_dict, assign=True)
 
     if not offload:
@@ -320,6 +324,10 @@ def get_I2V_pipeline(
     else:
         state_dict = {k: v.to(computation_dtype) if v.dtype in [torch.float32, torch.float16, torch.bfloat16] else v
                       for k, v in state_dict.items()}
+
+    if use_int8:
+        print("INT8 quantization enabled - converting FP32 weights to INT8 during loading (this may take a moment)...")
+
     dit.load_state_dict(state_dict, assign=True)
 
     if not offload:
@@ -751,6 +759,10 @@ def get_I2V_pipeline_with_block_swap(
     else:
         state_dict = {k: v.to(computation_dtype) if v.dtype in [torch.float32, torch.float16, torch.bfloat16] else v
                       for k, v in state_dict.items()}
+
+    if use_int8:
+        print("INT8 quantization enabled - converting FP32 weights to INT8 during loading (this may take a moment)...")
+
     dit.load_state_dict(state_dict, assign=True)
 
     # Keep DiT on CPU when using offload OR block swap
@@ -936,6 +948,10 @@ def get_T2V_pipeline_with_block_swap(
     else:
         state_dict = {k: v.to(computation_dtype) if v.dtype in [torch.float32, torch.float16, torch.bfloat16] else v
                       for k, v in state_dict.items()}
+
+    if use_int8:
+        print("INT8 quantization enabled - converting FP32 weights to INT8 during loading (this may take a moment)...")
+
     dit.load_state_dict(state_dict, assign=True)
 
     # Keep DiT on CPU when using offload OR block swap

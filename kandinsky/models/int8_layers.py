@@ -103,6 +103,37 @@ class Int8Linear(nn.Module):
 
         self._is_quantized = False
 
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
+        """
+        Custom state dict loading to handle conversion from FP32 weights to INT8.
+
+        This intercepts the loading process to check if we're loading FP32 weights
+        (which have 'weight' key) and converts them to INT8 format.
+        """
+        weight_key = prefix + 'weight'
+        weight_int8_key = prefix + 'weight_int8'
+        weight_scales_key = prefix + 'weight_scales'
+
+        # Check if we're loading from a non-INT8 checkpoint (has 'weight' but not 'weight_int8')
+        if weight_key in state_dict and weight_int8_key not in state_dict:
+            # Load the FP32/BF16 weight
+            weight = state_dict[weight_key]
+
+            # Quantize it to INT8
+            self.quantize_weights(weight)
+
+            # Remove the 'weight' key from state_dict since we don't have that parameter
+            state_dict.pop(weight_key)
+
+            # Remove from missing_keys if they were added
+            if weight_int8_key in missing_keys:
+                missing_keys.remove(weight_int8_key)
+            if weight_scales_key in missing_keys:
+                missing_keys.remove(weight_scales_key)
+
+        # Call parent's _load_from_state_dict for remaining parameters (like bias)
+        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
+
     @classmethod
     def from_linear(
         cls,
