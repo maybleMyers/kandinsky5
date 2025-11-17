@@ -31,6 +31,9 @@ class DiffusionTransformer3DBlockSwap(DiffusionTransformer3D):
         attention_engine="auto",
         blocks_in_memory=4,  # Number of visual blocks to keep in GPU memory
         enable_block_swap=False,  # Enable block swapping
+        use_int8=False,
+        int8_block_size=128,
+        dtype=torch.bfloat16,
     ):
         # Initialize parent class
         super().__init__(
@@ -47,6 +50,9 @@ class DiffusionTransformer3DBlockSwap(DiffusionTransformer3D):
             axes_dims=axes_dims,
             visual_cond=visual_cond,
             attention_engine=attention_engine,
+            use_int8=use_int8,
+            int8_block_size=int8_block_size,
+            dtype=dtype,
         )
 
         self.blocks_in_memory = blocks_in_memory

@@ -6,7 +6,8 @@ import torch.nn.functional as F
 from torch.nn.attention.flex_attention import flex_attention
 
 from .utils import get_freqs, nablaT_v2
-from.attention import SelfAttentionEngine
+from .attention import SelfAttentionEngine
+from .int8_layers import create_int8_linear
 
 @torch.compile()
 @torch.autocast(device_type="cuda", dtype=torch.float32)
@@ -150,18 +151,30 @@ class Modulation(nn.Module):
         return self.out_layer(self.activation(x))
 
 class MultiheadSelfAttentionEnc(nn.Module):
-    def __init__(self, num_channels, head_dim):
+    def __init__(self, num_channels, head_dim, use_int8=False, int8_block_size=128, dtype=torch.bfloat16):
         super().__init__()
         assert num_channels % head_dim == 0
         self.num_heads = num_channels // head_dim
 
-        self.to_query = nn.Linear(num_channels, num_channels, bias=True)
-        self.to_key = nn.Linear(num_channels, num_channels, bias=True)
-        self.to_value = nn.Linear(num_channels, num_channels, bias=True)
+        self.to_query = create_int8_linear(
+            num_channels, num_channels, bias=True,
+            block_size=int8_block_size, dtype=dtype, use_int8=use_int8
+        )
+        self.to_key = create_int8_linear(
+            num_channels, num_channels, bias=True,
+            block_size=int8_block_size, dtype=dtype, use_int8=use_int8
+        )
+        self.to_value = create_int8_linear(
+            num_channels, num_channels, bias=True,
+            block_size=int8_block_size, dtype=dtype, use_int8=use_int8
+        )
         self.query_norm = nn.RMSNorm(head_dim)
         self.key_norm = nn.RMSNorm(head_dim)
 
-        self.out_layer = nn.Linear(num_channels, num_channels, bias=True)
+        self.out_layer = create_int8_linear(
+            num_channels, num_channels, bias=True,
+            block_size=int8_block_size, dtype=dtype, use_int8=use_int8
+        )
 
         self.attn_engine = SelfAttentionEngine("sdpa")
 
@@ -209,18 +222,30 @@ class MultiheadSelfAttentionEnc(nn.Module):
         return out
 
 class MultiheadSelfAttentionDec(nn.Module):
-    def __init__(self, num_channels, head_dim, attention_engine="auto"):
+    def __init__(self, num_channels, head_dim, attention_engine="auto", use_int8=False, int8_block_size=128, dtype=torch.bfloat16):
         super().__init__()
         assert num_channels % head_dim == 0
         self.num_heads = num_channels // head_dim
 
-        self.to_query = nn.Linear(num_channels, num_channels, bias=True)
-        self.to_key = nn.Linear(num_channels, num_channels, bias=True)
-        self.to_value = nn.Linear(num_channels, num_channels, bias=True)
+        self.to_query = create_int8_linear(
+            num_channels, num_channels, bias=True,
+            block_size=int8_block_size, dtype=dtype, use_int8=use_int8
+        )
+        self.to_key = create_int8_linear(
+            num_channels, num_channels, bias=True,
+            block_size=int8_block_size, dtype=dtype, use_int8=use_int8
+        )
+        self.to_value = create_int8_linear(
+            num_channels, num_channels, bias=True,
+            block_size=int8_block_size, dtype=dtype, use_int8=use_int8
+        )
         self.query_norm = nn.RMSNorm(head_dim)
         self.key_norm = nn.RMSNorm(head_dim)
 
-        self.out_layer = nn.Linear(num_channels, num_channels, bias=True)
+        self.out_layer = create_int8_linear(
+            num_channels, num_channels, bias=True,
+            block_size=int8_block_size, dtype=dtype, use_int8=use_int8
+        )
 
         self.attn_engine = SelfAttentionEngine(attention_engine)
 
@@ -296,18 +321,30 @@ class MultiheadSelfAttentionDec(nn.Module):
 
 
 class MultiheadCrossAttention(nn.Module):
-    def __init__(self, num_channels, head_dim):
+    def __init__(self, num_channels, head_dim, use_int8=False, int8_block_size=128, dtype=torch.bfloat16):
         super().__init__()
         assert num_channels % head_dim == 0
         self.num_heads = num_channels // head_dim
 
-        self.to_query = nn.Linear(num_channels, num_channels, bias=True)
-        self.to_key = nn.Linear(num_channels, num_channels, bias=True)
-        self.to_value = nn.Linear(num_channels, num_channels, bias=True)
+        self.to_query = create_int8_linear(
+            num_channels, num_channels, bias=True,
+            block_size=int8_block_size, dtype=dtype, use_int8=use_int8
+        )
+        self.to_key = create_int8_linear(
+            num_channels, num_channels, bias=True,
+            block_size=int8_block_size, dtype=dtype, use_int8=use_int8
+        )
+        self.to_value = create_int8_linear(
+            num_channels, num_channels, bias=True,
+            block_size=int8_block_size, dtype=dtype, use_int8=use_int8
+        )
         self.query_norm = nn.RMSNorm(head_dim)
         self.key_norm = nn.RMSNorm(head_dim)
 
-        self.out_layer = nn.Linear(num_channels, num_channels, bias=True)
+        self.out_layer = create_int8_linear(
+            num_channels, num_channels, bias=True,
+            block_size=int8_block_size, dtype=dtype, use_int8=use_int8
+        )
 
         self.attn_engine = SelfAttentionEngine("sdpa")
 
@@ -353,11 +390,21 @@ class MultiheadCrossAttention(nn.Module):
 
 
 class FeedForward(nn.Module):
-    def __init__(self, dim, ff_dim):
+    def __init__(self, dim, ff_dim, use_int8=False, int8_block_size=128, dtype=torch.bfloat16):
         super().__init__()
-        self.in_layer = nn.Linear(dim, ff_dim, bias=False)
+        self.in_layer = create_int8_linear(
+            dim, ff_dim, bias=False,
+            block_size=int8_block_size,
+            dtype=dtype,
+            use_int8=use_int8
+        )
         self.activation = nn.GELU()
-        self.out_layer = nn.Linear(ff_dim, dim, bias=False)
+        self.out_layer = create_int8_linear(
+            ff_dim, dim, bias=False,
+            block_size=int8_block_size,
+            dtype=dtype,
+            use_int8=use_int8
+        )
 
     @torch.compile()
     def forward(self, x):

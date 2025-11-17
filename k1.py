@@ -72,6 +72,7 @@ def generate_video(
     scheduler_scale: float,
     seed: int,
     use_mixed_weights: bool,
+    use_int8: bool,
     enable_block_swap: bool,
     blocks_in_memory: int,
     dtype_str: str,
@@ -163,6 +164,8 @@ def generate_video(
 
         if use_mixed_weights:
             command.append("--use_mixed_weights")
+        if use_int8:
+            command.append("--use_int8")
 
         if negative_prompt:
             command.extend(["--negative_prompt", str(negative_prompt)])
@@ -256,6 +259,7 @@ def generate_video(
                     "scheduler_scale": scheduler_scale,
                     "seed": current_seed,
                     "use_mixed_weights": use_mixed_weights,
+                    "use_int8": use_int8,
                     "enable_block_swap": enable_block_swap,
                     "blocks_in_memory": int(blocks_in_memory) if enable_block_swap else None,
                     "dtype": dtype_str,
@@ -683,6 +687,7 @@ def create_interface():
             with gr.Accordion("Model Settings & Performance", open=True):
                 with gr.Row():
                     use_mixed_weights = gr.Checkbox(label="Use Mixed Weights", value=False, info="Preserve fp32 for critical layers (norms, embeddings)")
+                    use_int8 = gr.Checkbox(label="Use int8 matmul", value=False, info="enable int8 quantization")
                 with gr.Row():
                     enable_block_swap = gr.Checkbox(label="Enable Block Swap", value=True, info="Required for 24GB GPUs")
                     blocks_in_memory = gr.Slider(minimum=1, maximum=60, step=1, label="Blocks in Memory", value=2, info="Number of transformer blocks to keep in GPU memory")
@@ -733,7 +738,7 @@ def create_interface():
                     attention_type, nabla_P, nabla_wT, nabla_wW, nabla_wH,
                     width, height, video_duration, sample_steps,
                     guidance_weight, scheduler_scale, seed,
-                    use_mixed_weights, enable_block_swap, blocks_in_memory, dtype_select,
+                    use_mixed_weights, use_int8, enable_block_swap, blocks_in_memory, dtype_select,
                     text_encoder_dtype_select, vae_dtype_select, computation_dtype_select,
                     save_path, batch_size
                 ],

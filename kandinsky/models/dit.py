@@ -20,15 +20,25 @@ from .utils import fractal_flatten, fractal_unflatten
 
 
 class TransformerEncoderBlock(nn.Module):
-    def __init__(self, model_dim, time_dim, ff_dim, head_dim):
+    def __init__(self, model_dim, time_dim, ff_dim, head_dim, use_int8=False, int8_block_size=128, dtype=torch.bfloat16):
         super().__init__()
         self.text_modulation = Modulation(time_dim, model_dim, 6)
 
         self.self_attention_norm = nn.LayerNorm(model_dim, elementwise_affine=False)
-        self.self_attention = MultiheadSelfAttentionEnc(model_dim, head_dim)
+        self.self_attention = MultiheadSelfAttentionEnc(
+            model_dim, head_dim,
+            use_int8=use_int8,
+            int8_block_size=int8_block_size,
+            dtype=dtype
+        )
 
         self.feed_forward_norm = nn.LayerNorm(model_dim, elementwise_affine=False)
-        self.feed_forward = FeedForward(model_dim, ff_dim)
+        self.feed_forward = FeedForward(
+            model_dim, ff_dim,
+            use_int8=use_int8,
+            int8_block_size=int8_block_size,
+            dtype=dtype
+        )
 
     def forward(self, x, time_embed, rope, attention_mask=None):
         self_attn_params, ff_params = torch.chunk(self.text_modulation(time_embed), 2, dim=-1)
@@ -45,18 +55,33 @@ class TransformerEncoderBlock(nn.Module):
 
 
 class TransformerDecoderBlock(nn.Module):
-    def __init__(self, model_dim, time_dim, ff_dim, head_dim, attention_engine="auto"):
+    def __init__(self, model_dim, time_dim, ff_dim, head_dim, attention_engine="auto", use_int8=False, int8_block_size=128, dtype=torch.bfloat16):
         super().__init__()
         self.visual_modulation = Modulation(time_dim, model_dim, 9)
 
         self.self_attention_norm = nn.LayerNorm(model_dim, elementwise_affine=False)
-        self.self_attention = MultiheadSelfAttentionDec(model_dim, head_dim, attention_engine)
+        self.self_attention = MultiheadSelfAttentionDec(
+            model_dim, head_dim, attention_engine,
+            use_int8=use_int8,
+            int8_block_size=int8_block_size,
+            dtype=dtype
+        )
 
         self.cross_attention_norm = nn.LayerNorm(model_dim, elementwise_affine=False)
-        self.cross_attention = MultiheadCrossAttention(model_dim, head_dim)
+        self.cross_attention = MultiheadCrossAttention(
+            model_dim, head_dim,
+            use_int8=use_int8,
+            int8_block_size=int8_block_size,
+            dtype=dtype
+        )
 
         self.feed_forward_norm = nn.LayerNorm(model_dim, elementwise_affine=False)
-        self.feed_forward = FeedForward(model_dim, ff_dim)
+        self.feed_forward = FeedForward(
+            model_dim, ff_dim,
+            use_int8=use_int8,
+            int8_block_size=int8_block_size,
+            dtype=dtype
+        )
 
     def forward(self, visual_embed, text_embed, time_embed, rope, sparse_params, attention_mask=None):
         self_attn_params, cross_attn_params, ff_params = torch.chunk(
@@ -94,7 +119,10 @@ class DiffusionTransformer3D(nn.Module):
         num_visual_blocks=32,
         axes_dims=(16, 24, 24),
         visual_cond=False,
-        attention_engine="auto"
+        attention_engine="auto",
+        use_int8=False,
+        int8_block_size=128,
+        dtype=torch.bfloat16
     ):
         super().__init__()
         head_dim = sum(axes_dims)
@@ -102,6 +130,7 @@ class DiffusionTransformer3D(nn.Module):
         self.model_dim = model_dim
         self.patch_size = patch_size
         self.visual_cond = visual_cond
+        self.use_int8 = use_int8
 
         visual_embed_dim = 2 * in_visual_dim + 1 if visual_cond else in_visual_dim
         self.time_embeddings = TimeEmbeddings(model_dim, time_dim)
@@ -112,7 +141,12 @@ class DiffusionTransformer3D(nn.Module):
         self.text_rope_embeddings = RoPE1D(head_dim)
         self.text_transformer_blocks = nn.ModuleList(
             [
-                TransformerEncoderBlock(model_dim, time_dim, ff_dim, head_dim)
+                TransformerEncoderBlock(
+                    model_dim, time_dim, ff_dim, head_dim,
+                    use_int8=use_int8,
+                    int8_block_size=int8_block_size,
+                    dtype=dtype
+                )
                 for _ in range(num_text_blocks)
             ]
         )
@@ -120,7 +154,12 @@ class DiffusionTransformer3D(nn.Module):
         self.visual_rope_embeddings = RoPE3D(axes_dims)
         self.visual_transformer_blocks = nn.ModuleList(
             [
-                TransformerDecoderBlock(model_dim, time_dim, ff_dim, head_dim, attention_engine)
+                TransformerDecoderBlock(
+                    model_dim, time_dim, ff_dim, head_dim, attention_engine,
+                    use_int8=use_int8,
+                    int8_block_size=int8_block_size,
+                    dtype=dtype
+                )
                 for _ in range(num_visual_blocks)
             ]
         )

@@ -44,6 +44,8 @@ def get_T2V_pipeline(
     text_encoder_dtype: torch.dtype = None,
     vae_dtype: torch.dtype = None,
     computation_dtype: torch.dtype = None,
+    use_int8: bool = False,
+    int8_block_size: int = 128,
 ) -> Kandinsky5T2VPipeline:
     assert resolution in [512]
 
@@ -133,7 +135,13 @@ def get_T2V_pipeline(
     if not offload:
         vae = vae.to(device=device_map["vae"], dtype=vae_dtype)
 
-    dit = get_dit(conf.model.dit_params)
+    # Add INT8 configuration to dit_params
+    dit_params_dict = OmegaConf.to_container(conf.model.dit_params, resolve=True)
+    dit_params_dict['use_int8'] = use_int8
+    dit_params_dict['int8_block_size'] = int8_block_size
+    dit_params_dict['dtype'] = computation_dtype
+
+    dit = get_dit(dit_params_dict)
 
     if magcache:
         mag_ratios = conf.magcache.mag_ratios
@@ -153,7 +161,18 @@ def get_T2V_pipeline(
     else:
         state_dict = {k: v.to(computation_dtype) if v.dtype in [torch.float32, torch.float16, torch.bfloat16] else v
                       for k, v in state_dict.items()}
-    dit.load_state_dict(state_dict, assign=True)
+
+    if use_int8:
+        # Check if checkpoint is already quantized
+        has_int8_weights = any('weight_int8' in k for k in state_dict.keys())
+        if has_int8_weights:
+            print("INT8 quantization enabled - loading pre-quantized INT8 checkpoint...")
+        else:
+            print("INT8 quantization enabled - converting FP32 weights to INT8 during loading (this may take a moment)...")
+        # Use strict=False to allow custom _load_from_state_dict to handle weight conversion
+        dit.load_state_dict(state_dict, assign=True, strict=False)
+    else:
+        dit.load_state_dict(state_dict, assign=True)
 
     if not offload:
         if use_mixed_weights:
@@ -197,6 +216,8 @@ def get_I2V_pipeline(
     text_encoder_dtype: torch.dtype = None,
     vae_dtype: torch.dtype = None,
     computation_dtype: torch.dtype = None,
+    use_int8: bool = False,
+    int8_block_size: int = 128,
 ) -> Kandinsky5T2VPipeline:
     # Set component dtypes (fall back to dtype if not specified)
     if text_encoder_dtype is None:
@@ -284,7 +305,13 @@ def get_I2V_pipeline(
     if not offload:
         vae = vae.to(device=device_map["vae"], dtype=vae_dtype)
 
-    dit = get_dit(conf.model.dit_params)
+    # Add INT8 configuration to dit_params
+    dit_params_dict = OmegaConf.to_container(conf.model.dit_params, resolve=True)
+    dit_params_dict['use_int8'] = use_int8
+    dit_params_dict['int8_block_size'] = int8_block_size
+    dit_params_dict['dtype'] = computation_dtype
+
+    dit = get_dit(dit_params_dict)
 
     if magcache:
         mag_ratios = conf.magcache.mag_ratios
@@ -304,7 +331,18 @@ def get_I2V_pipeline(
     else:
         state_dict = {k: v.to(computation_dtype) if v.dtype in [torch.float32, torch.float16, torch.bfloat16] else v
                       for k, v in state_dict.items()}
-    dit.load_state_dict(state_dict, assign=True)
+
+    if use_int8:
+        # Check if checkpoint is already quantized
+        has_int8_weights = any('weight_int8' in k for k in state_dict.keys())
+        if has_int8_weights:
+            print("INT8 quantization enabled - loading pre-quantized INT8 checkpoint...")
+        else:
+            print("INT8 quantization enabled - converting FP32 weights to INT8 during loading (this may take a moment)...")
+        # Use strict=False to allow custom _load_from_state_dict to handle weight conversion
+        dit.load_state_dict(state_dict, assign=True, strict=False)
+    else:
+        dit.load_state_dict(state_dict, assign=True)
 
     if not offload:
         if use_mixed_weights:
@@ -599,6 +637,8 @@ def get_I2V_pipeline_with_block_swap(
     text_encoder_dtype: torch.dtype = None,
     vae_dtype: torch.dtype = None,
     computation_dtype: torch.dtype = None,
+    use_int8: bool = False,
+    int8_block_size: int = 128,
 ) -> Kandinsky5I2VPipeline:
     """
     Get I2V pipeline with block swapping support for large models (e.g., 20B).
@@ -699,8 +739,15 @@ def get_I2V_pipeline_with_block_swap(
 
     # Build DiT with block swapping
     print(f"Building DiT with block swapping: enabled={enable_block_swap}, blocks_in_memory={blocks_in_memory}")
+
+    # Add INT8 configuration to dit_params
+    dit_params_dict = OmegaConf.to_container(conf.model.dit_params, resolve=True)
+    dit_params_dict['use_int8'] = use_int8
+    dit_params_dict['int8_block_size'] = int8_block_size
+    dit_params_dict['dtype'] = computation_dtype
+
     dit = get_dit_with_block_swap(
-        conf.model.dit_params,
+        dit_params_dict,
         blocks_in_memory=blocks_in_memory,
         enable_block_swap=enable_block_swap
     )
@@ -726,7 +773,18 @@ def get_I2V_pipeline_with_block_swap(
     else:
         state_dict = {k: v.to(computation_dtype) if v.dtype in [torch.float32, torch.float16, torch.bfloat16] else v
                       for k, v in state_dict.items()}
-    dit.load_state_dict(state_dict, assign=True)
+
+    if use_int8:
+        # Check if checkpoint is already quantized
+        has_int8_weights = any('weight_int8' in k for k in state_dict.keys())
+        if has_int8_weights:
+            print("INT8 quantization enabled - loading pre-quantized INT8 checkpoint...")
+        else:
+            print("INT8 quantization enabled - converting FP32 weights to INT8 during loading (this may take a moment)...")
+        # Use strict=False to allow custom _load_from_state_dict to handle weight conversion
+        dit.load_state_dict(state_dict, assign=True, strict=False)
+    else:
+        dit.load_state_dict(state_dict, assign=True)
 
     # Keep DiT on CPU when using offload OR block swap
     # For block swap, DiT will be loaded on-demand during generation
@@ -778,6 +836,8 @@ def get_T2V_pipeline_with_block_swap(
     text_encoder_dtype: torch.dtype = None,
     vae_dtype: torch.dtype = None,
     computation_dtype: torch.dtype = None,
+    use_int8: bool = False,
+    int8_block_size: int = 128,
 ) -> Kandinsky5T2VPipeline:
     """
     Get T2V pipeline with block swapping support for large models (e.g., 20B).
@@ -875,8 +935,15 @@ def get_T2V_pipeline_with_block_swap(
 
     # Build DiT with block swapping
     print(f"Building DiT with block swapping: enabled={enable_block_swap}, blocks_in_memory={blocks_in_memory}")
+
+    # Add INT8 configuration to dit_params
+    dit_params_dict = OmegaConf.to_container(conf.model.dit_params, resolve=True)
+    dit_params_dict['use_int8'] = use_int8
+    dit_params_dict['int8_block_size'] = int8_block_size
+    dit_params_dict['dtype'] = computation_dtype
+
     dit = get_dit_with_block_swap(
-        conf.model.dit_params,
+        dit_params_dict,
         blocks_in_memory=blocks_in_memory,
         enable_block_swap=enable_block_swap
     )
@@ -902,7 +969,18 @@ def get_T2V_pipeline_with_block_swap(
     else:
         state_dict = {k: v.to(computation_dtype) if v.dtype in [torch.float32, torch.float16, torch.bfloat16] else v
                       for k, v in state_dict.items()}
-    dit.load_state_dict(state_dict, assign=True)
+
+    if use_int8:
+        # Check if checkpoint is already quantized
+        has_int8_weights = any('weight_int8' in k for k in state_dict.keys())
+        if has_int8_weights:
+            print("INT8 quantization enabled - loading pre-quantized INT8 checkpoint...")
+        else:
+            print("INT8 quantization enabled - converting FP32 weights to INT8 during loading (this may take a moment)...")
+        # Use strict=False to allow custom _load_from_state_dict to handle weight conversion
+        dit.load_state_dict(state_dict, assign=True, strict=False)
+    else:
+        dit.load_state_dict(state_dict, assign=True)
 
     # Keep DiT on CPU when using offload OR block swap
     # For block swap, DiT will be loaded on-demand during generation
