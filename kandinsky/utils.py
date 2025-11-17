@@ -615,6 +615,8 @@ def get_I2V_pipeline_with_block_swap(
     text_encoder_dtype: torch.dtype = None,
     vae_dtype: torch.dtype = None,
     computation_dtype: torch.dtype = None,
+    use_int8: bool = False,
+    int8_block_size: int = 128,
 ) -> Kandinsky5I2VPipeline:
     """
     Get I2V pipeline with block swapping support for large models (e.g., 20B).
@@ -715,8 +717,15 @@ def get_I2V_pipeline_with_block_swap(
 
     # Build DiT with block swapping
     print(f"Building DiT with block swapping: enabled={enable_block_swap}, blocks_in_memory={blocks_in_memory}")
+
+    # Add INT8 configuration to dit_params
+    dit_params_dict = OmegaConf.to_container(conf.model.dit_params, resolve=True)
+    dit_params_dict['use_int8'] = use_int8
+    dit_params_dict['int8_block_size'] = int8_block_size
+    dit_params_dict['dtype'] = computation_dtype
+
     dit = get_dit_with_block_swap(
-        conf.model.dit_params,
+        dit_params_dict,
         blocks_in_memory=blocks_in_memory,
         enable_block_swap=enable_block_swap
     )
@@ -794,6 +803,8 @@ def get_T2V_pipeline_with_block_swap(
     text_encoder_dtype: torch.dtype = None,
     vae_dtype: torch.dtype = None,
     computation_dtype: torch.dtype = None,
+    use_int8: bool = False,
+    int8_block_size: int = 128,
 ) -> Kandinsky5T2VPipeline:
     """
     Get T2V pipeline with block swapping support for large models (e.g., 20B).
@@ -891,8 +902,15 @@ def get_T2V_pipeline_with_block_swap(
 
     # Build DiT with block swapping
     print(f"Building DiT with block swapping: enabled={enable_block_swap}, blocks_in_memory={blocks_in_memory}")
+
+    # Add INT8 configuration to dit_params
+    dit_params_dict = OmegaConf.to_container(conf.model.dit_params, resolve=True)
+    dit_params_dict['use_int8'] = use_int8
+    dit_params_dict['int8_block_size'] = int8_block_size
+    dit_params_dict['dtype'] = computation_dtype
+
     dit = get_dit_with_block_swap(
-        conf.model.dit_params,
+        dit_params_dict,
         blocks_in_memory=blocks_in_memory,
         enable_block_swap=enable_block_swap
     )
