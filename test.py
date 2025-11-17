@@ -10,6 +10,11 @@ from PIL import Image
 
 from kandinsky import get_T2V_pipeline, get_I2V_pipeline, get_I2V_pipeline_with_block_swap, get_T2V_pipeline_with_block_swap
 
+try:
+    from scripts.latentpreviewer import LatentPreviewer
+except ImportError:
+    LatentPreviewer = None
+
 
 
 def disable_warnings():
@@ -305,6 +310,19 @@ def parse_args():
         default=True,
         help="NABLA attention: Add spatial-temporal attention (default: True)"
     )
+    parser.add_argument(
+        "--preview",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Enable latent preview every N steps. Generates previews in 'previews' subdirectory."
+    )
+    parser.add_argument(
+        "--preview_suffix",
+        type=str,
+        default=None,
+        help="Unique suffix for preview files to avoid conflicts in concurrent runs."
+    )
 
     args = parser.parse_args()
     return args
@@ -444,10 +462,8 @@ if __name__ == "__main__":
 
     start_time = time.perf_counter()
     if is_i2v:
-        # Resize image if width and height are specified
         image_to_use = args.image
         if args.width and args.height:
-            # NABLA attention requires 128-pixel alignment, others need 32
             alignment = 128 if args.attention_type == "nabla" else 32
             print(f"Resizing input image to {args.width}x{args.height} for i2v mode (alignment: {alignment})")
             image_to_use = resize_image_to_resolution(args.image, args.width, args.height, alignment)
@@ -460,8 +476,10 @@ if __name__ == "__main__":
                  scheduler_scale=args.scheduler_scale,
                  expand_prompts=args.expand_prompt,
                  save_path=args.output_filename,
-                 seed=args.seed)
-    else:  # T2V
+                 seed=args.seed,
+                 preview=args.preview,
+                 preview_suffix=args.preview_suffix)
+    else:
         x = pipe(args.prompt,
              time_length=args.video_duration,
              width=args.width,
@@ -471,7 +489,9 @@ if __name__ == "__main__":
              scheduler_scale=args.scheduler_scale,
              expand_prompts=args.expand_prompt,
              save_path=args.output_filename,
-             seed=args.seed)
+             seed=args.seed,
+             preview=args.preview,
+             preview_suffix=args.preview_suffix)
     print(f"TIME ELAPSED: {time.perf_counter() - start_time}")
     print(f"Generated video is saved to {args.output_filename}")
     

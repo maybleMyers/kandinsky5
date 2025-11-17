@@ -81,7 +81,9 @@ def generate_video(
     computation_dtype_str: str,
     save_path: str,
     batch_size: int,
-) -> Generator[Tuple[List[Tuple[str, str]], str, str], None, None]:
+    enable_preview: bool,
+    preview_steps: int,
+) -> Generator[Tuple[List[Tuple[str, str]], Optional[str], str, str], None, None]:
     global stop_event, current_process
     stop_event.clear()
     current_process = None
@@ -92,7 +94,7 @@ def generate_video(
     for i in range(int(batch_size)):
         if stop_event.is_set():
             current_process = None
-            yield all_generated_videos, "Generation stopped by user.", ""
+            yield all_generated_videos, None, "Generation stopped by user.", ""
             return
 
         current_seed = seed
@@ -102,9 +104,11 @@ def generate_video(
             current_seed = seed + i
 
         status_text = f"Processing {i+1}/{batch_size} (Seed: {current_seed})"
-        yield all_generated_videos.copy(), status_text, "Starting generation..."
+        yield all_generated_videos.copy(), None, status_text, "Starting generation..."
 
         timestamp = int(time.time())
+        run_id = f"{timestamp}_{random.randint(1000, 9999)}"
+        unique_preview_suffix = f"k1_{run_id}"
         output_filename = os.path.join(save_path, f"k1_{mode}_{timestamp}_{current_seed}.mp4")
 
         # Select config file based on model_config selection
@@ -193,6 +197,10 @@ def generate_video(
             command.append("--enable_block_swap")
             command.extend(["--blocks_in_memory", str(int(blocks_in_memory))])
 
+        if enable_preview and preview_steps > 0:
+            command.extend(["--preview", str(preview_steps)])
+            command.extend(["--preview_suffix", unique_preview_suffix])
+
         # Print the command for debugging/transparency
         print("\n" + "="*80)
         print(f"LAUNCHING COMMAND (Batch {i+1}/{batch_size}):")
@@ -210,8 +218,12 @@ def generate_video(
                 bufsize=1
             )
 
-            # Track this as the current process so stop button can terminate it
             current_process = process
+
+            current_preview_yield_path = None
+            last_preview_mtime = 0
+            preview_base_dir = os.path.join(save_path, "previews")
+            preview_mp4_path = os.path.join(preview_base_dir, f"latent_preview_{unique_preview_suffix}.mp4")
 
             last_progress = ""
             while True:
@@ -222,7 +234,7 @@ def generate_video(
                     except subprocess.TimeoutExpired:
                         process.kill()
                     current_process = None
-                    yield all_generated_videos, "Generation stopped by user.", ""
+                    yield all_generated_videos, None, "Generation stopped by user.", ""
                     return
 
                 line = process.stdout.readline()
@@ -232,7 +244,15 @@ def generate_video(
                     parsed_progress = parse_progress_line(line)
                     if parsed_progress:
                         last_progress = parsed_progress
-                        yield all_generated_videos.copy(), status_text, last_progress
+
+                if enable_preview:
+                    if os.path.exists(preview_mp4_path):
+                        current_mtime = os.path.getmtime(preview_mp4_path)
+                        if current_mtime > last_preview_mtime:
+                            current_preview_yield_path = preview_mp4_path
+                            last_preview_mtime = current_mtime
+
+                yield all_generated_videos.copy(), current_preview_yield_path, status_text, last_progress
 
                 if process.poll() is not None:
                     break
@@ -284,20 +304,20 @@ def generate_video(
 
                 all_generated_videos.append((output_filename, f"Seed: {current_seed}"))
                 progress_msg = f"Completed {i+1}/{batch_size} in {elapsed:.1f}s"
-                yield all_generated_videos.copy(), status_text, progress_msg
+                yield all_generated_videos.copy(), None, status_text, progress_msg
             else:
                 error_msg = f"Error: Generation failed with return code {return_code}"
                 current_process = None
-                yield all_generated_videos, error_msg, ""
+                yield all_generated_videos, None, error_msg, ""
                 return
 
         except Exception as e:
             current_process = None
-            yield all_generated_videos, f"Error during generation: {str(e)}", ""
+            yield all_generated_videos, None, f"Error during generation: {str(e)}", ""
             return
 
     current_process = None
-    yield all_generated_videos, "All generations complete!", ""
+    yield all_generated_videos, None, "All generations complete!", ""
 
 def stop_generation():
     global stop_event, current_process
@@ -549,6 +569,43 @@ def create_interface():
         }
         """,
     ) as demo:
+        demo.load(None, None, None, js=r"""
+            () => {
+                document.title = 'Kandinsky 5 - K1';
+
+                function updateTitle(text) {
+                    if (text && text.trim()) {
+                        const pattern = /(?:.*?\((\d+)%\).*?(?:ETA|Remaining):\s*([\d:]+))|(?:(\d+)%\|.*\[.*<([\d:?]+))/;
+                        const match = text.match(pattern);
+
+                        if (match) {
+                            const percentage = match[1] || match[3];
+                            const time = match[2] || match[4];
+                            if (percentage && time) {
+                                 document.title = `[${percentage}% ETA: ${time}] - K1`;
+                            }
+                        }
+                    }
+                }
+
+                setTimeout(() => {
+                    const progressElements = document.querySelectorAll('textarea.scroll-hide');
+                    progressElements.forEach(element => {
+                        if (element) {
+                            new MutationObserver(() => {
+                                updateTitle(element.value);
+                            }).observe(element, {
+                                attributes: true,
+                                childList: true,
+                                characterData: true,
+                                subtree: true
+                            });
+                        }
+                    });
+                }, 1000);
+            }
+            """)
+
         gr.Markdown("# Kandinsky 5.0 I2V Pro 20B - K1 Interface")
 
         with gr.Tab("Generation"):
@@ -683,6 +740,14 @@ def create_interface():
                         columns=[2], rows=[2], object_fit="contain", height="auto",
                         show_label=True, elem_id="gallery_k1", allow_preview=True, preview=True
                     )
+                    with gr.Accordion("Latent Preview (During Generation)", open=True):
+                        enable_preview = gr.Checkbox(label="Enable Latent Preview", value=True)
+                        preview_steps = gr.Slider(minimum=1, maximum=50, step=1, value=10,
+                                                 label="Preview Every N Steps")
+                        preview_output = gr.Video(
+                            label="Latest Preview", height=300,
+                            interactive=False, elem_id="k1_preview_video"
+                        )
 
             with gr.Accordion("Model Settings & Performance", open=True):
                 with gr.Row():
@@ -740,9 +805,10 @@ def create_interface():
                     guidance_weight, scheduler_scale, seed,
                     use_mixed_weights, use_int8, enable_block_swap, blocks_in_memory, dtype_select,
                     text_encoder_dtype_select, vae_dtype_select, computation_dtype_select,
-                    save_path, batch_size
+                    save_path, batch_size,
+                    enable_preview, preview_steps
                 ],
-                outputs=[output, batch_progress, progress_text]
+                outputs=[output, preview_output, batch_progress, progress_text]
             )
 
             stop_btn.click(

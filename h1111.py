@@ -709,6 +709,201 @@ def wan22_batch_handler(
         
     yield all_generated_videos, [], "Wan2.2 Batch complete.", ""
 
+def kandinsky_batch_handler(
+    prompt: str,
+    negative_prompt: str,
+    image_path: str,
+    config: str,
+    width: int,
+    height: int,
+    video_duration: int,
+    sample_steps: int,
+    guidance_weight: float,
+    scheduler_scale: float,
+    expand_prompt: bool,
+    seed: int,
+    batch_size: int,
+    save_path: str,
+    offload: bool,
+    magcache: bool,
+    qwen_quantization: bool,
+    attention_engine: str,
+    enable_block_swap: bool,
+    blocks_in_memory: int,
+    dtype: str,
+    use_mixed_weights: bool,
+    checkpoint_path: str,
+    attention_type: str,
+    nabla_P: float,
+    nabla_wT: int,
+    nabla_wH: int,
+    nabla_wW: int,
+    enable_preview: bool,
+    preview_steps: int,
+) -> Generator[Tuple[List[Tuple[str, str]], Optional[str], str, str], None, None]:
+    global stop_event
+    stop_event.clear()
+
+    os.makedirs(save_path, exist_ok=True)
+    all_generated_videos = []
+
+    for i in range(int(batch_size)):
+        if stop_event.is_set():
+            yield all_generated_videos, None, "Generation stopped by user.", ""
+            return
+
+        current_seed = seed
+        if seed == -1:
+            current_seed = random.randint(0, 2**32 - 1)
+        elif int(batch_size) > 1:
+            current_seed = seed + i
+
+        status_text = f"Processing Item {i+1}/{batch_size} (Seed: {current_seed})"
+        yield all_generated_videos.copy(), None, status_text, "Starting item..."
+
+        run_id = f"{int(time.time())}_{random.randint(1000, 9999)}"
+        unique_preview_suffix = f"kandinsky_{run_id}"
+
+        command = [
+            sys.executable, "test.py",
+            "--config", f"./configs/{config}",
+            "--prompt", str(prompt),
+            "--width", str(width),
+            "--height", str(height),
+            "--video_duration", str(video_duration),
+            "--sample_steps", str(sample_steps),
+            "--guidance_weight", str(guidance_weight),
+            "--scheduler_scale", str(scheduler_scale),
+            "--seed", str(current_seed),
+            "--output_filename", os.path.join(save_path, f"kandinsky_{current_seed}.mp4"),
+        ]
+
+        if negative_prompt:
+            command.extend(["--negative_caption", str(negative_prompt)])
+
+        if not expand_prompt:
+            command.append("--no_expand_prompt")
+
+        if image_path:
+            command.extend(["--image", str(image_path)])
+
+        if offload:
+            command.append("--offload")
+
+        if magcache:
+            command.append("--enable_magcache")
+
+        if qwen_quantization:
+            command.extend(["--qwen_quantization", "4bit"])
+
+        if attention_engine != "auto":
+            command.extend(["--attention_engine", attention_engine])
+
+        if enable_block_swap:
+            command.append("--enable_block_swap")
+            command.extend(["--blocks_in_memory", str(blocks_in_memory)])
+
+        if dtype:
+            command.extend(["--dtype", dtype])
+
+        if use_mixed_weights:
+            command.append("--use_mixed_weights")
+
+        if checkpoint_path and checkpoint_path.strip():
+            command.extend(["--checkpoint_path", checkpoint_path.strip()])
+
+        if attention_type and attention_type != "auto":
+            command.extend(["--attention_type", attention_type])
+            if attention_type == "nabla":
+                command.extend([
+                    "--nabla_P", str(nabla_P),
+                    "--nabla_wT", str(nabla_wT),
+                    "--nabla_wH", str(nabla_wH),
+                    "--nabla_wW", str(nabla_wW)
+                ])
+
+        if enable_preview and preview_steps > 0:
+            command.extend(["--preview", str(preview_steps)])
+            command.extend(["--preview_suffix", unique_preview_suffix])
+
+        print(f"Running Kandinsky Command: {' '.join(command)}")
+
+        process = subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, encoding='utf-8', errors='replace', bufsize=1
+        )
+
+        current_preview_yield_path = None
+        last_preview_mtime = 0
+        preview_base_dir = os.path.join(save_path, "previews")
+        preview_mp4_path = os.path.join(preview_base_dir, f"latent_preview_{unique_preview_suffix}.mp4")
+
+        current_video_file_for_item = None
+        progress_text_update = "Subprocess started..."
+        start_time = time.time()
+
+        for line in iter(process.stdout.readline, ''):
+            if stop_event.is_set():
+                try: process.terminate(); process.wait(timeout=5)
+                except: process.kill(); process.wait()
+                yield all_generated_videos, None, "Generation stopped by user.", ""
+                return
+
+            line_strip = line.strip()
+            if not line_strip: continue
+            print(f"KANDINSKY_SUBPROCESS: {line_strip}")
+            progress_text_update = line_strip
+
+            tqdm_match = re.search(r'(\d+)\%\|.+\| (\d+/\d+) \[(\d{2}:\d{2})<(\d{2}:\d{2})', line_strip)
+            video_saved_match = re.search(r"Generated video is saved to\s*(.*\.mp4)", line_strip)
+            time_elapsed_match = re.search(r"TIME ELAPSED:\s*([\d.]+)", line_strip)
+
+            if video_saved_match:
+                found_path = video_saved_match.group(1).strip()
+                if os.path.exists(found_path):
+                    current_video_file_for_item = found_path
+                progress_text_update = f"Finalizing: {os.path.basename(found_path)}"
+                status_text = f"Item {i+1}/{batch_size} (Seed: {current_seed}) - Saved"
+            elif tqdm_match:
+                percentage = tqdm_match.group(1)
+                steps_iter = tqdm_match.group(2)
+                time_elapsed = tqdm_match.group(3)
+                time_remaining = tqdm_match.group(4)
+                elapsed_seconds = int(time.time() - start_time)
+                elapsed_str = f"{elapsed_seconds//60:02d}:{elapsed_seconds%60:02d}"
+                progress_text_update = f"Step {steps_iter} ({percentage}%) | Elapsed: {elapsed_str} | ETA: {time_remaining}"
+                status_text = f"Item {i+1}/{batch_size} (Seed: {current_seed}) - Denoising"
+            elif time_elapsed_match:
+                elapsed = float(time_elapsed_match.group(1))
+                progress_text_update = f"Completed in {elapsed:.1f}s"
+
+            if enable_preview:
+                if os.path.exists(preview_mp4_path):
+                    current_mtime = os.path.getmtime(preview_mp4_path)
+                    if current_mtime > last_preview_mtime:
+                        current_preview_yield_path = preview_mp4_path
+                        last_preview_mtime = current_mtime
+
+            yield all_generated_videos.copy(), current_preview_yield_path, status_text, progress_text_update
+
+        process.stdout.close()
+        return_code = process.wait()
+
+        if return_code == 0 and current_video_file_for_item:
+            all_generated_videos.append((current_video_file_for_item, f"Kandinsky - Seed: {current_seed}"))
+            status_text = f"Item {i+1}/{batch_size} (Seed: {current_seed}) - Completed"
+            progress_text_update = f"Saved: {os.path.basename(current_video_file_for_item)}"
+        else:
+            status_text = f"Item {i+1}/{batch_size} (Seed: {current_seed}) - Failed (Code: {return_code})"
+            progress_text_update = "Subprocess failed. Check console."
+
+        yield all_generated_videos.copy(), None, status_text, progress_text_update
+
+        clear_cuda_cache()
+        time.sleep(0.2)
+
+    yield all_generated_videos, None, "Kandinsky Batch complete.", ""
+
 ### Multitalk
 def multitalk_batch_handler(
     prompt: str,
@@ -8375,7 +8570,107 @@ with gr.Blocks(
                         interactive=True
                     )
                 wan22_save_path = gr.Textbox(label="Save Path", value="outputs")
-        
+
+        with gr.Tab(id=15, label="Kandinsky 5") as kandinsky_tab:
+            with gr.Row():
+                with gr.Column(scale=4):
+                    kandinsky_prompt = gr.Textbox(
+                        scale=3,
+                        label="Enter your prompt",
+                        value="The dragon soars into the sunset sky.",
+                        lines=5
+                    )
+                    kandinsky_negative_prompt = gr.Textbox(
+                        scale=3,
+                        label="Negative Prompt",
+                        value="Static, 2D cartoon, cartoon, 2d animation, paintings, images, worst quality, low quality, ugly, deformed, walking backwards",
+                        lines=3
+                    )
+                with gr.Column(scale=1):
+                    kandinsky_batch_size = gr.Number(label="Batch Count", value=1, minimum=1, step=1)
+                with gr.Column(scale=2):
+                    kandinsky_batch_progress = gr.Textbox(label="Status", interactive=False, value="", elem_id="kandinsky_batch_progress")
+                    kandinsky_progress_text = gr.Textbox(label="Progress", interactive=False, value="", elem_id="kandinsky_progress_text")
+
+            with gr.Row():
+                kandinsky_generate_btn = gr.Button("Generate Video", elem_classes="green-btn")
+                kandinsky_stop_btn = gr.Button("Stop Generation", variant="stop")
+
+            with gr.Row():
+                with gr.Column():
+                    kandinsky_input_image = gr.Image(label="Input Image (for I2V mode)", type="filepath")
+
+                    gr.Markdown("### Generation Parameters")
+                    kandinsky_config = gr.Dropdown(
+                        label="Model Config",
+                        choices=["config_5s_sft.yaml", "config_5s_pretrain.yaml", "config_10s.yaml", "config_i2v_sft.yaml", "config_i2v_pro.yaml"],
+                        value="config_5s_sft.yaml",
+                        info="Select the model configuration"
+                    )
+                    with gr.Row():
+                        kandinsky_width = gr.Number(label="Width", value=768, step=16, interactive=True)
+                        kandinsky_height = gr.Number(label="Height", value=512, step=16, interactive=True)
+                    kandinsky_video_duration = gr.Slider(minimum=1, maximum=20, step=1, label="Video Duration (seconds)", value=5)
+                    kandinsky_sample_steps = gr.Slider(minimum=1, maximum=200, step=1, label="Sampling Steps", value=50, info="50 for SFT/Pretrain, 16 for distilled")
+                    kandinsky_guidance_weight = gr.Slider(minimum=1.0, maximum=20.0, step=0.1, label="Guidance Weight", value=5.0, info="5.0 for SFT/Pretrain, 1.0 for distilled/no-cfg")
+                    kandinsky_scheduler_scale = gr.Slider(minimum=1.0, maximum=20.0, step=0.1, label="Scheduler Scale", value=5.0, info="5.0 for 5s, 10.0 for 10s")
+                    kandinsky_expand_prompt = gr.Checkbox(label="Expand Prompt", value=True)
+                    with gr.Row():
+                        kandinsky_seed = gr.Number(label="Seed (-1 for random)", value=-1)
+                        kandinsky_random_seed_btn = gr.Button("🎲")
+
+                with gr.Column():
+                    kandinsky_output = gr.Gallery(
+                        label="Generated Videos (Click to select)",
+                        columns=[2], rows=[2], object_fit="contain", height="auto",
+                        show_label=True, elem_id="gallery_kandinsky", allow_preview=True, preview=True
+                    )
+                    with gr.Accordion("Latent Preview (During Generation)", open=True):
+                        kandinsky_enable_preview = gr.Checkbox(label="Enable Latent Preview", value=True)
+                        kandinsky_preview_steps = gr.Slider(minimum=1, maximum=50, step=1, value=10,
+                                                           label="Preview Every N Steps")
+                        kandinsky_preview_output = gr.Video(
+                            label="Latest Preview", height=300,
+                            interactive=False, elem_id="kandinsky_preview_video"
+                        )
+
+            with gr.Accordion("Performance & Advanced", open=False):
+                with gr.Row():
+                    kandinsky_offload = gr.Checkbox(label="Enable Model Offloading", value=False, info="Saves VRAM but slower")
+                    kandinsky_magcache = gr.Checkbox(label="Enable MagCache", value=False, info="For 50 steps models only")
+                    kandinsky_qwen_quantization = gr.Checkbox(label="Quantize Qwen2.5-VL (4-bit)", value=False)
+                with gr.Row():
+                    kandinsky_attention_engine = gr.Radio(
+                        choices=["auto", "flash_attention_2", "flash_attention_3", "sdpa", "sage"],
+                        label="Attention Engine",
+                        value="auto"
+                    )
+                    kandinsky_enable_block_swap = gr.Checkbox(label="Enable Block Swapping", value=False)
+                    kandinsky_blocks_in_memory = gr.Slider(minimum=1, maximum=50, step=1, label="Blocks in Memory", value=6, visible=False)
+                with gr.Row():
+                    kandinsky_dtype = gr.Radio(
+                        choices=["float32", "float16", "bfloat16"],
+                        label="Data Type",
+                        value="bfloat16"
+                    )
+                    kandinsky_use_mixed_weights = gr.Checkbox(label="Use Mixed Weights", value=False)
+                with gr.Row():
+                    kandinsky_checkpoint_path = gr.Textbox(label="Checkpoint Path Override (optional)", value="", placeholder="Path to .safetensors file")
+
+                with gr.Accordion("NABLA Sparse Attention", open=False):
+                    kandinsky_attention_type = gr.Radio(
+                        choices=["auto", "flash", "nabla"],
+                        label="Attention Type",
+                        value="auto"
+                    )
+                    kandinsky_nabla_P = gr.Slider(minimum=0.0, maximum=1.0, step=0.01, label="NABLA P (Top-k threshold)", value=0.9)
+                    kandinsky_nabla_wT = gr.Slider(minimum=1, maximum=30, step=1, label="NABLA wT (Temporal window)", value=11)
+                    kandinsky_nabla_wH = gr.Slider(minimum=1, maximum=10, step=1, label="NABLA wH (Height window)", value=3)
+                    kandinsky_nabla_wW = gr.Slider(minimum=1, maximum=10, step=1, label="NABLA wW (Width window)", value=3)
+
+            with gr.Row():
+                kandinsky_save_path = gr.Textbox(label="Save Path", value="outputs")
+
 # Phantom Tab (Subject-to-Video style)
         with gr.Tab(id=7, label="Phantom") as phantom_tab: # Assign a unique ID
             with gr.Row():
@@ -12036,6 +12331,53 @@ with gr.Blocks(
         fn=refresh_8_loras,
         inputs=[wan22_lora_folder],
         outputs=wan22_lora_refresh_outputs_list
+    )
+
+    kandinsky_stop_btn.click(fn=lambda: stop_event.set(), queue=False)
+    kandinsky_random_seed_btn.click(fn=set_random_seed, inputs=None, outputs=[kandinsky_seed])
+
+    kandinsky_enable_block_swap.change(
+        fn=lambda enabled: gr.update(visible=enabled),
+        inputs=[kandinsky_enable_block_swap],
+        outputs=[kandinsky_blocks_in_memory]
+    )
+
+    kandinsky_generate_btn.click(
+        fn=kandinsky_batch_handler,
+        inputs=[
+            kandinsky_prompt,
+            kandinsky_negative_prompt,
+            kandinsky_input_image,
+            kandinsky_config,
+            kandinsky_width,
+            kandinsky_height,
+            kandinsky_video_duration,
+            kandinsky_sample_steps,
+            kandinsky_guidance_weight,
+            kandinsky_scheduler_scale,
+            kandinsky_expand_prompt,
+            kandinsky_seed,
+            kandinsky_batch_size,
+            kandinsky_save_path,
+            kandinsky_offload,
+            kandinsky_magcache,
+            kandinsky_qwen_quantization,
+            kandinsky_attention_engine,
+            kandinsky_enable_block_swap,
+            kandinsky_blocks_in_memory,
+            kandinsky_dtype,
+            kandinsky_use_mixed_weights,
+            kandinsky_checkpoint_path,
+            kandinsky_attention_type,
+            kandinsky_nabla_P,
+            kandinsky_nabla_wT,
+            kandinsky_nabla_wH,
+            kandinsky_nabla_wW,
+            kandinsky_enable_preview,
+            kandinsky_preview_steps,
+        ],
+        outputs=[kandinsky_output, kandinsky_preview_output, kandinsky_batch_progress, kandinsky_progress_text],
+        queue=True
     )
 
     #Video Info
