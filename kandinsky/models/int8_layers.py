@@ -182,12 +182,19 @@ class Int8Linear(nn.Module):
         assert weight.shape == (self.out_features, self.in_features), \
             f"Weight shape mismatch: expected {(self.out_features, self.in_features)}, got {weight.shape}"
 
-        # Ensure weight is contiguous and on correct device
-        weight = weight.contiguous().to(self.weight_int8.device)
+        # Ensure weight is contiguous and on GPU (Triton requires CUDA tensors)
+        # During load_state_dict, model is still on CPU, so explicitly move to CUDA
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        weight = weight.contiguous().to(device)
 
         # Quantize using block-wise quantization
         # act_quant expects last dimension to be divisible by block_size
         weight_int8, weight_scales = act_quant(weight, block_size=self.block_size)
+
+        # Move buffers to same device as quantized weights if needed
+        if self.weight_int8.device != weight_int8.device:
+            self.weight_int8 = self.weight_int8.to(weight_int8.device)
+            self.weight_scales = self.weight_scales.to(weight_scales.device)
 
         # Store quantized weights and scales
         self.weight_int8.copy_(weight_int8)
