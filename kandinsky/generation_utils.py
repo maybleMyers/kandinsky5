@@ -170,6 +170,9 @@ def generate(
     seed=6554,
     attention_mask=None,
     null_attention_mask=None,
+    previewer=None,
+    preview_interval=None,
+    preview_suffix=None,
 ):
     g = torch.Generator(device="cuda")
     g.manual_seed(seed)
@@ -179,7 +182,7 @@ def generate(
     timesteps = torch.linspace(1, 0, num_steps + 1, device=device)
     timesteps = scheduler_scale * timesteps / (1 + (scheduler_scale - 1) * timesteps)
 
-    for timestep, timestep_diff in tqdm(list(zip(timesteps[:-1], torch.diff(timesteps)))):
+    for i, (timestep, timestep_diff) in enumerate(tqdm(list(zip(timesteps[:-1], torch.diff(timesteps))))):
         time = timestep.unsqueeze(0)
         if model.visual_cond:
             visual_cond = torch.zeros_like(img)
@@ -209,6 +212,13 @@ def generate(
             null_attention_mask=null_attention_mask,
         )
         img = img + timestep_diff * pred_velocity
+
+        if previewer is not None and preview_interval and (i + 1) % preview_interval == 0 and (i + 1) < num_steps:
+            try:
+                preview_latent = img.permute(3, 0, 1, 2).unsqueeze(0)
+                previewer.preview(preview_latent.squeeze(0), i, preview_suffix=preview_suffix)
+            except Exception as e:
+                print(f"Error during preview generation at step {i + 1}: {e}")
     return img
 
 
@@ -229,8 +239,11 @@ def generate_sample(
     text_embedder_device="cuda",
     progress=True,
     offload=False,
-    force_offload=False,  # Force offloading for block swapping
+    force_offload=False,
     image_vae=False,
+    previewer=None,
+    preview_interval=None,
+    preview_suffix=None,
 ):
     bs, duration, height, width, dim = shape
     if duration == 1:
@@ -298,6 +311,9 @@ def generate_sample(
                 progress=progress,
                 attention_mask=attention_mask,
                 null_attention_mask=null_attention_mask,
+                previewer=previewer,
+                preview_interval=preview_interval,
+                preview_suffix=preview_suffix,
             )
 
     # Offload DiT before VAE decode to free up VRAM
@@ -358,7 +374,10 @@ def generate_sample_i2v(
     vae_device="cuda",
     progress=True,
     offload=False,
-    force_offload=False,  # Force offloading for block swapping
+    force_offload=False,
+    previewer=None,
+    preview_interval=None,
+    preview_suffix=None,
 ):
     text_embedder.embedder.mode = "i2v"
 
@@ -428,6 +447,9 @@ def generate_sample_i2v(
                 progress=progress,
                 attention_mask=attention_mask,
                 null_attention_mask=null_attention_mask,
+                previewer=previewer,
+                preview_interval=preview_interval,
+                preview_suffix=preview_suffix,
             )
             if images is not None:
                 images = images.to(device=latent_visual.device, dtype=latent_visual.dtype)
