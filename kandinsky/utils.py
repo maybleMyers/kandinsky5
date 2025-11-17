@@ -44,6 +44,8 @@ def get_T2V_pipeline(
     text_encoder_dtype: torch.dtype = None,
     vae_dtype: torch.dtype = None,
     computation_dtype: torch.dtype = None,
+    use_int8: bool = False,
+    int8_block_size: int = 128,
 ) -> Kandinsky5T2VPipeline:
     assert resolution in [512]
 
@@ -133,7 +135,13 @@ def get_T2V_pipeline(
     if not offload:
         vae = vae.to(device=device_map["vae"], dtype=vae_dtype)
 
-    dit = get_dit(conf.model.dit_params)
+    # Add INT8 configuration to dit_params
+    dit_params_dict = OmegaConf.to_container(conf.model.dit_params, resolve=True)
+    dit_params_dict['use_int8'] = use_int8
+    dit_params_dict['int8_block_size'] = int8_block_size
+    dit_params_dict['dtype'] = computation_dtype
+
+    dit = get_dit(dit_params_dict)
 
     if magcache:
         mag_ratios = conf.magcache.mag_ratios
@@ -197,6 +205,8 @@ def get_I2V_pipeline(
     text_encoder_dtype: torch.dtype = None,
     vae_dtype: torch.dtype = None,
     computation_dtype: torch.dtype = None,
+    use_int8: bool = False,
+    int8_block_size: int = 128,
 ) -> Kandinsky5T2VPipeline:
     # Set component dtypes (fall back to dtype if not specified)
     if text_encoder_dtype is None:
@@ -284,7 +294,13 @@ def get_I2V_pipeline(
     if not offload:
         vae = vae.to(device=device_map["vae"], dtype=vae_dtype)
 
-    dit = get_dit(conf.model.dit_params)
+    # Add INT8 configuration to dit_params
+    dit_params_dict = OmegaConf.to_container(conf.model.dit_params, resolve=True)
+    dit_params_dict['use_int8'] = use_int8
+    dit_params_dict['int8_block_size'] = int8_block_size
+    dit_params_dict['dtype'] = computation_dtype
+
+    dit = get_dit(dit_params_dict)
 
     if magcache:
         mag_ratios = conf.magcache.mag_ratios

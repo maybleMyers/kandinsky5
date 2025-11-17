@@ -246,6 +246,20 @@ def parse_args():
         help="Override DiT model checkpoint path from config. Provide path to your .safetensors file."
     )
 
+    # INT8 quantization configuration
+    parser.add_argument(
+        "--use_int8",
+        action='store_true',
+        default=False,
+        help="Use INT8 quantization for linear layers (40-60%% memory reduction, 1.5-2x faster inference)"
+    )
+    parser.add_argument(
+        "--int8_block_size",
+        type=int,
+        default=128,
+        help="Block size for INT8 quantization (must be 128 for Triton kernels, default: 128)"
+    )
+
     # NABLA sparse attention configuration
     parser.add_argument(
         "--attention_type",
@@ -357,6 +371,8 @@ if __name__ == "__main__":
                 text_encoder_dtype=text_encoder_dtype,
                 vae_dtype=vae_dtype,
                 computation_dtype=computation_dtype,
+                use_int8=args.use_int8,
+                int8_block_size=args.int8_block_size,
             )
         else:
             # Use standard I2V pipeline
@@ -375,6 +391,8 @@ if __name__ == "__main__":
                 text_encoder_dtype=text_encoder_dtype,
                 vae_dtype=vae_dtype,
                 computation_dtype=computation_dtype,
+                use_int8=args.use_int8,
+                int8_block_size=args.int8_block_size,
             )
     else:  # T2V
         if is_t2v_pro and args.enable_block_swap:
@@ -397,6 +415,8 @@ if __name__ == "__main__":
                 text_encoder_dtype=text_encoder_dtype,
                 vae_dtype=vae_dtype,
                 computation_dtype=computation_dtype,
+                use_int8=args.use_int8,
+                int8_block_size=args.int8_block_size,
             )
         else:
             # Use standard T2V pipeline
@@ -415,6 +435,8 @@ if __name__ == "__main__":
                 text_encoder_dtype=text_encoder_dtype,
                 vae_dtype=vae_dtype,
                 computation_dtype=computation_dtype,
+                use_int8=args.use_int8,
+                int8_block_size=args.int8_block_size,
             )
 
     if args.output_filename is None:
