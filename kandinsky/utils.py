@@ -164,8 +164,10 @@ def get_T2V_pipeline(
 
     if use_int8:
         print("INT8 quantization enabled - converting FP32 weights to INT8 during loading (this may take a moment)...")
-
-    dit.load_state_dict(state_dict, assign=True)
+        # Use strict=False to allow custom _load_from_state_dict to handle weight conversion
+        dit.load_state_dict(state_dict, assign=True, strict=False)
+    else:
+        dit.load_state_dict(state_dict, assign=True)
 
     if not offload:
         if use_mixed_weights:
@@ -327,8 +329,10 @@ def get_I2V_pipeline(
 
     if use_int8:
         print("INT8 quantization enabled - converting FP32 weights to INT8 during loading (this may take a moment)...")
-
-    dit.load_state_dict(state_dict, assign=True)
+        # Use strict=False to allow custom _load_from_state_dict to handle weight conversion
+        dit.load_state_dict(state_dict, assign=True, strict=False)
+    else:
+        dit.load_state_dict(state_dict, assign=True)
 
     if not offload:
         if use_mixed_weights:
@@ -762,8 +766,10 @@ def get_I2V_pipeline_with_block_swap(
 
     if use_int8:
         print("INT8 quantization enabled - converting FP32 weights to INT8 during loading (this may take a moment)...")
-
-    dit.load_state_dict(state_dict, assign=True)
+        # Use strict=False to allow custom _load_from_state_dict to handle weight conversion
+        dit.load_state_dict(state_dict, assign=True, strict=False)
+    else:
+        dit.load_state_dict(state_dict, assign=True)
 
     # Keep DiT on CPU when using offload OR block swap
     # For block swap, DiT will be loaded on-demand during generation
@@ -951,8 +957,10 @@ def get_T2V_pipeline_with_block_swap(
 
     if use_int8:
         print("INT8 quantization enabled - converting FP32 weights to INT8 during loading (this may take a moment)...")
-
-    dit.load_state_dict(state_dict, assign=True)
+        # Use strict=False to allow custom _load_from_state_dict to handle weight conversion
+        dit.load_state_dict(state_dict, assign=True, strict=False)
+    else:
+        dit.load_state_dict(state_dict, assign=True)
 
     # Keep DiT on CPU when using offload OR block swap
     # For block swap, DiT will be loaded on-demand during generation
