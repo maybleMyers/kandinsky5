@@ -13,7 +13,6 @@ import os
 import torch
 import av
 from PIL import Image
-from .taehv import TAEHV
 from .utils import load_torch_file
 from blissful_tuner.utils import BlissfulLogger
 
@@ -44,6 +43,7 @@ class LatentPreviewer():
             raise ValueError(f"Unsupported model type: {self.model_type}")
 
         if self.mode == "taehv":
+            from .taehv import TAEHV
             ####logger.info(f"Loading TAEHV: {args.preview_vae}...")
             if os.path.exists(args.preview_vae):
                 tae_sd = load_torch_file(args.preview_vae, safe_load=True, device=args.device)
