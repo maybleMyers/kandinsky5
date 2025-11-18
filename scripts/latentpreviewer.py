@@ -19,9 +19,13 @@ from PIL import Image
 class LatentPreviewer():
     @torch.inference_mode()
     def __init__(self, args, original_latents, timesteps, device, dtype, model_type="hunyuan"):
-        #print(f"DEBUG LATENT_PREVIEW.PY: LatentPreviewer __init__ called from file: {__file__}")
+        print(f"\n{'='*80}")
+        print(f">>> LatentPreviewer.__init__() CALLED")
+        print(f">>> model_type={model_type}, device={device}, dtype={dtype}")
+        print(f">>> original_latents shape: {original_latents.shape if original_latents is not None else 'None'}")
+        print(f">>> timesteps shape: {timesteps.shape if timesteps is not None else 'None'}")
         self.mode = "latent2rgb" if not hasattr(args, 'preview_vae') or args.preview_vae is None else "taehv"
-        ######logger.info(f"Initializing latent previewer with mode {self.mode}...")
+        print(f">>> Mode selected: {self.mode}")
         # Correctly handle framepack - it should subtract noise like others unless specifically told otherwise
         self.subtract_noise = True # Default to True for all models now
         # If you specifically need framepack NOT to subtract noise, you'd add a condition here
@@ -58,6 +62,9 @@ class LatentPreviewer():
             # Let's keep the / 4 logic for now as it was there before.
             self.fps = int(args.fps / 4) if args.fps > 4 else 1 # Ensure fps is at least 1
 
+        print(f">>> LatentPreviewer initialized successfully!")
+        print(f">>> Decoder: {self.decoder.__name__}, scale_factor={self.scale_factor}, fps={self.fps}")
+        print(f"{'='*80}\n")
 
     @torch.inference_mode()
     def write_preview(self, frames, width, height, preview_suffix=None):
@@ -157,9 +164,13 @@ class LatentPreviewer():
         # noisy_latents is input [C, F_input, H, W]
         # self.original_latents is stored [C, F_orig, H, W]
 
+        print(f"\n>>> LatentPreviewer.preview() CALLED - Step {current_step}, suffix={preview_suffix}")
+        print(f">>> Input latents shape: {noisy_latents.shape}, dtype: {noisy_latents.dtype}, device: {noisy_latents.device}")
+        print(f">>> Mode: {self.mode}, Model type: {self.model_type}")
+
         if self.device == "cuda" or self.device == torch.device("cuda"):
             torch.cuda.empty_cache()
-        
+
         processed_noisy_latents = noisy_latents # Placeholder for now, original logic was complex
         # The complex logic from the previous attempt to unsqueeze/trim noisy_latents
         # can be simplified or re-evaluated once this basic naming error is fixed.
@@ -168,23 +179,31 @@ class LatentPreviewer():
 
         if noisy_latents.ndim == 4:
             processed_noisy_latents = noisy_latents.unsqueeze(0)
+            print(f">>> Unsqueezed to 5D: {processed_noisy_latents.shape}")
         elif noisy_latents.ndim == 5:
             processed_noisy_latents = noisy_latents
+            print(f">>> Already 5D: {processed_noisy_latents.shape}")
         else:
+            print(f">>> ERROR: Unexpected ndim={noisy_latents.ndim}, returning early")
             return
 
         if self.subtract_noise and hasattr(self, 'original_latents') and hasattr(self, 'timesteps_percent') and current_step is not None:
+            print(f">>> Subtracting noise: original_latents shape={self.original_latents.shape}")
             if processed_noisy_latents.shape[2] > self.original_latents.shape[1] and self.model_type == "wan":
                 num_extra_frames = processed_noisy_latents.shape[2] - self.original_latents.shape[1]
                 processed_noisy_latents_for_sub = processed_noisy_latents[:, :, :-num_extra_frames, :, :]
+                print(f">>> Trimmed {num_extra_frames} extra frames for WAN model")
             else:
                 processed_noisy_latents_for_sub = processed_noisy_latents
             denoisy_latents = self.subtract_original_and_normalize(processed_noisy_latents_for_sub, current_step)
+            print(f">>> After subtract_original_and_normalize: shape={denoisy_latents.shape}")
         else:
+            print(f">>> Skipping noise subtraction (subtract_noise={self.subtract_noise})")
             denoisy_latents = processed_noisy_latents
 
-
+        print(f">>> Calling decoder ({self.mode}) with shape: {denoisy_latents.shape}")
         decoded = self.decoder(denoisy_latents)  # Expects F, C, H, W output from decoder
+        print(f">>> Decoder returned shape: {decoded.shape}")
 
         # Upscale if we used latent2rgb so output is same size as expected
         if self.scale_factor is not None:

@@ -214,11 +214,17 @@ def generate(
         img = img + timestep_diff * pred_velocity
 
         if previewer is not None and preview_interval and (i + 1) % preview_interval == 0 and (i + 1) < num_steps:
+            print(f"\n>>> PREVIEW TRIGGER at step {i + 1}/{num_steps} (interval={preview_interval})")
+            print(f">>> img shape before permute: {img.shape}")
             try:
                 preview_latent = img.permute(3, 0, 1, 2).unsqueeze(0)
+                print(f">>> preview_latent shape after permute+unsqueeze: {preview_latent.shape}")
                 previewer.preview(preview_latent.squeeze(0), i, preview_suffix=preview_suffix)
+                print(f">>> Preview completed successfully")
             except Exception as e:
-                print(f"Error during preview generation at step {i + 1}: {e}")
+                print(f">>> ERROR during preview generation at step {i + 1}: {e}")
+                import traceback
+                traceback.print_exc()
     return img
 
 
