@@ -16,7 +16,13 @@ open browser goto 127.0.0.1:7860
 I added some mixed models here: https://huggingface.co/maybleMyers/kan/  
 You can input them in the DiT Checkpoint Path in the gui.  
 
+To use lite i2v download https://huggingface.co/kandinskylab/Kandinsky-5.0-I2V-Lite-5s/blob/main/model/kandinsky5lite_i2v_5s.safetensors that model and put it in the lite_checkpoints subfolder. You need to have the full i2v pro diffusers cloned in the root directory. Select mode - i2v and model configuration 5s Lite (I2V) .  Either mess with the vae config or set 1 block swapped for now to offload before vae decoding.  
+
+
 Changlog:  
+  11/18/2025  
+    Add support for lite i2v https://huggingface.co/kandinskylab/Kandinsky-5.0-I2V-Lite-5s/tree/main/model  
+    make previews better    
   11/17/2025  
     Add preview support. Add int8 support to drastically lower ram/vram reqs.  
 
