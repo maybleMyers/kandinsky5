@@ -83,6 +83,11 @@ def generate_video(
     batch_size: int,
     enable_preview: bool,
     preview_steps: int,
+    enable_vae_chunking: bool,
+    vae_temporal_tile_frames: int,
+    vae_temporal_stride_frames: int,
+    vae_spatial_tile_height: int,
+    vae_spatial_tile_width: int,
 ) -> Generator[Tuple[List[Tuple[str, str]], Optional[str], str, str], None, None]:
     global stop_event, current_process
     stop_event.clear()
@@ -201,6 +206,17 @@ def generate_video(
             command.extend(["--preview", str(preview_steps)])
             command.extend(["--preview_suffix", unique_preview_suffix])
 
+        # Add VAE chunking parameters if enabled
+        if enable_vae_chunking:
+            if vae_temporal_tile_frames and vae_temporal_tile_frames > 0:
+                command.extend(["--vae_temporal_tile_frames", str(int(vae_temporal_tile_frames))])
+            if vae_temporal_stride_frames and vae_temporal_stride_frames > 0:
+                command.extend(["--vae_temporal_stride_frames", str(int(vae_temporal_stride_frames))])
+            if vae_spatial_tile_height and vae_spatial_tile_height > 0:
+                command.extend(["--vae_spatial_tile_height", str(int(vae_spatial_tile_height))])
+            if vae_spatial_tile_width and vae_spatial_tile_width > 0:
+                command.extend(["--vae_spatial_tile_width", str(int(vae_spatial_tile_width))])
+
         # Print the command for debugging/transparency
         print("\n" + "="*80)
         print(f"LAUNCHING COMMAND (Batch {i+1}/{batch_size}):")
@@ -295,6 +311,11 @@ def generate_video(
                     "nabla_wT": int(nabla_wT) if attention_type == "nabla" else None,
                     "nabla_wW": int(nabla_wW) if attention_type == "nabla" else None,
                     "nabla_wH": int(nabla_wH) if attention_type == "nabla" else None,
+                    "enable_vae_chunking": enable_vae_chunking,
+                    "vae_temporal_tile_frames": int(vae_temporal_tile_frames) if enable_vae_chunking and vae_temporal_tile_frames else None,
+                    "vae_temporal_stride_frames": int(vae_temporal_stride_frames) if enable_vae_chunking and vae_temporal_stride_frames else None,
+                    "vae_spatial_tile_height": int(vae_spatial_tile_height) if enable_vae_chunking and vae_spatial_tile_height else None,
+                    "vae_spatial_tile_width": int(vae_spatial_tile_width) if enable_vae_chunking and vae_spatial_tile_width else None,
                 }
                 try:
                     add_metadata_to_video(output_filename, params_for_meta)
@@ -767,6 +788,47 @@ def create_interface():
                         text_encoder_dtype_select = gr.Dropdown(choices=["", "bfloat16", "float16", "float32"], label="Text Encoder dtype", value="", info="Empty = use default")
                         vae_dtype_select = gr.Dropdown(choices=["", "bfloat16", "float16", "float32"], label="VAE dtype", value="", info="Empty = use default")
                         computation_dtype_select = gr.Dropdown(choices=["", "bfloat16", "float16", "float32"], label="Computation dtype", value="", info="Empty = use default")
+
+                with gr.Accordion("Advanced: VAE Memory Optimization (Chunking)", open=False):
+                    gr.Markdown("""
+                    **Configure VAE temporal/spatial chunking to reduce memory usage during decode.**
+
+                    Enable this if you get OOM (Out of Memory) errors during VAE decode. Smaller chunk sizes use less memory but take longer to decode.
+
+                    - **Temporal Tile Frames**: Chunk size in frames (default: 16). Try 12 for moderate reduction, 8 for aggressive.
+                    - **Temporal Stride**: Overlap between chunks (default: auto = tile_frames - 4)
+                    - **Spatial Tile Height/Width**: Spatial chunk dimensions (default: 256)
+
+                    Leave disabled to use default settings (recommended unless you experience OOM).
+                    """)
+                    enable_vae_chunking = gr.Checkbox(
+                        label="Enable VAE Chunking",
+                        value=False,
+                        info="Enable custom VAE chunk sizes to reduce memory usage"
+                    )
+                    with gr.Row():
+                        vae_temporal_tile_frames = gr.Slider(
+                            minimum=4, maximum=32, value=12, step=4,
+                            label="Temporal Tile Frames",
+                            info="Chunk size in pixel-space frames (must be divisible by 4)"
+                        )
+                        vae_temporal_stride_frames = gr.Slider(
+                            minimum=0, maximum=28, value=0, step=4,
+                            label="Temporal Stride Frames (0 = auto)",
+                            info="Overlap between chunks. 0 = auto-calculate as tile_frames - 4"
+                        )
+                    with gr.Row():
+                        vae_spatial_tile_height = gr.Slider(
+                            minimum=128, maximum=512, value=256, step=64,
+                            label="Spatial Tile Height",
+                            info="Spatial chunk height (reduce if high resolution causes OOM)"
+                        )
+                        vae_spatial_tile_width = gr.Slider(
+                            minimum=128, maximum=512, value=256, step=64,
+                            label="Spatial Tile Width",
+                            info="Spatial chunk width (reduce if high resolution causes OOM)"
+                        )
+
                 save_path = gr.Textbox(label="Save Path", value="outputs")
 
             random_seed_btn.click(
@@ -809,7 +871,9 @@ def create_interface():
                     use_mixed_weights, use_int8, enable_block_swap, blocks_in_memory, dtype_select,
                     text_encoder_dtype_select, vae_dtype_select, computation_dtype_select,
                     save_path, batch_size,
-                    enable_preview, preview_steps
+                    enable_preview, preview_steps,
+                    enable_vae_chunking, vae_temporal_tile_frames, vae_temporal_stride_frames,
+                    vae_spatial_tile_height, vae_spatial_tile_width
                 ],
                 outputs=[output, preview_output, batch_progress, progress_text]
             )
