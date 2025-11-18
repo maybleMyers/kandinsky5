@@ -351,19 +351,27 @@ class LatentPreviewer():
             print(f"Frame {frame_idx}: min={frame_min:+.4f}, max={frame_max:+.4f}, mean={frame_mean:+.4f}, std={frame_std:.4f}, range={frame_max-frame_min:.4f}", flush=True)
         sys.stdout.flush()
 
-        # Normalize to [0..1]
-        latent_images_min = latent_images_stacked.min()
-        latent_images_max = latent_images_stacked.max()
-        print(f"\nGLOBAL (all frames): min={latent_images_min.item():+.4f}, max={latent_images_max.item():+.4f}, range={latent_images_max.item()-latent_images_min.item():.4f}", flush=True)
+        # Normalize each frame independently to [0..1]
+        # This prevents frames with different value ranges from being crushed
+        print(f"\nNormalizing each frame independently...", flush=True)
+        normalized_frames = []
+        for frame_idx in range(latent_images_stacked.shape[0]):
+            frame = latent_images_stacked[frame_idx]
+            frame_min = frame.min()
+            frame_max = frame.max()
 
-        if latent_images_max > latent_images_min:
-            normalized_images = (latent_images_stacked - latent_images_min) / (latent_images_max - latent_images_min)
-        else:
-            # Handle case where max == min (e.g., all black image)
-            normalized_images = torch.zeros_like(latent_images_stacked)
+            if frame_max > frame_min:
+                normalized_frame = (frame - frame_min) / (frame_max - frame_min)
+            else:
+                # Handle case where max == min (flat color)
+                normalized_frame = torch.zeros_like(frame)
+
+            normalized_frames.append(normalized_frame)
+
+        normalized_images = torch.stack(normalized_frames, dim=0)
 
         # DEBUG: Show normalized ranges
-        print(f"\nAFTER GLOBAL NORMALIZATION:", flush=True)
+        print(f"\nAFTER PER-FRAME NORMALIZATION:", flush=True)
         for frame_idx in range(min(5, normalized_images.shape[0])):
             frame_min = normalized_images[frame_idx].min().item()
             frame_max = normalized_images[frame_idx].max().item()
