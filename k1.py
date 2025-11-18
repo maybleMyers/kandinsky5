@@ -745,7 +745,7 @@ def create_interface():
                     )
                     with gr.Accordion("Latent Preview (During Generation)", open=True):
                         enable_preview = gr.Checkbox(label="Enable Latent Preview", value=True)
-                        preview_steps = gr.Slider(minimum=1, maximum=50, step=1, value=10,
+                        preview_steps = gr.Slider(minimum=1, maximum=50, step=1, value=5,
                                                  label="Preview Every N Steps")
                         preview_output = gr.Video(
                             label="Latest Preview", height=300,

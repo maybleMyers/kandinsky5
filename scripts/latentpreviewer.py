@@ -19,17 +19,8 @@ from PIL import Image
 class LatentPreviewer():
     @torch.inference_mode()
     def __init__(self, args, original_latents, timesteps, device, dtype, model_type="hunyuan"):
-        print(f"\n{'='*80}")
-        print(f">>> LatentPreviewer.__init__() CALLED")
-        print(f">>> model_type={model_type}, device={device}, dtype={dtype}")
-        print(f">>> original_latents shape: {original_latents.shape if original_latents is not None else 'None'}")
-        print(f">>> timesteps shape: {timesteps.shape if timesteps is not None else 'None'}")
         self.mode = "latent2rgb" if not hasattr(args, 'preview_vae') or args.preview_vae is None else "taehv"
-        print(f">>> Mode selected: {self.mode}")
-        # Correctly handle framepack - it should subtract noise like others unless specifically told otherwise
         self.subtract_noise = True # Default to True for all models now
-        # If you specifically need framepack NOT to subtract noise, you'd add a condition here
-        # Example: self.subtract_noise = False if model_type == "framepack" else True
         self.args = args
         self.model_type = model_type
         self.device = device
@@ -37,8 +28,7 @@ class LatentPreviewer():
         if model_type != "framepack" and original_latents is not None and timesteps is not None:
             self.original_latents = original_latents.to(self.device)
             self.timesteps_percent = timesteps / 1000
-        # Add Framepack check here too if needed for original_latents/timesteps later
-        # elif model_type == "framepack" and ...
+
 
         if self.model_type not in ["hunyuan", "wan", "framepack"]:
             raise ValueError(f"Unsupported model type: {self.model_type}")
@@ -61,10 +51,6 @@ class LatentPreviewer():
             # Original code had / 4, but maybe match output FPS is better?
             # Let's keep the / 4 logic for now as it was there before.
             self.fps = int(args.fps / 4) if args.fps > 4 else 1 # Ensure fps is at least 1
-
-        print(f">>> LatentPreviewer initialized successfully!")
-        print(f">>> Decoder: {self.decoder.__name__}, scale_factor={self.scale_factor}, fps={self.fps}")
-        print(f"{'='*80}\n")
 
     @torch.inference_mode()
     def write_preview(self, frames, width, height, preview_suffix=None):
@@ -165,10 +151,8 @@ class LatentPreviewer():
         # self.original_latents is stored [C, F_orig, H, W]
 
         import sys
-        print(f"\n>>> LatentPreviewer.preview() CALLED - Step {current_step}, suffix={preview_suffix}", flush=True)
         sys.stdout.flush()
-        print(f">>> Input latents shape: {noisy_latents.shape}, dtype: {noisy_latents.dtype}, device: {noisy_latents.device}", flush=True)
-        print(f">>> Mode: {self.mode}, Model type: {self.model_type}", flush=True)
+
 
         if self.device == "cuda" or self.device == torch.device("cuda"):
             torch.cuda.empty_cache()
@@ -181,32 +165,23 @@ class LatentPreviewer():
 
         if noisy_latents.ndim == 4:
             processed_noisy_latents = noisy_latents.unsqueeze(0)
-            print(f">>> Unsqueezed to 5D: {processed_noisy_latents.shape}", flush=True)
         elif noisy_latents.ndim == 5:
             processed_noisy_latents = noisy_latents
-            print(f">>> Already 5D: {processed_noisy_latents.shape}", flush=True)
         else:
-            print(f">>> ERROR: Unexpected ndim={noisy_latents.ndim}, returning early", flush=True)
             sys.stdout.flush()
             return
 
         if self.subtract_noise and hasattr(self, 'original_latents') and hasattr(self, 'timesteps_percent') and current_step is not None:
-            print(f">>> Subtracting noise: original_latents shape={self.original_latents.shape}", flush=True)
             if processed_noisy_latents.shape[2] > self.original_latents.shape[1] and self.model_type == "wan":
                 num_extra_frames = processed_noisy_latents.shape[2] - self.original_latents.shape[1]
                 processed_noisy_latents_for_sub = processed_noisy_latents[:, :, :-num_extra_frames, :, :]
-                print(f">>> Trimmed {num_extra_frames} extra frames for WAN model", flush=True)
             else:
                 processed_noisy_latents_for_sub = processed_noisy_latents
             denoisy_latents = self.subtract_original_and_normalize(processed_noisy_latents_for_sub, current_step)
-            print(f">>> After subtract_original_and_normalize: shape={denoisy_latents.shape}", flush=True)
         else:
-            print(f">>> Skipping noise subtraction (subtract_noise={self.subtract_noise})", flush=True)
             denoisy_latents = processed_noisy_latents
 
-        print(f">>> Calling decoder ({self.mode}) with shape: {denoisy_latents.shape}", flush=True)
         decoded = self.decoder(denoisy_latents)  # Expects F, C, H, W output from decoder
-        print(f">>> Decoder returned shape: {decoded.shape}", flush=True)
         sys.stdout.flush()
 
         # Upscale if we used latent2rgb so output is same size as expected
@@ -340,45 +315,30 @@ class LatentPreviewer():
 
         # DEBUG: Print value ranges for each frame BEFORE normalization
         import sys
-        print(f"\n{'='*80}", flush=True)
-        print(f"LATENT PREVIEW DEBUG - Model: {self.model_type}", flush=True)
-        print(f"Number of frames: {latent_images_stacked.shape[0]}", flush=True)
-        for frame_idx in range(min(5, latent_images_stacked.shape[0])):  # Show first 5 frames
-            frame_min = latent_images_stacked[frame_idx].min().item()
-            frame_max = latent_images_stacked[frame_idx].max().item()
-            frame_mean = latent_images_stacked[frame_idx].mean().item()
-            frame_std = latent_images_stacked[frame_idx].std().item()
-            print(f"Frame {frame_idx}: min={frame_min:+.4f}, max={frame_max:+.4f}, mean={frame_mean:+.4f}, std={frame_std:.4f}, range={frame_max-frame_min:.4f}", flush=True)
-        sys.stdout.flush()
 
-        # Normalize each frame independently to [0..1]
-        # This prevents frames with different value ranges from being crushed
-        print(f"\nNormalizing each frame independently...", flush=True)
         normalized_frames = []
         for frame_idx in range(latent_images_stacked.shape[0]):
-            frame = latent_images_stacked[frame_idx]
-            frame_min = frame.min()
-            frame_max = frame.max()
-
-            if frame_max > frame_min:
-                normalized_frame = (frame - frame_min) / (frame_max - frame_min)
-            else:
-                # Handle case where max == min (flat color)
-                normalized_frame = torch.zeros_like(frame)
-
+            frame = latent_images_stacked[frame_idx]  # Shape: (H, W, 3)
+ 
+            # Normalize each color channel independently
+            normalized_channels = []
+            for channel_idx in range(frame.shape[-1]):  # For R, G, B
+                channel = frame[..., channel_idx]
+                channel_min = channel.min()
+                channel_max = channel.max()
+ 
+                if channel_max > channel_min:
+                    normalized_channel = (channel - channel_min) / (channel_max - channel_min)
+                else:
+                    normalized_channel = torch.zeros_like(channel)
+ 
+                normalized_channels.append(normalized_channel)
+ 
+            # Stack channels back together
+            normalized_frame = torch.stack(normalized_channels, dim=-1)
             normalized_frames.append(normalized_frame)
 
         normalized_images = torch.stack(normalized_frames, dim=0)
-
-        # DEBUG: Show normalized ranges
-        print(f"\nAFTER PER-FRAME NORMALIZATION:", flush=True)
-        for frame_idx in range(min(5, normalized_images.shape[0])):
-            frame_min = normalized_images[frame_idx].min().item()
-            frame_max = normalized_images[frame_idx].max().item()
-            frame_mean = normalized_images[frame_idx].mean().item()
-            print(f"Frame {frame_idx}: min={frame_min:.4f}, max={frame_max:.4f}, mean={frame_mean:.4f} (span: {frame_max-frame_min:.4f})", flush=True)
-        print(f"{'='*80}\n", flush=True)
-        sys.stdout.flush()
 
         # Permute to (F, 3, H, W) before returning
         final_images = normalized_images.permute(0, 3, 1, 2)
