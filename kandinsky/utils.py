@@ -46,6 +46,10 @@ def get_T2V_pipeline(
     computation_dtype: torch.dtype = None,
     use_int8: bool = False,
     int8_block_size: int = 128,
+    vae_temporal_tile_frames: int = None,
+    vae_temporal_stride_frames: int = None,
+    vae_spatial_tile_height: int = None,
+    vae_spatial_tile_width: int = None,
 ) -> Kandinsky5T2VPipeline:
     assert resolution in [512]
 
@@ -130,7 +134,14 @@ def get_T2V_pipeline(
     if not offload:
         text_embedder = text_embedder.to(device=device_map["text_embedder"])
 
-    vae = build_vae(conf.model.vae, dtype=vae_dtype)
+    vae = build_vae(
+        conf.model.vae,
+        dtype=vae_dtype,
+        temporal_tile_frames=vae_temporal_tile_frames,
+        temporal_stride_frames=vae_temporal_stride_frames,
+        spatial_tile_height=vae_spatial_tile_height,
+        spatial_tile_width=vae_spatial_tile_width
+    )
     vae = vae.eval()
     if not offload:
         vae = vae.to(device=device_map["vae"], dtype=vae_dtype)
@@ -218,6 +229,10 @@ def get_I2V_pipeline(
     computation_dtype: torch.dtype = None,
     use_int8: bool = False,
     int8_block_size: int = 128,
+    vae_temporal_tile_frames: int = None,
+    vae_temporal_stride_frames: int = None,
+    vae_spatial_tile_height: int = None,
+    vae_spatial_tile_width: int = None,
 ) -> Kandinsky5T2VPipeline:
     # Set component dtypes (fall back to dtype if not specified)
     if text_encoder_dtype is None:
@@ -300,7 +315,14 @@ def get_I2V_pipeline(
     if not offload:
         text_embedder = text_embedder.to(device=device_map["text_embedder"])
 
-    vae = build_vae(conf.model.vae, dtype=vae_dtype)
+    vae = build_vae(
+        conf.model.vae,
+        dtype=vae_dtype,
+        temporal_tile_frames=vae_temporal_tile_frames,
+        temporal_stride_frames=vae_temporal_stride_frames,
+        spatial_tile_height=vae_spatial_tile_height,
+        spatial_tile_width=vae_spatial_tile_width
+    )
     vae = vae.eval()
     if not offload:
         vae = vae.to(device=device_map["vae"], dtype=vae_dtype)
@@ -639,6 +661,10 @@ def get_I2V_pipeline_with_block_swap(
     computation_dtype: torch.dtype = None,
     use_int8: bool = False,
     int8_block_size: int = 128,
+    vae_temporal_tile_frames: int = None,
+    vae_temporal_stride_frames: int = None,
+    vae_spatial_tile_height: int = None,
+    vae_spatial_tile_width: int = None,
 ) -> Kandinsky5I2VPipeline:
     """
     Get I2V pipeline with block swapping support for large models (e.g., 20B).
@@ -731,7 +757,14 @@ def get_I2V_pipeline_with_block_swap(
 
     # Build VAE
     # For block swap, VAE is built on CPU by default
-    vae = build_vae(conf.model.vae, dtype=vae_dtype)
+    vae = build_vae(
+        conf.model.vae,
+        dtype=vae_dtype,
+        temporal_tile_frames=vae_temporal_tile_frames,
+        temporal_stride_frames=vae_temporal_stride_frames,
+        spatial_tile_height=vae_spatial_tile_height,
+        spatial_tile_width=vae_spatial_tile_width
+    )
     vae = vae.eval()
     # Move to GPU only if not using offload or block swap
     if not offload and not enable_block_swap:
@@ -838,6 +871,10 @@ def get_T2V_pipeline_with_block_swap(
     computation_dtype: torch.dtype = None,
     use_int8: bool = False,
     int8_block_size: int = 128,
+    vae_temporal_tile_frames: int = None,
+    vae_temporal_stride_frames: int = None,
+    vae_spatial_tile_height: int = None,
+    vae_spatial_tile_width: int = None,
 ) -> Kandinsky5T2VPipeline:
     """
     Get T2V pipeline with block swapping support for large models (e.g., 20B).
@@ -927,7 +964,14 @@ def get_T2V_pipeline_with_block_swap(
 
     # Build VAE
     # For block swap, VAE is built on CPU by default
-    vae = build_vae(conf.model.vae, dtype=vae_dtype)
+    vae = build_vae(
+        conf.model.vae,
+        dtype=vae_dtype,
+        temporal_tile_frames=vae_temporal_tile_frames,
+        temporal_stride_frames=vae_temporal_stride_frames,
+        spatial_tile_height=vae_spatial_tile_height,
+        spatial_tile_width=vae_spatial_tile_width
+    )
     vae = vae.eval()
     # Move to GPU only if not using offload or block swap
     if not offload and not enable_block_swap:
