@@ -173,6 +173,7 @@ def generate(
     previewer=None,
     preview_interval=None,
     preview_suffix=None,
+    vae=None,
 ):
     g = torch.Generator(device="cuda")
     g.manual_seed(seed)
@@ -215,7 +216,13 @@ def generate(
 
         if previewer is not None and preview_interval and (i + 1) % preview_interval == 0 and (i + 1) < num_steps:
             try:
-                preview_latent = img.permute(3, 0, 1, 2).unsqueeze(0)
+                # Scale latents by VAE scaling factor before preview (same as final decode)
+                if vae is not None:
+                    scaling_factor = vae.config.scaling_factor
+                else:
+                    scaling_factor = 0.476986  # Fallback to known constant
+
+                preview_latent = img.permute(3, 0, 1, 2).unsqueeze(0) / scaling_factor
                 previewer.preview(preview_latent.squeeze(0), i, preview_suffix=preview_suffix)
             except Exception as e:
                 print(f"Error during preview generation at step {i + 1}: {e}")
@@ -314,6 +321,7 @@ def generate_sample(
                 previewer=previewer,
                 preview_interval=preview_interval,
                 preview_suffix=preview_suffix,
+                vae=vae,
             )
 
     # Offload DiT before VAE decode to free up VRAM
@@ -450,6 +458,7 @@ def generate_sample_i2v(
                 previewer=previewer,
                 preview_interval=preview_interval,
                 preview_suffix=preview_suffix,
+                vae=vae,
             )
             if images is not None:
                 images = images.to(device=latent_visual.device, dtype=latent_visual.dtype)
