@@ -1222,11 +1222,42 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
         return self.get_enc_optimal_tiling(enc_inp_shape)
 
 
-def build_vae(conf, dtype=torch.bfloat16):
+def build_vae(
+    conf,
+    dtype=torch.bfloat16,
+    temporal_tile_frames=None,
+    temporal_stride_frames=None,
+    spatial_tile_height=None,
+    spatial_tile_width=None
+):
+    """
+    Build VAE with configurable chunking parameters.
+
+    Args:
+        conf: VAE configuration
+        dtype: Model dtype
+        temporal_tile_frames: Temporal chunk size in pixel-space frames (default: 16)
+        temporal_stride_frames: Temporal stride in pixel-space frames (default: 12)
+        spatial_tile_height: Spatial tile height (default: 256)
+        spatial_tile_width: Spatial tile width (default: 256)
+    """
     if conf.name == "hunyuan":
-        return AutoencoderKLHunyuanVideo.from_pretrained(
+        vae = AutoencoderKLHunyuanVideo.from_pretrained(
             conf.checkpoint_path, subfolder="vae", torch_dtype=dtype
         )
+        # Apply custom chunking parameters if provided
+        if temporal_tile_frames is not None:
+            vae.tile_sample_min_num_frames = temporal_tile_frames
+        if temporal_stride_frames is not None:
+            vae.tile_sample_stride_num_frames = temporal_stride_frames
+        elif temporal_tile_frames is not None:
+            # Auto-calculate stride: tile_size - 4 for proper overlap
+            vae.tile_sample_stride_num_frames = max(4, temporal_tile_frames - 4)
+        if spatial_tile_height is not None:
+            vae.tile_sample_min_height = spatial_tile_height
+        if spatial_tile_width is not None:
+            vae.tile_sample_min_width = spatial_tile_width
+        return vae
     elif conf.name == "flux":
         from diffusers.models import AutoencoderKL
         vae = AutoencoderKL.from_pretrained(conf.checkpoint_path, subfolder="vae", torch_dtype=torch.bfloat16)

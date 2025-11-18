@@ -324,6 +324,32 @@ def parse_args():
         help="Unique suffix for preview files to avoid conflicts in concurrent runs."
     )
 
+    # VAE temporal chunking configuration
+    parser.add_argument(
+        "--vae_temporal_tile_frames",
+        type=int,
+        default=None,
+        help="Temporal chunk size for VAE decode in pixel-space frames (default: 16). Lower values reduce memory usage. Recommended: 12 for moderate memory reduction, 8 for aggressive reduction. Must be divisible by 4."
+    )
+    parser.add_argument(
+        "--vae_temporal_stride_frames",
+        type=int,
+        default=None,
+        help="Temporal stride for VAE decode in pixel-space frames (default: tile_frames - 4). Controls overlap between chunks for smooth blending. If not specified, auto-calculated as tile_frames - 4."
+    )
+    parser.add_argument(
+        "--vae_spatial_tile_height",
+        type=int,
+        default=None,
+        help="Spatial tile height for VAE decode (default: 256). Lower values reduce memory usage but increase processing time."
+    )
+    parser.add_argument(
+        "--vae_spatial_tile_width",
+        type=int,
+        default=None,
+        help="Spatial tile width for VAE decode (default: 256). Lower values reduce memory usage but increase processing time."
+    )
+
     args = parser.parse_args()
     return args
 
@@ -391,6 +417,10 @@ if __name__ == "__main__":
                 computation_dtype=computation_dtype,
                 use_int8=args.use_int8,
                 int8_block_size=args.int8_block_size,
+                vae_temporal_tile_frames=args.vae_temporal_tile_frames,
+                vae_temporal_stride_frames=args.vae_temporal_stride_frames,
+                vae_spatial_tile_height=args.vae_spatial_tile_height,
+                vae_spatial_tile_width=args.vae_spatial_tile_width,
             )
         else:
             # Use standard I2V pipeline
@@ -411,6 +441,10 @@ if __name__ == "__main__":
                 computation_dtype=computation_dtype,
                 use_int8=args.use_int8,
                 int8_block_size=args.int8_block_size,
+                vae_temporal_tile_frames=args.vae_temporal_tile_frames,
+                vae_temporal_stride_frames=args.vae_temporal_stride_frames,
+                vae_spatial_tile_height=args.vae_spatial_tile_height,
+                vae_spatial_tile_width=args.vae_spatial_tile_width,
             )
     else:  # T2V
         if is_t2v_pro and args.enable_block_swap:
@@ -435,6 +469,10 @@ if __name__ == "__main__":
                 computation_dtype=computation_dtype,
                 use_int8=args.use_int8,
                 int8_block_size=args.int8_block_size,
+                vae_temporal_tile_frames=args.vae_temporal_tile_frames,
+                vae_temporal_stride_frames=args.vae_temporal_stride_frames,
+                vae_spatial_tile_height=args.vae_spatial_tile_height,
+                vae_spatial_tile_width=args.vae_spatial_tile_width,
             )
         else:
             # Use standard T2V pipeline
@@ -455,6 +493,10 @@ if __name__ == "__main__":
                 computation_dtype=computation_dtype,
                 use_int8=args.use_int8,
                 int8_block_size=args.int8_block_size,
+                vae_temporal_tile_frames=args.vae_temporal_tile_frames,
+                vae_temporal_stride_frames=args.vae_temporal_stride_frames,
+                vae_spatial_tile_height=args.vae_spatial_tile_height,
+                vae_spatial_tile_width=args.vae_spatial_tile_width,
             )
 
     if args.output_filename is None:
