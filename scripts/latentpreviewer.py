@@ -146,9 +146,11 @@ class LatentPreviewer():
         # Subtract the portion of original latents
         denoisy_latents = noisy_latents - (self.original_latents.to(device=noisy_latents.device) * noise_remaining)
 
-        # Normalize
-        normalized_denoisy_latents = (denoisy_latents - denoisy_latents.mean()) / (denoisy_latents.std() + 1e-8)
-        return normalized_denoisy_latents
+        # Scale by a factor to improve brightness while preserving motion
+        # The standardization to unit variance was crushing the contrast
+        # Instead, we scale by 2.0 to increase the dynamic range for RGB conversion
+        scaled_latents = denoisy_latents * 2.0
+        return scaled_latents
 
     @torch.inference_mode()
     def preview(self, noisy_latents, current_step=None, preview_suffix=None): # CORRECTED METHOD NAME
