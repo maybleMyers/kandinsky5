@@ -16,7 +16,8 @@ open browser goto 127.0.0.1:7860
 I added some mixed models here: https://huggingface.co/maybleMyers/kan/  
 You can input them in the DiT Checkpoint Path in the gui.  
 
-To use lite i2v download https://huggingface.co/kandinskylab/Kandinsky-5.0-I2V-Lite-5s/blob/main/model/kandinsky5lite_i2v_5s.safetensors that model and put it in the lite_checkpoints subfolder. You need to have the full i2v pro diffusers cloned in the root directory. Select mode - i2v and model configuration 5s Lite (I2V) .  Either mess with the vae config or set 1 block swapped for now to offload before vae decoding.  
+## To use lite i2v 
+download https://huggingface.co/kandinskylab/Kandinsky-5.0-I2V-Lite-5s/blob/main/model/kandinsky5lite_i2v_5s.safetensors that model and put it in the lite_checkpoints subfolder. You need to have the full i2v pro diffusers cloned in the root directory. Select mode - i2v and model configuration 5s Lite (I2V) .  Either mess with the vae config or set 1 block swapped for now to offload before vae decoding.  
 
 
 Changlog:  
@@ -27,7 +28,7 @@ Changlog:
     Add preview support. Add int8 support to drastically lower ram/vram reqs.  
 
 
-# Authors
+### Authors
 <B>Project Leader:</B> Denis Dimitrov</br>
 
 <B>Team Leads:</B> Vladimir Arkhipkin, Vladimir Korviakov, Nikolai Gerasimenko, Denis Parkhomenko</br>
@@ -36,7 +37,7 @@ Changlog:
 
 <B>Contributors:</B> Anna Dmitrienko,  Anastasia Maltseva, Kirill Chernyshev, Ilia Vasiliev, Viacheslav Vasilev, Vladimir Polovnikov, Yury Kolabushin, Alexander Belykh, Mikhail Mamaev, Anastasia Aliaskina, Tatiana Nikulina, Polina Gavrilova</br>
 
-# Citation
+### Citation
 
 ```
 @misc{kandinsky2025,
