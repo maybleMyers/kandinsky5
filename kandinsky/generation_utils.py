@@ -490,9 +490,42 @@ def generate_sample_i2v(
                 latent_visual.shape[-1],
             )
             images = images.to(device=vae_device)
+
+            # DEBUG: Check latent values before VAE decode
+            print(f"\n{'='*80}", flush=True)
+            print(f"DEBUG: Latents before VAE decode", flush=True)
+            print(f"Shape: {images.shape}", flush=True)
+            print(f"Dtype: {images.dtype}", flush=True)
+            print(f"Device: {images.device}", flush=True)
+            print(f"Min: {images.min().item():.6f}, Max: {images.max().item():.6f}", flush=True)
+            print(f"Mean: {images.mean().item():.6f}, Std: {images.std().item():.6f}", flush=True)
+            print(f"Has NaN: {torch.isnan(images).any().item()}", flush=True)
+            print(f"Has Inf: {torch.isinf(images).any().item()}", flush=True)
+            print(f"VAE scaling_factor: {vae.config.scaling_factor}", flush=True)
+            print(f"VAE dtype: {next(vae.parameters()).dtype}", flush=True)
+            print(f"{'='*80}\n", flush=True)
+
             images = (images / vae.config.scaling_factor).permute(0, 4, 1, 2, 3)
-            images = vae.decode(images).sample
-            images = ((images.clamp(-1.0, 1.0) + 1.0) * 127.5).to(torch.uint8)
+
+            print(f"\n{'='*80}", flush=True)
+            print(f"DEBUG: After permute, ready for VAE", flush=True)
+            print(f"Shape: {images.shape}", flush=True)
+            print(f"Dtype: {images.dtype}", flush=True)
+            print(f"Min: {images.min().item():.6f}, Max: {images.max().item():.6f}", flush=True)
+            print(f"{'='*80}\n", flush=True)
+
+            try:
+                images = vae.decode(images).sample
+                images = ((images.clamp(-1.0, 1.0) + 1.0) * 127.5).to(torch.uint8)
+            except Exception as e:
+                print(f"\n{'='*80}", flush=True)
+                print(f"ERROR during VAE decode:", flush=True)
+                print(f"Exception type: {type(e).__name__}", flush=True)
+                print(f"Exception message: {str(e)}", flush=True)
+                print(f"{'='*80}\n", flush=True)
+                import traceback
+                traceback.print_exc()
+                raise
 
     # Log VRAM after VAE decode, before VAE offload
     log_vram_usage("AFTER VAE DECODE, BEFORE OFFLOAD (I2V)", dit=dit, vae=vae, text_embedder=None)
