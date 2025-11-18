@@ -315,14 +315,36 @@ class LatentPreviewer():
 
         latent_images_stacked = torch.stack(latent_images, dim=0)
 
+        # DEBUG: Print value ranges for each frame BEFORE normalization
+        print(f"\n{'='*80}")
+        print(f"LATENT PREVIEW DEBUG - Model: {self.model_type}")
+        print(f"Number of frames: {latent_images_stacked.shape[0]}")
+        for frame_idx in range(min(5, latent_images_stacked.shape[0])):  # Show first 5 frames
+            frame_min = latent_images_stacked[frame_idx].min().item()
+            frame_max = latent_images_stacked[frame_idx].max().item()
+            frame_mean = latent_images_stacked[frame_idx].mean().item()
+            frame_std = latent_images_stacked[frame_idx].std().item()
+            print(f"Frame {frame_idx}: min={frame_min:+.4f}, max={frame_max:+.4f}, mean={frame_mean:+.4f}, std={frame_std:.4f}, range={frame_max-frame_min:.4f}")
+
         # Normalize to [0..1]
         latent_images_min = latent_images_stacked.min()
         latent_images_max = latent_images_stacked.max()
+        print(f"\nGLOBAL (all frames): min={latent_images_min.item():+.4f}, max={latent_images_max.item():+.4f}, range={latent_images_max.item()-latent_images_min.item():.4f}")
+
         if latent_images_max > latent_images_min:
             normalized_images = (latent_images_stacked - latent_images_min) / (latent_images_max - latent_images_min)
         else:
             # Handle case where max == min (e.g., all black image)
             normalized_images = torch.zeros_like(latent_images_stacked)
+
+        # DEBUG: Show normalized ranges
+        print(f"\nAFTER GLOBAL NORMALIZATION:")
+        for frame_idx in range(min(5, normalized_images.shape[0])):
+            frame_min = normalized_images[frame_idx].min().item()
+            frame_max = normalized_images[frame_idx].max().item()
+            frame_mean = normalized_images[frame_idx].mean().item()
+            print(f"Frame {frame_idx}: min={frame_min:.4f}, max={frame_max:.4f}, mean={frame_mean:.4f} (span: {frame_max-frame_min:.4f})")
+        print(f"{'='*80}\n")
 
         # Permute to (F, 3, H, W) before returning
         final_images = normalized_images.permute(0, 3, 1, 2)
