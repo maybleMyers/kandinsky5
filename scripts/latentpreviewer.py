@@ -112,8 +112,6 @@ class LatentPreviewer():
                 except Exception:
                      break
 
-            # Flush out any remaining packets and close.
-            #####logger.info(f"LatentPreviewer: Flushing stream for {target}")
             for packet in stream.encode(): # Flush stream
                 container.mux(packet)
             
@@ -151,8 +149,6 @@ class LatentPreviewer():
         # self.original_latents is stored [C, F_orig, H, W]
 
         import sys
-        sys.stdout.flush()
-
 
         if self.device == "cuda" or self.device == torch.device("cuda"):
             torch.cuda.empty_cache()
@@ -168,7 +164,6 @@ class LatentPreviewer():
         elif noisy_latents.ndim == 5:
             processed_noisy_latents = noisy_latents
         else:
-            sys.stdout.flush()
             return
 
         if self.subtract_noise and hasattr(self, 'original_latents') and hasattr(self, 'timesteps_percent') and current_step is not None:
@@ -182,7 +177,6 @@ class LatentPreviewer():
             denoisy_latents = processed_noisy_latents
 
         decoded = self.decoder(denoisy_latents)  # Expects F, C, H, W output from decoder
-        sys.stdout.flush()
 
         # Upscale if we used latent2rgb so output is same size as expected
         if self.scale_factor is not None:
