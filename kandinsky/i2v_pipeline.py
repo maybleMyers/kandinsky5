@@ -265,6 +265,7 @@ class Kandinsky5I2VPipeline:
 
         previewer = None
         if preview is not None and preview > 0:
+            print(f"\n>>> i2v_pipeline: Initializing previewer with preview={preview}")
             try:
                 from scripts.latentpreviewer import LatentPreviewer
                 import os
@@ -272,11 +273,14 @@ class Kandinsky5I2VPipeline:
                 g_temp = torch.Generator(device=self.device_map["dit"])
                 g_temp.manual_seed(seed)
                 initial_latent = torch.randn(shape[0] * shape[1], shape[2], shape[3], shape[4], device=self.device_map["dit"], generator=g_temp)
+                print(f">>> initial_latent shape before permute: {initial_latent.shape}")
                 initial_latent = initial_latent.permute(3, 0, 1, 2)
+                print(f">>> initial_latent shape after permute: {initial_latent.shape}")
 
                 timesteps = torch.linspace(1, 0, num_steps + 1, device=self.device_map["dit"])
                 timesteps = scheduler_scale * timesteps / (1 + (scheduler_scale - 1) * timesteps)
                 timesteps = timesteps[:-1] * 1000
+                print(f">>> timesteps shape: {timesteps.shape}")
 
                 class Args:
                     def __init__(self, save_path, fps):
@@ -296,9 +300,14 @@ class Kandinsky5I2VPipeline:
                     dtype=torch.bfloat16,
                     model_type="hunyuan"
                 )
+                print(f">>> i2v_pipeline: Previewer initialized successfully, will generate preview every {preview} steps")
             except Exception as e:
-                print(f"Failed to initialize previewer: {e}")
+                print(f">>> i2v_pipeline: Failed to initialize previewer: {e}")
+                import traceback
+                traceback.print_exc()
                 previewer = None
+        else:
+            print(f">>> i2v_pipeline: Preview disabled (preview={preview})")
 
         force_offload = hasattr(self.dit, 'enable_block_swap') and self.dit.enable_block_swap
         images = generate_sample_i2v(

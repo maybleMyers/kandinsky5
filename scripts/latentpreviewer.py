@@ -19,13 +19,8 @@ from PIL import Image
 class LatentPreviewer():
     @torch.inference_mode()
     def __init__(self, args, original_latents, timesteps, device, dtype, model_type="hunyuan"):
-        #print(f"DEBUG LATENT_PREVIEW.PY: LatentPreviewer __init__ called from file: {__file__}")
         self.mode = "latent2rgb" if not hasattr(args, 'preview_vae') or args.preview_vae is None else "taehv"
-        ######logger.info(f"Initializing latent previewer with mode {self.mode}...")
-        # Correctly handle framepack - it should subtract noise like others unless specifically told otherwise
         self.subtract_noise = True # Default to True for all models now
-        # If you specifically need framepack NOT to subtract noise, you'd add a condition here
-        # Example: self.subtract_noise = False if model_type == "framepack" else True
         self.args = args
         self.model_type = model_type
         self.device = device
@@ -33,8 +28,7 @@ class LatentPreviewer():
         if model_type != "framepack" and original_latents is not None and timesteps is not None:
             self.original_latents = original_latents.to(self.device)
             self.timesteps_percent = timesteps / 1000
-        # Add Framepack check here too if needed for original_latents/timesteps later
-        # elif model_type == "framepack" and ...
+
 
         if self.model_type not in ["hunyuan", "wan", "framepack"]:
             raise ValueError(f"Unsupported model type: {self.model_type}")
@@ -57,7 +51,6 @@ class LatentPreviewer():
             # Original code had / 4, but maybe match output FPS is better?
             # Let's keep the / 4 logic for now as it was there before.
             self.fps = int(args.fps / 4) if args.fps > 4 else 1 # Ensure fps is at least 1
-
 
     @torch.inference_mode()
     def write_preview(self, frames, width, height, preview_suffix=None):
@@ -119,8 +112,6 @@ class LatentPreviewer():
                 except Exception:
                      break
 
-            # Flush out any remaining packets and close.
-            #####logger.info(f"LatentPreviewer: Flushing stream for {target}")
             for packet in stream.encode(): # Flush stream
                 container.mux(packet)
             
@@ -157,9 +148,11 @@ class LatentPreviewer():
         # noisy_latents is input [C, F_input, H, W]
         # self.original_latents is stored [C, F_orig, H, W]
 
+        import sys
+
         if self.device == "cuda" or self.device == torch.device("cuda"):
             torch.cuda.empty_cache()
-        
+
         processed_noisy_latents = noisy_latents # Placeholder for now, original logic was complex
         # The complex logic from the previous attempt to unsqueeze/trim noisy_latents
         # can be simplified or re-evaluated once this basic naming error is fixed.
@@ -182,7 +175,6 @@ class LatentPreviewer():
             denoisy_latents = self.subtract_original_and_normalize(processed_noisy_latents_for_sub, current_step)
         else:
             denoisy_latents = processed_noisy_latents
-
 
         decoded = self.decoder(denoisy_latents)  # Expects F, C, H, W output from decoder
 
@@ -315,14 +307,32 @@ class LatentPreviewer():
 
         latent_images_stacked = torch.stack(latent_images, dim=0)
 
-        # Normalize to [0..1]
-        latent_images_min = latent_images_stacked.min()
-        latent_images_max = latent_images_stacked.max()
-        if latent_images_max > latent_images_min:
-            normalized_images = (latent_images_stacked - latent_images_min) / (latent_images_max - latent_images_min)
-        else:
-            # Handle case where max == min (e.g., all black image)
-            normalized_images = torch.zeros_like(latent_images_stacked)
+        # DEBUG: Print value ranges for each frame BEFORE normalization
+        import sys
+
+        normalized_frames = []
+        for frame_idx in range(latent_images_stacked.shape[0]):
+            frame = latent_images_stacked[frame_idx]  # Shape: (H, W, 3)
+ 
+            # Normalize each color channel independently
+            normalized_channels = []
+            for channel_idx in range(frame.shape[-1]):  # For R, G, B
+                channel = frame[..., channel_idx]
+                channel_min = channel.min()
+                channel_max = channel.max()
+ 
+                if channel_max > channel_min:
+                    normalized_channel = (channel - channel_min) / (channel_max - channel_min)
+                else:
+                    normalized_channel = torch.zeros_like(channel)
+ 
+                normalized_channels.append(normalized_channel)
+ 
+            # Stack channels back together
+            normalized_frame = torch.stack(normalized_channels, dim=-1)
+            normalized_frames.append(normalized_frame)
+
+        normalized_images = torch.stack(normalized_frames, dim=0)
 
         # Permute to (F, 3, H, W) before returning
         final_images = normalized_images.permute(0, 3, 1, 2)

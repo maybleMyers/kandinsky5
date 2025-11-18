@@ -575,7 +575,10 @@ def create_interface():
 
                 function updateTitle(text) {
                     if (text && text.trim()) {
-                        const pattern = /(?:.*?\((\d+)%\).*?(?:ETA|Remaining):\s*([\d:]+))|(?:(\d+)%\|.*\[.*<([\d:?]+))/;
+                        // Match k1.py's format: "Generating: XX% (current/total steps) - ETA: HH:MM:SS"
+                        // Also support raw TQDM format: "XX%|...[...<HH:MM:SS"
+                        // Also support h1111 format: "(XX%)" + "ETA: HH:MM:SS"
+                        const pattern = /(?:.*?(\d+)%.*?(?:ETA|Remaining):\s*([\d:]+))|(?:(\d+)%\|.*\[.*<([\d:?]+))/;
                         const match = text.match(pattern);
 
                         if (match) {
@@ -742,7 +745,7 @@ def create_interface():
                     )
                     with gr.Accordion("Latent Preview (During Generation)", open=True):
                         enable_preview = gr.Checkbox(label="Enable Latent Preview", value=True)
-                        preview_steps = gr.Slider(minimum=1, maximum=50, step=1, value=10,
+                        preview_steps = gr.Slider(minimum=1, maximum=50, step=1, value=5,
                                                  label="Preview Every N Steps")
                         preview_output = gr.Video(
                             label="Latest Preview", height=300,
