@@ -352,28 +352,20 @@ class LatentPreviewer():
         sys.stdout.flush()
 
         # Normalize each frame independently to [0..1]
-        # Apply per-channel normalization to auto-correct color tints
-        print(f"\nNormalizing each frame independently with per-channel white balance...", flush=True)
+        # This prevents frames with different value ranges from being crushed
+        print(f"\nNormalizing each frame independently...", flush=True)
         normalized_frames = []
         for frame_idx in range(latent_images_stacked.shape[0]):
-            frame = latent_images_stacked[frame_idx]  # Shape: (H, W, 3)
+            frame = latent_images_stacked[frame_idx]
+            frame_min = frame.min()
+            frame_max = frame.max()
 
-            # Normalize each color channel independently
-            normalized_channels = []
-            for channel_idx in range(frame.shape[-1]):  # For R, G, B
-                channel = frame[..., channel_idx]
-                channel_min = channel.min()
-                channel_max = channel.max()
+            if frame_max > frame_min:
+                normalized_frame = (frame - frame_min) / (frame_max - frame_min)
+            else:
+                # Handle case where max == min (flat color)
+                normalized_frame = torch.zeros_like(frame)
 
-                if channel_max > channel_min:
-                    normalized_channel = (channel - channel_min) / (channel_max - channel_min)
-                else:
-                    normalized_channel = torch.zeros_like(channel)
-
-                normalized_channels.append(normalized_channel)
-
-            # Stack channels back together
-            normalized_frame = torch.stack(normalized_channels, dim=-1)
             normalized_frames.append(normalized_frame)
 
         normalized_images = torch.stack(normalized_frames, dim=0)
