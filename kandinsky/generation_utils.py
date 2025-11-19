@@ -339,6 +339,11 @@ def generate_sample(
     text_cu_seqlens = text_cu_seqlens.to(device=device)[-1].item()
     null_text_cu_seqlens = null_text_cu_seqlens.to(device=device)[-1].item()
 
+    if attention_mask is not None:
+        attention_mask = attention_mask.to(device)
+    if null_attention_mask is not None:
+        null_attention_mask = null_attention_mask.to(device)
+
     visual_rope_pos = [
         torch.arange(duration),
         torch.arange(shape[-3] // conf.model.dit_params.patch_size[1]),
