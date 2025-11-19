@@ -158,6 +158,12 @@ Rewrite Prompt: "{prompt}". Answer only with expanded prompt.""",
                 if self.offload:
                     self.text_embedder = self.text_embedder.to(self.device_map["text_embedder"])
                 caption = self.expand_prompt(caption,image=image)
+                
+                # Explicitly move text embedder back to CPU if offloading to free VRAM for DiT
+                if self.offload:
+                    self.text_embedder = self.text_embedder.to("cpu")
+                    torch.cuda.empty_cache()
+
             if self.world_size > 1:
                 caption = [caption]
                 torch.distributed.broadcast_object_list(caption, 0)

@@ -1265,7 +1265,11 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
             # Moderate tiles
             tile_h, tile_w = 192, 192
             stride_h, stride_w = 160, 160
-        elif total_pixels <= 1280 * 704:  # High-res (e.g., 1280x704)
+        elif total_pixels <= 1048576: # High-res (e.g., 1024x1024)
+            # Standard High Res (1MP)
+            tile_h, tile_w = 256, 256
+            stride_h, stride_w = 192, 192
+        elif total_pixels <= 1280 * 704:  # Wide-High-res (e.g., 1280x704)
             # Smaller tiles to prevent OOM
             tile_h, tile_w = 128, 128
             stride_h, stride_w = 96, 96
@@ -1353,6 +1357,8 @@ def build_vae(
     elif conf.name == "flux":
         from diffusers.models import AutoencoderKL
         vae = AutoencoderKL.from_pretrained(conf.checkpoint_path, subfolder="flux/vae", torch_dtype=torch.bfloat16)
+        # Better utilization: Enable tiling for Flux VAE immediately to save memory
+        vae.enable_tiling()
         return vae
     else:
         assert False, f"unknown vae name {conf.name}"

@@ -1,4 +1,5 @@
 import os
+import gc
 from typing import Union
 import torch
 from torch.distributed.device_mesh import init_device_mesh
@@ -145,11 +146,17 @@ def get_T2V_pipeline(
         conf.model.attention.update(attention_config_override)
 
     conf.model.text_embedder.qwen.mode = "t2v"
-    text_embedder = get_text_embedder(conf.model.text_embedder, device=device_map["text_embedder"],
+    
+    # Use CPU for init if offloading to prevent memory spike
+    embedder_init_device = "cpu" if offload else device_map["text_embedder"]
+    text_embedder = get_text_embedder(conf.model.text_embedder, device=embedder_init_device,
                                       quantized_qwen=quantized_qwen, text_token_padding=text_token_padding,
                                       dtype=text_encoder_dtype)
     if not offload:
         text_embedder = text_embedder.to(device=device_map["text_embedder"])
+    
+    gc.collect()
+    torch.cuda.empty_cache()
 
     vae = build_vae(
         conf.model.vae,
@@ -162,6 +169,9 @@ def get_T2V_pipeline(
     vae = vae.eval()
     if not offload:
         vae = vae.to(device=device_map["vae"], dtype=vae_dtype)
+        
+    gc.collect()
+    torch.cuda.empty_cache()
 
     # Add INT8 configuration to dit_params
     dit_params_dict = OmegaConf.to_container(conf.model.dit_params, resolve=True)
@@ -201,6 +211,10 @@ def get_T2V_pipeline(
         dit.load_state_dict(state_dict, assign=True, strict=False)
     else:
         dit.load_state_dict(state_dict, assign=True)
+        
+    # Clear state dict from RAM immediately
+    del state_dict
+    gc.collect()
 
     if not offload:
         if use_mixed_weights:
@@ -208,6 +222,9 @@ def get_T2V_pipeline(
             dit = dit.to(device_map["dit"])
         else:
             dit = dit.to(device_map["dit"], dtype=computation_dtype)
+    
+    gc.collect()
+    torch.cuda.empty_cache()
 
     if world_size > 1:
         dit = parallelize_dit(dit, device_mesh["tensor_parallel"])
@@ -330,11 +347,17 @@ def get_I2V_pipeline(
         conf.model.attention.update(attention_config_override)
 
     conf.model.text_embedder.qwen.mode = "i2v"
-    text_embedder = get_text_embedder(conf.model.text_embedder, device=device_map["text_embedder"],
+    
+    # Use CPU for init if offloading to prevent memory spike
+    embedder_init_device = "cpu" if offload else device_map["text_embedder"]
+    text_embedder = get_text_embedder(conf.model.text_embedder, device=embedder_init_device,
                                       quantized_qwen=quantized_qwen, text_token_padding=text_token_padding,
                                       dtype=text_encoder_dtype)
     if not offload:
         text_embedder = text_embedder.to(device=device_map["text_embedder"])
+
+    gc.collect()
+    torch.cuda.empty_cache()
 
     vae = build_vae(
         conf.model.vae,
@@ -347,6 +370,9 @@ def get_I2V_pipeline(
     vae = vae.eval()
     if not offload:
         vae = vae.to(device=device_map["vae"], dtype=vae_dtype)
+        
+    gc.collect()
+    torch.cuda.empty_cache()
 
     # Add INT8 configuration to dit_params
     dit_params_dict = OmegaConf.to_container(conf.model.dit_params, resolve=True)
@@ -386,6 +412,9 @@ def get_I2V_pipeline(
         dit.load_state_dict(state_dict, assign=True, strict=False)
     else:
         dit.load_state_dict(state_dict, assign=True)
+    
+    del state_dict
+    gc.collect()
 
     if not offload:
         if use_mixed_weights:
@@ -393,6 +422,9 @@ def get_I2V_pipeline(
             dit = dit.to(device_map["dit"])
         else:
             dit = dit.to(device_map["dit"], dtype=computation_dtype)
+    
+    gc.collect()
+    torch.cuda.empty_cache()
 
     if world_size > 1:
         dit = parallelize_dit(dit, device_mesh["tensor_parallel"])
@@ -496,15 +528,24 @@ def _get_TI2I_params(
     conf.model.dit_params.attention_engine = attention_engine
 
     conf.model.text_embedder.qwen.mode = "t2i"
-    text_embedder = get_text_embedder(conf.model.text_embedder, device=device_map["text_embedder"],
+    
+    # Use CPU for init if offloading
+    embedder_init_device = "cpu" if offload else device_map["text_embedder"]
+    text_embedder = get_text_embedder(conf.model.text_embedder, device=embedder_init_device,
                                       quantized_qwen=quantized_qwen, text_token_padding=text_token_padding)
     if not offload:
         text_embedder = text_embedder.to( device=device_map["text_embedder"])
+
+    gc.collect()
+    torch.cuda.empty_cache()
 
     vae = build_vae(conf.model.vae)
     vae = vae.eval()
     if not offload:
         vae = vae.to(device=device_map["vae"])
+
+    gc.collect()
+    torch.cuda.empty_cache()
 
     dit = get_dit(conf.model.dit_params)
 
@@ -520,9 +561,15 @@ def _get_TI2I_params(
     checkpoint_path = checkpoint_path_override if checkpoint_path_override else conf.model.checkpoint_path
     state_dict = load_file(checkpoint_path)
     dit.load_state_dict(state_dict, assign=True)
+    
+    del state_dict
+    gc.collect()
 
     if not offload:
         dit = dit.to(device_map["dit"])
+        
+    gc.collect()
+    torch.cuda.empty_cache()
 
     if world_size > 1:
         dit = parallelize_dit(dit, device_mesh["tensor_parallel"])
@@ -772,27 +819,6 @@ def get_I2V_pipeline_with_block_swap(
 ) -> Kandinsky5I2VPipeline:
     """
     Get I2V pipeline with block swapping support for large models (e.g., 20B).
-
-    Args:
-        device_map: Device mapping for components
-        cache_dir: Directory to cache downloaded weights
-        dit_path: Path to DiT checkpoint
-        text_encoder_path: Path to text encoder
-        text_encoder2_path: Path to secondary text encoder
-        vae_path: Path to VAE
-        conf_path: Path to config YAML file
-        offload: Enable full model offloading
-        magcache: Enable MagCache
-        quantized_qwen: Use quantized Qwen encoder
-        text_token_padding: Enable text token padding
-        attention_engine: Attention implementation to use
-        blocks_in_memory: Number of transformer blocks to keep in GPU memory
-        enable_block_swap: Enable block swapping (set False to disable for debugging)
-        dtype: Data type for model weights (default: torch.bfloat16)
-        use_mixed_weights: Preserve original weight dtypes (fp32 for critical layers)
-
-    Returns:
-        Kandinsky5I2VPipeline with block-swapping enabled DiT
     """
     # Set component dtypes (fall back to dtype if not specified)
     if text_encoder_dtype is None:
@@ -839,18 +865,12 @@ def get_I2V_pipeline_with_block_swap(
             conf.model.attention = {}
         conf.model.attention.update(attention_config_override)
 
-    # CLI parameters take priority over config file
-    # Only use config values if CLI parameters are at default values
-    # if hasattr(conf, 'block_swap'):
-    #     enable_block_swap = conf.block_swap.get('enabled', enable_block_swap)
-    #     blocks_in_memory = conf.block_swap.get('blocks_in_memory', blocks_in_memory)
-
     # Build text embedder
     # For block swap, always keep text encoder on CPU initially to save VRAM
     conf.model.text_embedder.qwen.mode = "i2v"
     text_embedder = get_text_embedder(
         conf.model.text_embedder,
-        device="cpu" if enable_block_swap else device_map["text_embedder"],
+        device="cpu" if enable_block_swap or offload else device_map["text_embedder"],
         quantized_qwen=quantized_qwen,
         text_token_padding=text_token_padding,
         dtype=text_encoder_dtype
@@ -858,6 +878,9 @@ def get_I2V_pipeline_with_block_swap(
     # Move to GPU only if not using offload or block swap
     if not offload and not enable_block_swap:
         text_embedder = text_embedder.to(device=device_map["text_embedder"])
+    
+    gc.collect()
+    torch.cuda.empty_cache()
 
     # Build VAE
     # For block swap, VAE is built on CPU by default
@@ -873,6 +896,9 @@ def get_I2V_pipeline_with_block_swap(
     # Move to GPU only if not using offload or block swap
     if not offload and not enable_block_swap:
         vae = vae.to(device=device_map["vae"], dtype=vae_dtype)
+        
+    gc.collect()
+    torch.cuda.empty_cache()
 
     # Build DiT with block swapping
     print(f"Building DiT with block swapping: enabled={enable_block_swap}, blocks_in_memory={blocks_in_memory}")
@@ -922,6 +948,9 @@ def get_I2V_pipeline_with_block_swap(
         dit.load_state_dict(state_dict, assign=True, strict=False)
     else:
         dit.load_state_dict(state_dict, assign=True)
+        
+    del state_dict
+    gc.collect()
 
     # Keep DiT on CPU when using offload OR block swap
     # For block swap, DiT will be loaded on-demand during generation
@@ -931,6 +960,9 @@ def get_I2V_pipeline_with_block_swap(
             dit = dit.to(device_map["dit"])
         else:
             dit = dit.to(device_map["dit"], dtype=computation_dtype)
+    
+    gc.collect()
+    torch.cuda.empty_cache()
 
     if world_size > 1:
         if enable_block_swap:
@@ -982,28 +1014,6 @@ def get_T2V_pipeline_with_block_swap(
 ) -> Kandinsky5T2VPipeline:
     """
     Get T2V pipeline with block swapping support for large models (e.g., 20B).
-
-    Args:
-        device_map: Device mapping for components
-        resolution: Target resolution (default: 512)
-        cache_dir: Directory to cache downloaded weights
-        dit_path: Path to DiT checkpoint
-        text_encoder_path: Path to text encoder
-        text_encoder2_path: Path to secondary text encoder
-        vae_path: Path to VAE
-        conf_path: Path to config YAML file
-        offload: Enable full model offloading
-        magcache: Enable MagCache
-        quantized_qwen: Use quantized Qwen encoder
-        text_token_padding: Enable text token padding
-        attention_engine: Attention implementation to use
-        blocks_in_memory: Number of transformer blocks to keep in GPU memory
-        enable_block_swap: Enable block swapping (set False to disable for debugging)
-        dtype: Data type for model weights (default: torch.bfloat16)
-        use_mixed_weights: Preserve original weight dtypes (fp32 for critical layers)
-
-    Returns:
-        Kandinsky5T2VPipeline with block-swapping enabled DiT
     """
     assert resolution in [512]
 
@@ -1057,7 +1067,7 @@ def get_T2V_pipeline_with_block_swap(
     conf.model.text_embedder.qwen.mode = "t2v"
     text_embedder = get_text_embedder(
         conf.model.text_embedder,
-        device="cpu" if enable_block_swap else device_map["text_embedder"],
+        device="cpu" if enable_block_swap or offload else device_map["text_embedder"],
         quantized_qwen=quantized_qwen,
         text_token_padding=text_token_padding,
         dtype=text_encoder_dtype
@@ -1065,6 +1075,9 @@ def get_T2V_pipeline_with_block_swap(
     # Move to GPU only if not using offload or block swap
     if not offload and not enable_block_swap:
         text_embedder = text_embedder.to(device=device_map["text_embedder"])
+        
+    gc.collect()
+    torch.cuda.empty_cache()
 
     # Build VAE
     # For block swap, VAE is built on CPU by default
@@ -1080,6 +1093,9 @@ def get_T2V_pipeline_with_block_swap(
     # Move to GPU only if not using offload or block swap
     if not offload and not enable_block_swap:
         vae = vae.to(device=device_map["vae"], dtype=vae_dtype)
+        
+    gc.collect()
+    torch.cuda.empty_cache()
 
     # Build DiT with block swapping
     print(f"Building DiT with block swapping: enabled={enable_block_swap}, blocks_in_memory={blocks_in_memory}")
@@ -1129,6 +1145,9 @@ def get_T2V_pipeline_with_block_swap(
         dit.load_state_dict(state_dict, assign=True, strict=False)
     else:
         dit.load_state_dict(state_dict, assign=True)
+        
+    del state_dict
+    gc.collect()
 
     # Keep DiT on CPU when using offload OR block swap
     # For block swap, DiT will be loaded on-demand during generation
@@ -1138,6 +1157,9 @@ def get_T2V_pipeline_with_block_swap(
             dit = dit.to(device_map["dit"])
         else:
             dit = dit.to(device_map["dit"], dtype=computation_dtype)
+    
+    gc.collect()
+    torch.cuda.empty_cache()
 
     if world_size > 1:
         if enable_block_swap:
