@@ -5,7 +5,7 @@ metrics:
   - 1.0
   resolution: 1024
 model:
-  checkpoint_path: "./Kandinsky-5.0-T2I-Lite-sft-Diffusers/model/kandinsky5lite_t2i.safetensors"
+  checkpoint_path: "./Kandinsky-5.0-T2I-Lite-sft-Diffusers/transformer/"
   num_steps: 50
   guidance_weight: 3.5
   dit_params:
@@ -37,10 +37,10 @@ model:
   text_embedder:
     qwen:
       emb_size: 3584
-      checkpoint_path: "./Kandinsky-5.0-T2I-Lite-sft-Diffusers/transformer/"
+      checkpoint_path: "./Kandinsky-5.0-T2I-Lite-sft-Diffusers/text_encoder/"
       max_length: 512
     clip:
-      checkpoint_path: "./Kandinsky-5.0-T2I-Lite-sft-Diffusers/text_encoder/"
+      checkpoint_path: "./Kandinsky-5.0-T2I-Lite-sft-Diffusers/text_encoder_2/"
       emb_size: 768
       max_length: 77
 magcache:
