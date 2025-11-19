@@ -122,9 +122,11 @@ class DiffusionTransformer3D(nn.Module):
         attention_engine="auto",
         use_int8=False,
         int8_block_size=128,
-        dtype=torch.bfloat16
+        dtype=torch.bfloat16,
+        instruct_type=None
     ):
         super().__init__()
+        self.instruct_type = instruct_type
         head_dim = sum(axes_dims)
         self.in_visual_dim = in_visual_dim
         self.model_dim = model_dim
@@ -132,7 +134,7 @@ class DiffusionTransformer3D(nn.Module):
         self.visual_cond = visual_cond
         self.use_int8 = use_int8
 
-        visual_embed_dim = 2 * in_visual_dim + 1 if visual_cond else in_visual_dim
+        visual_embed_dim = 2 * in_visual_dim + 1 if visual_cond or instruct_type=='channel' else in_visual_dim
         self.time_embeddings = TimeEmbeddings(model_dim, time_dim)
         self.text_embeddings = TextEmbeddings(in_text_dim, model_dim)
         self.pooled_text_embeddings = TextEmbeddings(in_text_dim2, time_dim)

@@ -8,13 +8,26 @@ import tempfile
 import torch
 from PIL import Image
 
-from kandinsky import get_T2V_pipeline, get_I2V_pipeline, get_I2V_pipeline_with_block_swap, get_T2V_pipeline_with_block_swap
+from kandinsky.utils import set_hf_token
+from kandinsky import get_T2V_pipeline, get_I2V_pipeline, get_T2I_pipeline, get_I2I_pipeline, get_I2V_pipeline_with_block_swap, get_T2V_pipeline_with_block_swap
 
 try:
     from scripts.latentpreviewer import LatentPreviewer
 except ImportError:
     LatentPreviewer = None
 
+
+def validate_args(args):
+    size = (args.width, args.height)
+    if "i2i" in args.config:
+        return
+    elif "t2i" in args.config:
+        supported_sizes = [(1024, 1024), (640, 1408), (1408, 640), (768, 1280), (1280, 768), (896, 1152), (1152, 896)]
+    else:
+        supported_sizes = [(512, 512), (512, 768), (768, 512)]
+    if not size in supported_sizes:
+        raise NotImplementedError(
+            f"Provided size of video is not supported: {size}")
 
 
 def disable_warnings():
@@ -163,7 +176,7 @@ def parse_args():
     parser.add_argument(
         "--output_filename",
         type=str,
-        default="./test.mp4",
+        default=None,
         help="Name of the resulting file"
     )
     parser.add_argument(
@@ -349,14 +362,26 @@ def parse_args():
         default=None,
         help="Spatial tile width for VAE decode (default: 256). Lower values reduce memory usage but increase processing time."
     )
-
+    parser.add_argument(
+        "--hf_token",
+        type=str,
+        default=None,
+        help="token to download restricted models like FLUX.1-dev VAE",
+    )
     args = parser.parse_args()
+
+    if args.hf_token:
+        set_hf_token(args.hf_token)
+
     return args
 
 
 if __name__ == "__main__":
     disable_warnings()
     args = parse_args()
+
+    # Validate args
+    validate_args(args)
 
     # Convert string dtype to torch dtype
     dtype_map = {
@@ -391,119 +416,93 @@ if __name__ == "__main__":
                 "method": args.nabla_method,
             })
 
-    # Determine model type from config filename
-    is_i2v = "i2v" in args.config.lower()
-    is_t2v_pro = "t2v" in args.config.lower() and ("pro" in args.config.lower() or "20b" in args.config.lower())
+    device_map = {"dit": "cuda:0", "vae": "cuda:0", "text_embedder": "cuda:0"}
 
-    if is_i2v:
+    # Common pipeline kwargs for advanced features
+    common_kwargs = {
+        "device_map": device_map,
+        "conf_path": args.config,
+        "offload": args.offload,
+        "magcache": args.magcache,
+        "quantized_qwen": args.qwen_quantization,
+        "attention_engine": args.attention_engine,
+    }
+
+    # Add advanced features if available (for pipelines that support them)
+    advanced_kwargs = {
+        **common_kwargs,
+        "checkpoint_path_override": args.checkpoint_path,
+        "attention_config_override": attention_config,
+        "dtype": model_dtype,
+        "use_mixed_weights": args.use_mixed_weights,
+        "text_encoder_dtype": text_encoder_dtype,
+        "vae_dtype": vae_dtype,
+        "computation_dtype": computation_dtype,
+        "use_int8": args.use_int8,
+        "int8_block_size": args.int8_block_size,
+        "vae_temporal_tile_frames": args.vae_temporal_tile_frames,
+        "vae_temporal_stride_frames": args.vae_temporal_stride_frames,
+        "vae_spatial_tile_height": args.vae_spatial_tile_height,
+        "vae_spatial_tile_width": args.vae_spatial_tile_width,
+    }
+
+    # Determine model type and create appropriate pipeline
+    if "t2i" in args.config:
+        pipe = get_T2I_pipeline(**common_kwargs)
+    elif "i2i" in args.config:
+        common_kwargs["resolution"] = 1024
+        pipe = get_I2I_pipeline(**common_kwargs)
+    elif "i2v" in args.config:
         if args.enable_block_swap:
-            # Use block swapping pipeline for large I2V models
             pipe = get_I2V_pipeline_with_block_swap(
-                device_map={"dit": "cuda:0", "vae": "cuda:0",
-                            "text_embedder": "cuda:0"},
-                conf_path=args.config,
-                checkpoint_path_override=args.checkpoint_path,
-                attention_config_override=attention_config,
-                offload=args.offload,
-                magcache=args.magcache,
-                quantized_qwen=args.qwen_quantization,
-                attention_engine=args.attention_engine,
+                **advanced_kwargs,
                 blocks_in_memory=args.blocks_in_memory,
                 enable_block_swap=True,
-                dtype=model_dtype,
-                use_mixed_weights=args.use_mixed_weights,
-                text_encoder_dtype=text_encoder_dtype,
-                vae_dtype=vae_dtype,
-                computation_dtype=computation_dtype,
-                use_int8=args.use_int8,
-                int8_block_size=args.int8_block_size,
-                vae_temporal_tile_frames=args.vae_temporal_tile_frames,
-                vae_temporal_stride_frames=args.vae_temporal_stride_frames,
-                vae_spatial_tile_height=args.vae_spatial_tile_height,
-                vae_spatial_tile_width=args.vae_spatial_tile_width,
             )
         else:
-            # Use standard I2V pipeline
-            pipe = get_I2V_pipeline(
-                device_map={"dit": "cuda:0", "vae": "cuda:0",
-                            "text_embedder": "cuda:0"},
-                conf_path=args.config,
-                checkpoint_path_override=args.checkpoint_path,
-                attention_config_override=attention_config,
-                offload=args.offload,
-                magcache=args.magcache,
-                quantized_qwen=args.qwen_quantization,
-                attention_engine=args.attention_engine,
-                dtype=model_dtype,
-                use_mixed_weights=args.use_mixed_weights,
-                text_encoder_dtype=text_encoder_dtype,
-                vae_dtype=vae_dtype,
-                computation_dtype=computation_dtype,
-                use_int8=args.use_int8,
-                int8_block_size=args.int8_block_size,
-                vae_temporal_tile_frames=args.vae_temporal_tile_frames,
-                vae_temporal_stride_frames=args.vae_temporal_stride_frames,
-                vae_spatial_tile_height=args.vae_spatial_tile_height,
-                vae_spatial_tile_width=args.vae_spatial_tile_width,
-            )
+            pipe = get_I2V_pipeline(**advanced_kwargs)
     else:  # T2V
+        is_t2v_pro = "pro" in args.config.lower() or "20b" in args.config.lower()
         if is_t2v_pro and args.enable_block_swap:
-            # Use block swapping pipeline for T2V Pro (20B model)
             pipe = get_T2V_pipeline_with_block_swap(
-                device_map={"dit": "cuda:0", "vae": "cuda:0",
-                            "text_embedder": "cuda:0"},
-                resolution=512,
-                conf_path=args.config,
-                checkpoint_path_override=args.checkpoint_path,
-                attention_config_override=attention_config,
-                offload=args.offload,
-                magcache=args.magcache,
-                quantized_qwen=args.qwen_quantization,
-                attention_engine=args.attention_engine,
+                **advanced_kwargs,
                 blocks_in_memory=args.blocks_in_memory,
                 enable_block_swap=True,
-                dtype=model_dtype,
-                use_mixed_weights=args.use_mixed_weights,
-                text_encoder_dtype=text_encoder_dtype,
-                vae_dtype=vae_dtype,
-                computation_dtype=computation_dtype,
-                use_int8=args.use_int8,
-                int8_block_size=args.int8_block_size,
-                vae_temporal_tile_frames=args.vae_temporal_tile_frames,
-                vae_temporal_stride_frames=args.vae_temporal_stride_frames,
-                vae_spatial_tile_height=args.vae_spatial_tile_height,
-                vae_spatial_tile_width=args.vae_spatial_tile_width,
             )
         else:
-            # Use standard T2V pipeline
-            pipe = get_T2V_pipeline(
-                device_map={"dit": "cuda:0", "vae": "cuda:0",
-                            "text_embedder": "cuda:0"},
-                conf_path=args.config,
-                checkpoint_path_override=args.checkpoint_path,
-                attention_config_override=attention_config,
-                offload=args.offload,
-                magcache=args.magcache,
-                quantized_qwen=args.qwen_quantization,
-                attention_engine=args.attention_engine,
-                dtype=model_dtype,
-                use_mixed_weights=args.use_mixed_weights,
-                text_encoder_dtype=text_encoder_dtype,
-                vae_dtype=vae_dtype,
-                computation_dtype=computation_dtype,
-                use_int8=args.use_int8,
-                int8_block_size=args.int8_block_size,
-                vae_temporal_tile_frames=args.vae_temporal_tile_frames,
-                vae_temporal_stride_frames=args.vae_temporal_stride_frames,
-                vae_spatial_tile_height=args.vae_spatial_tile_height,
-                vae_spatial_tile_width=args.vae_spatial_tile_width,
-            )
+            pipe = get_T2V_pipeline(**advanced_kwargs)
 
     if args.output_filename is None:
-        args.output_filename = "./" + args.prompt.replace(" ", "_") + ".mp4"
+        args.output_filename = "./" + args.prompt.replace(" ", "_")
+        if len(args.output_filename) > 32:
+            args.output_filename = args.output_filename[:32]
+        if "t2i" in args.config or "i2i" in args.config:
+            args.output_filename = args.output_filename + ".png"
+        else:
+            args.output_filename = args.output_filename + ".mp4"
 
     start_time = time.perf_counter()
-    if is_i2v:
+
+    if "t2i" in args.config:
+        x = pipe(args.prompt,
+                 width=args.width,
+                 height=args.height,
+                 num_steps=args.sample_steps,
+                 guidance_weight=args.guidance_weight,
+                 scheduler_scale=args.scheduler_scale,
+                 expand_prompts=args.expand_prompt,
+                 save_path=args.output_filename,
+                 seed=args.seed)
+    elif "i2i" in args.config:
+        x = pipe(args.prompt,
+                 image=args.image,
+                 num_steps=args.sample_steps,
+                 guidance_weight=args.guidance_weight,
+                 scheduler_scale=args.scheduler_scale,
+                 expand_prompts=args.expand_prompt,
+                 save_path=args.output_filename,
+                 seed=args.seed)
+    elif "i2v" in args.config:
         image_to_use = args.image
         if args.width and args.height:
             alignment = 128 if args.attention_type == "nabla" else 32
@@ -521,19 +520,18 @@ if __name__ == "__main__":
                  seed=args.seed,
                  preview=args.preview,
                  preview_suffix=args.preview_suffix)
-    else:
+    else:  # T2V
         x = pipe(args.prompt,
-             time_length=args.video_duration,
-             width=args.width,
-             height=args.height,
-             num_steps=args.sample_steps,
-             guidance_weight=args.guidance_weight,
-             scheduler_scale=args.scheduler_scale,
-             expand_prompts=args.expand_prompt,
-             save_path=args.output_filename,
-             seed=args.seed,
-             preview=args.preview,
-             preview_suffix=args.preview_suffix)
+                 time_length=args.video_duration,
+                 width=args.width,
+                 height=args.height,
+                 num_steps=args.sample_steps,
+                 guidance_weight=args.guidance_weight,
+                 scheduler_scale=args.scheduler_scale,
+                 expand_prompts=args.expand_prompt,
+                 save_path=args.output_filename,
+                 seed=args.seed,
+                 preview=args.preview,
+                 preview_suffix=args.preview_suffix)
     print(f"TIME ELAPSED: {time.perf_counter() - start_time}")
-    print(f"Generated video is saved to {args.output_filename}")
-    
+    print(f"Generated file is saved to {args.output_filename}")

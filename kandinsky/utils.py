@@ -15,12 +15,25 @@ from .models.parallelize import parallelize_dit
 from .i2v_pipeline import Kandinsky5I2VPipeline
 from .t2v_pipeline import Kandinsky5T2VPipeline
 from .t2i_pipeline import Kandinsky5T2IPipeline
+from .i2i_pipeline import Kandinsky5I2IPipeline
 from .magcache_utils import set_magcache_params
 
 from PIL import Image
 from safetensors.torch import load_file
 
 torch._dynamo.config.suppress_errors = True
+
+
+HF_TOKEN = None
+
+
+def get_hf_token():
+    return HF_TOKEN
+
+
+def set_hf_token(hf_token):
+    global HF_TOKEN
+    HF_TOKEN = hf_token
 
 
 def get_T2V_pipeline(
@@ -88,6 +101,7 @@ def get_T2V_pipeline(
             repo_id="ai-forever/Kandinsky-5.0-T2V-Lite-sft-5s",
             allow_patterns="model/*",
             local_dir=cache_dir,
+            token=get_hf_token()
         )
         dit_path = os.path.join(cache_dir, "model/kandinsky5lite_t2v_sft_5s.safetensors")
 
@@ -96,6 +110,7 @@ def get_T2V_pipeline(
             repo_id="hunyuanvideo-community/HunyuanVideo",
             allow_patterns="vae/*",
             local_dir=cache_dir,
+            token=get_hf_token()
         )
         vae_path = os.path.join(cache_dir, "vae/")
 
@@ -103,6 +118,7 @@ def get_T2V_pipeline(
         text_encoder_path = snapshot_download(
             repo_id="Qwen/Qwen2.5-VL-7B-Instruct",
             local_dir=os.path.join(cache_dir, "text_encoder/"),
+            token=get_hf_token()
         )
         text_encoder_path = os.path.join(cache_dir, "text_encoder/")
 
@@ -110,6 +126,7 @@ def get_T2V_pipeline(
         text_encoder2_path = snapshot_download(
             repo_id="openai/clip-vit-large-patch14",
             local_dir=os.path.join(cache_dir, "text_encoder2/"),
+            token=get_hf_token()
         )
         text_encoder2_path = os.path.join(cache_dir, "text_encoder2/")
 
@@ -269,6 +286,7 @@ def get_I2V_pipeline(
             repo_id="ai-forever/Kandinsky-5.0-T2V-Lite-sft-5s",
             allow_patterns="model/*",
             local_dir=cache_dir,
+            token=get_hf_token()
         )
         dit_path = os.path.join(cache_dir, "model/kandinsky5lite_i2v_sft_5s.safetensors")
 
@@ -277,6 +295,7 @@ def get_I2V_pipeline(
             repo_id="hunyuanvideo-community/HunyuanVideo",
             allow_patterns="vae/*",
             local_dir=cache_dir,
+            token=get_hf_token()
         )
         vae_path = os.path.join(cache_dir, "vae/")
 
@@ -284,6 +303,7 @@ def get_I2V_pipeline(
         text_encoder_path = snapshot_download(
             repo_id="Qwen/Qwen2.5-VL-7B-Instruct",
             local_dir=os.path.join(cache_dir, "text_encoder/"),
+            token=get_hf_token()
         )
         text_encoder_path = os.path.join(cache_dir, "text_encoder/")
 
@@ -291,6 +311,7 @@ def get_I2V_pipeline(
         text_encoder2_path = snapshot_download(
             repo_id="openai/clip-vit-large-patch14",
             local_dir=os.path.join(cache_dir, "text_encoder2/"),
+            token=get_hf_token()
         )
         text_encoder2_path = os.path.join(cache_dir, "text_encoder2/")
 
@@ -388,7 +409,10 @@ def get_I2V_pipeline(
     )
 
 
-def get_T2I_pipeline(
+def _get_TI2I_params(
+    instruct_type: bool,
+    model_name: str,
+    weights_name: str,
     device_map: Union[str, torch.device, dict],
     resolution: int = 1024,
     cache_dir: str = "./weights/",
@@ -431,24 +455,27 @@ def get_T2I_pipeline(
 
     if dit_path is None and conf_path is None:
         dit_path = snapshot_download(
-            repo_id="kandinskylab/Kandinsky-5.0-T2I-Lite",
+            repo_id=f"kandinskylab/{model_name}",
             allow_patterns="model/*",
             local_dir=cache_dir,
+            token=get_hf_token()
         )
-        dit_path = os.path.join(cache_dir, "model/kandinsky5lite_t2i.safetensors")
+        dit_path = os.path.join(cache_dir, f"model/{weights_name}")
 
     if vae_path is None and conf_path is None:
         vae_path = snapshot_download(
             repo_id="black-forest-labs/FLUX.1-dev",
             allow_patterns="vae/*",
-            local_dir=cache_dir,
+            local_dir=os.path.join(cache_dir, "flux"),
+            token=get_hf_token()
         )
-        vae_path = os.path.join(cache_dir, "vae/")
+        vae_path = os.path.join(cache_dir, "flux", "vae")
 
     if text_encoder_path is None and conf_path is None:
         text_encoder_path = snapshot_download(
             repo_id="Qwen/Qwen2.5-VL-7B-Instruct",
             local_dir=os.path.join(cache_dir, "text_encoder/"),
+            token=get_hf_token()
         )
         text_encoder_path = os.path.join(cache_dir, "text_encoder/")
 
@@ -456,12 +483,13 @@ def get_T2I_pipeline(
         text_encoder2_path = snapshot_download(
             repo_id="openai/clip-vit-large-patch14",
             local_dir=os.path.join(cache_dir, "text_encoder2/"),
+            token=get_hf_token()
         )
         text_encoder2_path = os.path.join(cache_dir, "text_encoder2/")
 
     if conf_path is None:
-        conf = get_default_t2i_conf(
-            dit_path, vae_path, text_encoder_path, text_encoder2_path
+        conf = get_default_ti2i_conf(
+            dit_path, vae_path, text_encoder_path, text_encoder2_path, instruct_type=instruct_type,
         )
     else:
         conf = OmegaConf.load(conf_path)
@@ -499,7 +527,7 @@ def get_T2I_pipeline(
     if world_size > 1:
         dit = parallelize_dit(dit, device_mesh["tensor_parallel"])
 
-    return Kandinsky5T2IPipeline(
+    return dict(
         device_map=device_map,
         dit=dit,
         text_embedder=text_embedder,
@@ -510,6 +538,80 @@ def get_T2I_pipeline(
         conf=conf,
         offload=offload,
     )
+
+
+def get_T2I_pipeline(
+    device_map: Union[str, torch.device, dict],
+    resolution: int = 1024,
+    cache_dir: str = "./weights/",
+    dit_path: str = None,
+    text_encoder_path: str = None,
+    text_encoder2_path: str = None,
+    vae_path: str = None,
+    conf_path: str = None,
+    offload: bool = False,
+    magcache: bool = False,
+    quantized_qwen: bool = False,
+    text_token_padding: bool = True,
+    attention_engine: str = "auto",
+) -> Kandinsky5T2IPipeline:
+    kwargs = _get_TI2I_params(
+        instruct_type=None,
+        model_name='Kandinsky-5.0-T2I-Lite',
+        weights_name='kandinsky5lite_t2i.safetensors',
+        device_map=device_map,
+        resolution=resolution,
+        cache_dir=cache_dir,
+        dit_path=dit_path,
+        text_encoder_path=text_encoder_path,
+        text_encoder2_path=text_encoder2_path,
+        vae_path=vae_path,
+        conf_path=conf_path,
+        offload=offload,
+        magcache=magcache,
+        quantized_qwen=quantized_qwen,
+        text_token_padding=text_token_padding,
+        attention_engine=attention_engine,
+    )
+
+    return Kandinsky5T2IPipeline(**kwargs)
+
+
+def get_I2I_pipeline(
+    device_map: Union[str, torch.device, dict],
+    resolution: int = 1024,
+    cache_dir: str = "./weights/",
+    dit_path: str = None,
+    text_encoder_path: str = None,
+    text_encoder2_path: str = None,
+    vae_path: str = None,
+    conf_path: str = None,
+    offload: bool = False,
+    magcache: bool = False,
+    quantized_qwen: bool = False,
+    text_token_padding: bool = True,
+    attention_engine: str = "auto",
+) -> Kandinsky5T2IPipeline:
+    kwargs = _get_TI2I_params(
+        instruct_type='channel',
+        model_name='Kandinsky-5.0-I2I-Lite',
+        weights_name='kandinsky5lite_i2i.safetensors',
+        device_map=device_map,
+        resolution=resolution,
+        cache_dir=cache_dir,
+        dit_path=dit_path,
+        text_encoder_path=text_encoder_path,
+        text_encoder2_path=text_encoder2_path,
+        vae_path=vae_path,
+        conf_path=conf_path,
+        offload=offload,
+        magcache=magcache,
+        quantized_qwen=quantized_qwen,
+        text_token_padding=text_token_padding,
+        attention_engine=attention_engine,
+    )
+
+    return Kandinsky5I2IPipeline(**kwargs)
 
 
 def get_default_conf(
@@ -576,13 +678,15 @@ def get_default_conf(
     return DictConfig(conf)
 
 
-def get_default_t2i_conf(
+def get_default_ti2i_conf(
     dit_path,
     vae_path,
     text_encoder_path,
     text_encoder2_path,
+    instruct_type=None,
 ) -> DictConfig:
     dit_params = {
+        "instruct_type": instruct_type,
         "in_visual_dim": 16,
         "out_visual_dim": 16,
         "time_dim": 512,
@@ -628,7 +732,7 @@ def get_default_t2i_conf(
             "dit_params": dit_params,
             "attention": attention,
             "num_steps": 50,
-            "guidance_weight": 5.0,
+            "guidance_weight": 3.5,
         },
         "metrics": {"scale_factor": (1, 1, 1)},
         "resolution": 512,
