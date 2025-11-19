@@ -127,36 +127,46 @@ class Qwen2_5_VLTextEmbedder:
         prompt_template = "\n".join(self.PROMPT_TEMPLATE["template"][type_of_content])
         crop_start = self.PROMPT_TEMPLATE["crop_start"][type_of_content]
         full_texts = list(map(lambda x: prompt_template.format(x), texts))
+
         if images is not None:
+            # Image mode - add image tokens and pass images to processor
             for i in range(len(images)):
                 image_tokens = ''.join(['<|vision_start|><|image_pad|><|vision_end|>']*len(images[i]))
                 full_texts[i] = full_texts[i] + image_tokens + "<|im_end|>"
             images = [F.resize(i, (i.shape[-2] // 2, i.shape[-1] // 2)) for i in images]
-        max_length = (self.max_length + crop_start) if images is None else None
-        inputs = self.processor(
-            text=full_texts,
-            images=images,
-            truncation=True,
-            return_tensors="pt",
-            padding=True,
-            max_length = max_length
-        )
+            max_length = None
+            inputs = self.processor(
+                text=full_texts,
+                images=images,
+                truncation=True,
+                return_tensors="pt",
+                padding=True,
+                max_length=max_length
+            ).to(self.model.device)
 
-        # Move all tensors to device - BatchEncoding.to() doesn't always handle nested tensors
-        def move_to_device(obj):
-            if isinstance(obj, torch.Tensor):
-                return obj.to(self.device)
-            elif isinstance(obj, dict):
-                return {k: move_to_device(v) for k, v in obj.items()}
-            elif isinstance(obj, (list, tuple)):
-                return type(obj)(move_to_device(v) for v in obj)
-            return obj
+            with torch.no_grad():
+                embeds = self.model(**inputs, output_hidden_states=True)["hidden_states"][-1][:, crop_start:]
+            attention_mask = inputs["attention_mask"][:, crop_start:]
+        else:
+            # Video/text mode - original fork behavior
+            max_length = self.max_length + crop_start
+            inputs = self.processor(
+                text=full_texts,
+                images=None,
+                videos=None,
+                max_length=max_length,
+                truncation=True,
+                return_tensors="pt",
+                padding="max_length",
+            ).to(self.model.device)
 
-        inputs = move_to_device(dict(inputs))
-
-        with torch.no_grad():
-            embeds = self.model(**inputs, output_hidden_states=True)["hidden_states"][-1][:, crop_start:]
-        attention_mask = inputs["attention_mask"][:, crop_start:]
+            with torch.no_grad():
+                embeds = self.model(
+                    input_ids=inputs["input_ids"],
+                    return_dict=True,
+                    output_hidden_states=True,
+                )["hidden_states"][-1][:, crop_start:]
+            attention_mask = inputs["attention_mask"][:, crop_start:]
         if self.text_token_padding:
             seq_length = embeds.shape[1]
             cu_seqlens = torch.tensor([0, seq_length], dtype=torch.int32)
