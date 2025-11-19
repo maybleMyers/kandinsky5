@@ -140,10 +140,7 @@ class Qwen2_5_VLTextEmbedder:
             return_tensors="pt",
             padding=True,
             max_length = max_length
-        )
-
-        # Explicitly move all input tensors to device to avoid device mismatch errors
-        inputs = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
+        ).to(self.device)
 
         with torch.no_grad():
             embeds = self.model(**inputs, output_hidden_states=True)["hidden_states"][-1][:, crop_start:]
