@@ -42,6 +42,7 @@ model:
       max_length: 512
     clip:
       checkpoint_path: "./Kandinsky-5.0-T2I-Lite-sft-Diffusers/text_encoder_2/"
+      tokenizer_path: "./Kandinsky-5.0-T2I-Lite-sft-Diffusers/tokenizer_2/"
       emb_size: 768
       max_length: 77
 magcache:
