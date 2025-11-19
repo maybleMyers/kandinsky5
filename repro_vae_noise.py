@@ -115,5 +115,78 @@ def test_vae_noise():
     except Exception as e:
         print(f"Error testing mode(): {e}")
 
+def test_new_vae():
+    print("\n" + "="*50)
+    print("TESTING NEW VAE (config_5s_i2v.yaml)")
+    print("="*50)
+    
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    config_path = "configs/config_5s_i2v.yaml"
+    
+    if not os.path.exists(config_path):
+        print(f"Config not found at {config_path}")
+        return
+
+    conf = OmegaConf.load(config_path)
+    print(f"Loading VAE from config: {conf.model.vae.checkpoint_path}")
+    
+    try:
+        # Force float32 for precision check
+        vae = build_vae(conf.model.vae, dtype=torch.float32) 
+        vae = vae.to(device).eval()
+    except Exception as e:
+        print(f"Failed to build VAE: {e}")
+        return
+
+    # Create dummy image
+    width, height = 512, 512
+    image = Image.new('RGB', (width, height))
+    for x in range(width):
+        for y in range(height):
+            image.putpixel((x, y), (int(x/width*255), int(y/height*255), 0))
+    
+    img_tensor = F.pil_to_tensor(image).unsqueeze(0).float()
+    img_tensor = img_tensor / 128 - 1. 
+    img_tensor = img_tensor.to(device)
+    img_tensor = img_tensor.unsqueeze(2) # (B, C, T, H, W)
+    
+    print("Testing sample() variance for NEW VAE...")
+    latents_samples = []
+    for i in range(5):
+        with torch.no_grad():
+            posterior = vae.encode(img_tensor).latent_dist
+            sample = posterior.sample()
+            latents_samples.append(sample)
+            
+            if i == 0:
+                decoded = vae.decode(sample).sample
+                decoded = ((decoded.clamp(-1.0, 127/128) + 1.0) * 128).to(torch.uint8)
+                decoded_img = decoded[0, :, 0, :, :].cpu()
+                decoded_pil = F.to_pil_image(decoded_img)
+                decoded_pil.save("repro_new_vae_sample_0.png")
+                print("Saved repro_new_vae_sample_0.png")
+
+    stack = torch.stack(latents_samples)
+    variance = torch.var(stack, dim=0).mean().item()
+    print(f"Mean variance between 5 samples (New VAE): {variance}")
+
+    print("\nTesting mode() for NEW VAE...")
+    try:
+        with torch.no_grad():
+            posterior = vae.encode(img_tensor).latent_dist
+            mode = posterior.mode()
+            
+            decoded_mode = vae.decode(mode).sample
+            decoded_mode = ((decoded_mode.clamp(-1.0, 127/128) + 1.0) * 128).to(torch.uint8)
+            
+            decoded_mode_img = decoded_mode[0, :, 0, :, :].cpu()
+            decoded_mode_pil = F.to_pil_image(decoded_mode_img)
+            decoded_mode_pil.save("repro_new_vae_mode.png")
+            print("Saved repro_new_vae_mode.png")
+            
+    except Exception as e:
+        print(f"Error testing mode() on New VAE: {e}")
+
 if __name__ == "__main__":
     test_vae_noise()
+    test_new_vae()
