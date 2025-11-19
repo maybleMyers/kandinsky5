@@ -714,6 +714,9 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
 
         self.tile_size = None
 
+        # Track if manual tile sizes were set (to prevent automatic overriding)
+        self.use_manual_tiling = False
+
     def _encode(self, x: torch.Tensor) -> torch.Tensor:
         _, _, num_frames, height, width = x.shape
 
@@ -819,6 +822,14 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
         if tile_size != self.tile_size:
             self.tile_size = tile_size
             self.apply_tiling(tile_size, tile_stride)
+
+            # Log tiling configuration (only on first decode or when changed)
+            if not self.use_manual_tiling:
+                b, c, f, h, w = z.shape
+                h_pix, w_pix = h * 8, w * 8
+                print(f"\nVAE Adaptive Tiling Activated (Resolution: {h_pix}x{w_pix}):")
+                print(f"  Temporal: {self.tile_sample_min_num_frames} frames (stride: {self.tile_sample_stride_num_frames})")
+                print(f"  Spatial: {self.tile_sample_min_height}x{self.tile_sample_min_width} pixels (stride: {self.tile_sample_stride_height}x{self.tile_sample_stride_width})\n")
 
         decoded = self._decode(z).sample
 
@@ -988,6 +999,11 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
                     decoded = self.decoder(tile).clone()
                     row.append(decoded)
                     pbar.update(1)
+
+                    # Clear cache every few tiles to prevent memory accumulation
+                    if (len(row) % 4 == 0) and torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+
                 rows.append(row)
 
         result_rows = []
@@ -1108,6 +1124,10 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
                 decoded = decoded[:, :, 1:, :, :]
             row.append(decoded)
 
+            # Clear cache after each temporal chunk to free memory
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
         result_row = []
         for i, tile in enumerate(row):
             if i > 0:
@@ -1216,10 +1236,57 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
     def get_dec_optimal_tiling(
         self, shape: List[int]
     ) -> Tuple[Tuple[int, int, int, int], Tuple[int, int, int]]:
-        """Returns optimal tiling for given shape."""
+        """
+        Returns optimal tiling for given shape.
+        If manual tiling is set, respects those settings.
+        Otherwise, adaptively calculates based on resolution and available memory.
+        """
+        # If manual tiling is enabled, use current settings
+        if self.use_manual_tiling:
+            return (
+                (1, self.tile_sample_min_num_frames + 1,
+                 self.tile_sample_min_height, self.tile_sample_min_width),
+                (self.tile_sample_stride_num_frames,
+                 self.tile_sample_stride_height, self.tile_sample_stride_width)
+            )
+
         b, _, f, h, w = shape
-        enc_inp_shape = [b, 3, 4 * (f - 1) + 1, 8 * h, 8 * w]
-        return self.get_enc_optimal_tiling(enc_inp_shape)
+        h_pix, w_pix = h * 8, w * 8
+
+        # Adaptive tile sizing based on resolution
+        total_pixels = h_pix * w_pix
+
+        # Resolution-based adaptive tiling (provides better defaults than pure memory calc)
+        if total_pixels <= 768 * 512:  # Low-res (e.g., 768x512)
+            # Use larger tiles for better speed
+            tile_h, tile_w = 256, 256
+            stride_h, stride_w = 192, 192
+        elif total_pixels <= 960 * 544:  # Medium-res (e.g., 960x544)
+            # Moderate tiles
+            tile_h, tile_w = 192, 192
+            stride_h, stride_w = 160, 160
+        elif total_pixels <= 1280 * 704:  # High-res (e.g., 1280x704)
+            # Smaller tiles to prevent OOM
+            tile_h, tile_w = 128, 128
+            stride_h, stride_w = 96, 96
+        else:  # Ultra-high-res (e.g., 1920x1080)
+            # Very small tiles for extreme resolutions
+            tile_h, tile_w = 96, 96
+            stride_h, stride_w = 64, 64
+
+        # Ensure tiles don't exceed actual dimensions
+        tile_h = min(tile_h, h_pix)
+        tile_w = min(tile_w, w_pix)
+        stride_h = min(stride_h, tile_h - 16)  # Ensure some overlap
+        stride_w = min(stride_w, tile_w - 16)
+
+        # Temporal tiling (frames) - use hardcoded defaults to avoid corruption from encoding
+        # Note: get_enc_optimal_tiling has incompatible stride order that corrupts these values
+        # So we MUST NOT rely on self.tile_sample_* for automatic mode
+        tile_f = 16   # Default temporal tile size (pixel-space frames)
+        stride_f = 12  # Default temporal stride (pixel-space frames)
+
+        return (1, tile_f + 1, tile_h, tile_w), (stride_f, stride_h, stride_w)
 
 
 def build_vae(
@@ -1245,18 +1312,43 @@ def build_vae(
         vae = AutoencoderKLHunyuanVideo.from_pretrained(
             conf.checkpoint_path, subfolder="vae", torch_dtype=dtype
         )
-        # Apply custom chunking parameters if provided
+
+        # Track if any manual parameters are provided
+        has_manual_settings = False
+
+        # Apply custom temporal chunking parameters if provided
         if temporal_tile_frames is not None:
             vae.tile_sample_min_num_frames = temporal_tile_frames
+            has_manual_settings = True
         if temporal_stride_frames is not None:
             vae.tile_sample_stride_num_frames = temporal_stride_frames
+            has_manual_settings = True
         elif temporal_tile_frames is not None:
             # Auto-calculate stride: tile_size - 4 for proper overlap
             vae.tile_sample_stride_num_frames = max(4, temporal_tile_frames - 4)
+
+        # Apply custom spatial tiling parameters if provided
         if spatial_tile_height is not None:
             vae.tile_sample_min_height = spatial_tile_height
+            # Auto-calculate spatial stride to maintain 32-pixel overlap (or 25% of tile)
+            overlap = min(32, spatial_tile_height // 4)
+            vae.tile_sample_stride_height = spatial_tile_height - overlap
+            has_manual_settings = True
+
         if spatial_tile_width is not None:
             vae.tile_sample_min_width = spatial_tile_width
+            # Auto-calculate spatial stride to maintain 32-pixel overlap (or 25% of tile)
+            overlap = min(32, spatial_tile_width // 4)
+            vae.tile_sample_stride_width = spatial_tile_width - overlap
+            has_manual_settings = True
+
+        # Enable manual tiling flag if any manual settings were provided
+        if has_manual_settings:
+            vae.use_manual_tiling = True
+            print(f"VAE Manual Tiling Enabled:")
+            print(f"  Temporal: {vae.tile_sample_min_num_frames} frames (stride: {vae.tile_sample_stride_num_frames})")
+            print(f"  Spatial: {vae.tile_sample_min_height}x{vae.tile_sample_min_width} pixels (stride: {vae.tile_sample_stride_height}x{vae.tile_sample_stride_width})")
+
         return vae
     elif conf.name == "flux":
         from diffusers.models import AutoencoderKL
