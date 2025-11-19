@@ -135,12 +135,15 @@ class Qwen2_5_VLTextEmbedder:
         max_length = (self.max_length + crop_start) if images is None else None
         inputs = self.processor(
             text=full_texts,
-            images=images, 
+            images=images,
             truncation=True,
-            return_tensors="pt", 
+            return_tensors="pt",
             padding=True,
             max_length = max_length
-        ).to(self.device)
+        )
+
+        # Explicitly move all input tensors to device to avoid device mismatch errors
+        inputs = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
 
         with torch.no_grad():
             embeds = self.model(**inputs, output_hidden_states=True)["hidden_states"][-1][:, crop_start:]
