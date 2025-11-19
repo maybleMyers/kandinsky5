@@ -1280,9 +1280,11 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
         stride_h = min(stride_h, tile_h - 16)  # Ensure some overlap
         stride_w = min(stride_w, tile_w - 16)
 
-        # Temporal tiling (frames) - use current settings or defaults
-        tile_f = self.tile_sample_min_num_frames
-        stride_f = self.tile_sample_stride_num_frames
+        # Temporal tiling (frames) - use hardcoded defaults to avoid corruption from encoding
+        # Note: get_enc_optimal_tiling has incompatible stride order that corrupts these values
+        # So we MUST NOT rely on self.tile_sample_* for automatic mode
+        tile_f = 16   # Default temporal tile size (pixel-space frames)
+        stride_f = 12  # Default temporal stride (pixel-space frames)
 
         return (1, tile_f + 1, tile_h, tile_w), (stride_f, stride_h, stride_w)
 
