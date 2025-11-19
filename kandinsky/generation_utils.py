@@ -351,11 +351,27 @@ def generate_sample(
                 latent_visual.shape[-1],
             )
             images = images.to(device=vae_device)
+
+            # DEBUG: Check latent values before VAE decode
+            print(f"\n{'='*80}", flush=True)
+            print(f"DEBUG: Latents before VAE decode (T2V)", flush=True)
+            print(f"Shape: {images.shape}", flush=True)
+            print(f"Dtype: {images.dtype}", flush=True)
+            print(f"Device: {images.device}", flush=True)
+            print(f"Min: {images.min().item():.6f}, Max: {images.max().item():.6f}", flush=True)
+            print(f"Mean: {images.mean().item():.6f}, Std: {images.std().item():.6f}", flush=True)
+            print(f"VAE scaling_factor: {vae.config.scaling_factor}", flush=True)
+            print(f"{'='*80}\n", flush=True)
+
             images = (images / vae.config.scaling_factor).permute(0, 4, 1, 2, 3)
+
+            print(f"DEBUG: After scaling by {vae.config.scaling_factor}", flush=True)
+            print(f"Min: {images.min().item():.6f}, Max: {images.max().item():.6f}", flush=True)
+
             if image_vae:
                 images = images[:,:,0]
             images = vae.decode(images).sample
-            images = ((images.clamp(-1.0, 1.0) + 1.0) * 127.5).to(torch.uint8)
+            images = ((images.clamp(-1.0, 127/128) + 1.0) * 128).to(torch.uint8)
 
     # Log VRAM after VAE decode, before VAE offload
     log_vram_usage("AFTER VAE DECODE, BEFORE OFFLOAD (T2V)", dit=dit, vae=vae, text_embedder=None)
@@ -516,7 +532,7 @@ def generate_sample_i2v(
 
             try:
                 images = vae.decode(images).sample
-                images = ((images.clamp(-1.0, 1.0) + 1.0) * 127.5).to(torch.uint8)
+                images = ((images.clamp(-1.0, 127/128) + 1.0) * 128).to(torch.uint8)
             except Exception as e:
                 print(f"\n{'='*80}", flush=True)
                 print(f"ERROR during VAE decode:", flush=True)

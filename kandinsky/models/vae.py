@@ -2288,7 +2288,7 @@ class AutoencoderKLKandinsky(ModelMixin, ConfigMixin):
         self,
         encoder_params: dict,
         decoder_params: dict,
-        scaling_factor: float = 1.0, # Adjust based on model requirements
+        scaling_factor: float = 0.476986, # Match HunyuanVideo VAE scaling for DiT compatibility
     ):
         super().__init__()
         self.encoder = KandinskyEncoder3D(**encoder_params)

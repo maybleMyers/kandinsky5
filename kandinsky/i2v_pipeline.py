@@ -144,7 +144,7 @@ def get_first_frame_from_image(image, vae, device, alignment=16):
 
     image = F.pil_to_tensor(pil_image).unsqueeze(0)
     image, k = resize_image(image, max_area=MAX_AREA, alignment=alignment)
-    image = image / 127.5 - 1.
+    image = image / 128 - 1.  # KVAE m11 format: range [-1, 0.9921875]
 
     with torch.no_grad():
         # Use the VAE's dtype to avoid dtype mismatch
