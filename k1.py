@@ -937,7 +937,7 @@ def create_interface():
                     save_path = gr.Textbox(label="Save Path", value="outputs")
 
                 random_seed_btn.click(
-                    fn=lambda: random.randint(0, 2**32 - 1),
+                    fn=lambda: (-1),
                     outputs=[seed]
                 )
 
