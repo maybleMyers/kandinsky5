@@ -38,6 +38,7 @@ model:
     qwen:
       emb_size: 3584
       checkpoint_path: "./Kandinsky-5.0-T2I-Lite-sft-Diffusers/text_encoder/"
+      processor_path: "./Kandinsky-5.0-T2I-Lite-sft-Diffusers/tokenizer/"
       max_length: 512
     clip:
       checkpoint_path: "./Kandinsky-5.0-T2I-Lite-sft-Diffusers/text_encoder_2/"
