@@ -10,7 +10,6 @@ import re
 from typing import Generator, List, Tuple, Optional, Dict
 import threading
 import json
-import ffmpeg
 import io
 from PIL import Image
 
@@ -413,17 +412,47 @@ def add_metadata_to_video(video_path: str, parameters: dict) -> None:
         print(f"Error: {str(e)}")
 
 def get_video_info(video_path: str) -> dict:
-    """Get video information using ffmpeg-python."""
+    """Get video information using ffprobe via subprocess (no python-ffmpeg dependency)."""
     try:
-        probe = ffmpeg.probe(video_path)
-        video_info = next(stream for stream in probe['streams'] if stream['codec_type'] == 'video')
+        # Select first video stream and get specific entries
+        cmd = [
+            'ffprobe',
+            '-v', 'error',
+            '-select_streams', 'v:0',
+            '-show_entries', 'stream=width,height,r_frame_rate,duration',
+            '-of', 'json',
+            video_path
+        ]
+        
+        # Run ffprobe
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        data = json.loads(result.stdout)
+        
+        if not data.get('streams'):
+            return {}
+            
+        video_stream = data['streams'][0]
+        width = int(video_stream['width'])
+        height = int(video_stream['height'])
+        
+        # Calculate FPS (handle fraction like 30/1)
+        r_frame_rate = video_stream.get('r_frame_rate', '30/1')
+        if '/' in r_frame_rate:
+            num, den = map(int, r_frame_rate.split('/'))
+            fps = num / den if den != 0 else 0
+        else:
+            fps = float(r_frame_rate)
 
-        width = int(video_info['width'])
-        height = int(video_info['height'])
-        fps = eval(video_info['r_frame_rate'])  # This converts '30/1' to 30.0
+        # Calculate Duration
+        # Try stream duration first, then format duration
+        duration = float(video_stream.get('duration', 0))
+        if duration == 0:
+            # Fallback to format duration if stream duration is missing
+            cmd_fmt = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'json', video_path]
+            res_fmt = subprocess.run(cmd_fmt, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            data_fmt = json.loads(res_fmt.stdout)
+            duration = float(data_fmt.get('format', {}).get('duration', 0))
 
-        # Calculate total frames
-        duration = float(probe['format']['duration'])
         total_frames = int(duration * fps)
 
         return {
@@ -451,23 +480,29 @@ def extract_video_details(video_path: str) -> Tuple[dict, str]:
     return metadata, "Video details extracted successfully"
 
 def send_to_generation(video_path, metadata):
-    """Extract first frame and map metadata to generation inputs."""
+    """Extract first frame and map metadata to generation inputs using subprocess."""
     if not video_path:
-        # Return no-ops if no video loaded. 
-        # Note: Must return exact number of outputs as defined in click event
         return [gr.update()] * 33
 
-    # 1. Extract First Frame as PIL Image
+    # 1. Extract First Frame as PIL Image using subprocess
     input_img_pil = None
     try:
-        out, _ = (
-            ffmpeg
-            .input(video_path)
-            .filter('select', 'gte(n,0)')
-            .output('pipe:', vframes=1, format='image2', vcodec='png')
-            .run(capture_stdout=True, capture_stderr=True)
-        )
-        input_img_pil = Image.open(io.BytesIO(out))
+        # ffmpeg command to output 1st frame to stdout as PNG
+        cmd = [
+            'ffmpeg',
+            '-i', video_path,
+            '-vframes', '1',
+            '-f', 'image2',
+            '-c:v', 'png',
+            'pipe:1'
+        ]
+        
+        # Run command and capture binary output
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        
+        if result.stdout:
+            input_img_pil = Image.open(io.BytesIO(result.stdout))
+            
     except Exception as e:
         print(f"Frame extraction failed: {e}")
 
