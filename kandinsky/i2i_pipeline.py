@@ -121,7 +121,7 @@ Rewrite Prompt: "{prompt}". Answer only with expanded prompt.""",
         expand_prompts: bool = True,
         save_path: str = None,
         progress: bool = True,
-        image: Optional[Union[Image,str]] = None
+        image: Optional[Union[Image.Image, str]] = None
     ):
         num_steps = self.num_steps if num_steps is None else num_steps
         guidance_weight = self.guidance_weight if guidance_weight is None else guidance_weight
