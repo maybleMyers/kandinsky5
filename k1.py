@@ -372,6 +372,8 @@ def generate_image(
     seed: int,
     save_path: str,
     batch_size: int,
+    offload: bool,
+    dtype: str,
 ) -> Generator[Tuple[List[Tuple[str, str]], str, str], None, None]:
     """Generate images using T2I pipeline."""
     global stop_event, current_process
@@ -408,7 +410,11 @@ def generate_image(
             "--output_filename", output_filename,
             "--width", str(int(width)),
             "--height", str(int(height)),
+            "--dtype", dtype,
         ]
+
+        if offload:
+            command.append("--offload")
 
         if negative_prompt:
             command.extend(["--negative_prompt", str(negative_prompt)])
@@ -1143,6 +1149,11 @@ def create_interface():
                 with gr.Row():
                     with gr.Column():
                         gr.Markdown("### Image Parameters")
+                        
+                        # Add Offload and Dtype controls
+                        with gr.Row():
+                            t2i_offload = gr.Checkbox(label="Offload Models (Save VRAM)", value=True, info="Unloads Text Encoder to CPU when not in use. Required for 24GB GPUs.")
+                            t2i_dtype = gr.Dropdown(choices=["bfloat16", "float16", "float32"], label="Data Type", value="bfloat16", info="Sets dtype for all models (including Text Encoder). Use bfloat16 to save memory.")
 
                         with gr.Row():
                             t2i_width = gr.Dropdown(
@@ -1208,7 +1219,8 @@ def create_interface():
                         t2i_prompt, t2i_negative_prompt,
                         t2i_width, t2i_height,
                         t2i_sample_steps, t2i_guidance_weight, t2i_scheduler_scale,
-                        t2i_seed, t2i_save_path, t2i_batch_size
+                        t2i_seed, t2i_save_path, t2i_batch_size,
+                        t2i_offload, t2i_dtype
                     ],
                     outputs=[t2i_output, t2i_status, t2i_progress]
                 )
