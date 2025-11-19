@@ -44,8 +44,27 @@ model:
 
   # VAE configuration - using same paths as Pro model
   vae:
-    checkpoint_path: "Kandinsky-5.0-I2V-Pro-sft-5s-Diffusers/vae"
-    name: "hunyuan"
+    # Path to the specific safetensors file for the new VAE
+    checkpoint_path: "Kandinsky-5.0-T2V-Pro-sft-5s-Diffusers/3dvae/diffusion_pytorch_model.safetensors"
+    name: "kandinsky"
+    
+    # Encoder architecture parameters
+    encoder_params:
+      ch: 128
+      in_channels: 3
+      num_res_blocks: 2
+      temporal_compress_times: 4
+      z_channels: 16
+      ch_mult: [1, 2, 4, 8] 
+
+    # Decoder architecture parameters
+    decoder_params:
+      ch: 128
+      num_res_blocks: 2
+      out_ch: 3
+      temporal_compress_times: 4
+      z_channels: 16
+      ch_mult: [1, 2, 4, 8]
 
   # Text embedder configuration - using same paths as Pro model
   text_embedder:
