@@ -47,8 +47,8 @@ def parse_progress_line(line: str) -> Optional[str]:
             elapsed = float(match.group(1))
             return f"Generation completed in {elapsed:.1f}s"
 
-    if "Generated video is saved to" in line:
-        return "Video saved successfully!"
+    if "Generated video is saved to" in line or "Generated file is saved to" in line:
+        return "Generation saved successfully!"
 
     return None
 
@@ -360,6 +360,132 @@ def stop_generation():
             print(f"Error stopping process: {e}")
 
     return "Stopping generation..."
+
+def generate_image(
+    prompt: str,
+    negative_prompt: str,
+    width: int,
+    height: int,
+    sample_steps: int,
+    guidance_weight: float,
+    scheduler_scale: float,
+    seed: int,
+    save_path: str,
+    batch_size: int,
+) -> Generator[Tuple[List[Tuple[str, str]], str, str], None, None]:
+    """Generate images using T2I pipeline."""
+    global stop_event, current_process
+    stop_event.clear()
+    current_process = None
+
+    os.makedirs(save_path, exist_ok=True)
+    all_generated_images = []
+
+    for i in range(int(batch_size)):
+        if stop_event.is_set():
+            current_process = None
+            yield all_generated_images, "Generation stopped by user.", ""
+            return
+
+        current_seed = seed
+        if seed == -1:
+            current_seed = random.randint(0, 2**32 - 1)
+        elif int(batch_size) > 1:
+            current_seed = seed + i
+
+        status_text = f"Processing {i+1}/{batch_size} (Seed: {current_seed})"
+        yield all_generated_images.copy(), status_text, "Starting generation..."
+
+        timestamp = int(time.time())
+        output_filename = os.path.join(save_path, f"k1_t2i_{timestamp}_{current_seed}.png")
+
+        command = [
+            sys.executable, "test.py",
+            "--config", "./configs/config_t2i.yaml",
+            "--prompt", str(prompt),
+            "--sample_steps", str(sample_steps),
+            "--seed", str(current_seed),
+            "--output_filename", output_filename,
+            "--width", str(int(width)),
+            "--height", str(int(height)),
+        ]
+
+        if negative_prompt:
+            command.extend(["--negative_prompt", str(negative_prompt)])
+
+        if guidance_weight is not None:
+            command.extend(["--guidance_weight", str(guidance_weight)])
+
+        if scheduler_scale is not None:
+            command.extend(["--scheduler_scale", str(scheduler_scale)])
+
+        # Print the command for debugging/transparency
+        print("\n" + "="*80)
+        print(f"LAUNCHING T2I COMMAND (Batch {i+1}/{batch_size}):")
+        print(" ".join(command))
+        print("="*80 + "\n")
+
+        try:
+            start_time = time.perf_counter()
+
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1
+            )
+
+            current_process = process
+
+            last_progress = ""
+            while True:
+                if stop_event.is_set():
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                    current_process = None
+                    yield all_generated_images, "Generation stopped by user.", ""
+                    return
+
+                line = process.stdout.readline()
+                if line:
+                    print(line.strip())
+
+                    parsed_progress = parse_progress_line(line)
+                    if parsed_progress:
+                        last_progress = parsed_progress
+
+                yield all_generated_images.copy(), status_text, last_progress
+
+                if process.poll() is not None:
+                    break
+
+            # Clear current process when done
+            current_process = None
+            return_code = process.returncode
+
+            elapsed = time.perf_counter() - start_time
+
+            if return_code == 0 and os.path.exists(output_filename):
+                all_generated_images.append((output_filename, f"Seed: {current_seed}"))
+                progress_msg = f"Completed {i+1}/{batch_size} in {elapsed:.1f}s"
+                yield all_generated_images.copy(), status_text, progress_msg
+            else:
+                error_msg = f"Error: Generation failed with return code {return_code}"
+                current_process = None
+                yield all_generated_images, error_msg, ""
+                return
+
+        except Exception as e:
+            current_process = None
+            yield all_generated_images, f"Error during generation: {str(e)}", ""
+            return
+
+    current_process = None
+    yield all_generated_images, "All generations complete!", ""
 
 def extract_video_metadata(video_path: str) -> Dict:
     """Extract metadata from video file using ffprobe."""
@@ -734,7 +860,7 @@ def create_interface():
             }
             """)
 
-        gr.Markdown("# Kandinsky 5.0 I2V Pro 20B - K1 Interface")
+        gr.Markdown("# Kandinsky 5.0 - K1 Interface (Video & Image Generation)")
 
         with gr.Tabs() as tabs:
             with gr.Tab("Generation", id="gen_tab"):
@@ -986,6 +1112,110 @@ def create_interface():
                 stop_btn.click(
                     fn=stop_generation,
                     outputs=[batch_progress]
+                )
+
+            # Text-to-Image Tab
+            with gr.Tab("Text-to-Image (T2I)"):
+                gr.Markdown("## Generate Images from Text")
+
+                with gr.Row():
+                    with gr.Column(scale=4):
+                        t2i_prompt = gr.Textbox(
+                            label="Enter your prompt",
+                            value="A cute tabby cat wearing a red hat with the text 'HELLO' on it, high quality, detailed",
+                            lines=3
+                        )
+                        t2i_negative_prompt = gr.Textbox(
+                            label="Negative Prompt",
+                            value="worst quality, low quality, ugly, deformed, blurry",
+                            lines=2
+                        )
+                    with gr.Column(scale=1):
+                        t2i_batch_size = gr.Number(label="Batch Count", value=1, minimum=1, step=1)
+                    with gr.Column(scale=2):
+                        t2i_status = gr.Textbox(label="Status", interactive=False, value="")
+                        t2i_progress = gr.Textbox(label="Progress", interactive=False, value="")
+
+                with gr.Row():
+                    t2i_generate_btn = gr.Button("Generate Image", elem_classes="green-btn")
+                    t2i_stop_btn = gr.Button("Stop Generation", variant="stop")
+
+                with gr.Row():
+                    with gr.Column():
+                        gr.Markdown("### Image Parameters")
+
+                        with gr.Row():
+                            t2i_width = gr.Dropdown(
+                                label="Width",
+                                choices=[640, 768, 896, 1024, 1152, 1280, 1408],
+                                value=1024,
+                                info="Image width (supported sizes)"
+                            )
+                            t2i_height = gr.Dropdown(
+                                label="Height",
+                                choices=[640, 768, 896, 1024, 1152, 1280, 1408],
+                                value=1024,
+                                info="Image height (supported sizes)"
+                            )
+
+                        with gr.Accordion("Common Presets", open=True):
+                            gr.Markdown("Click a preset to set width and height:")
+                            with gr.Row():
+                                preset_1024 = gr.Button("1024×1024 (Square)")
+                                preset_768_1280 = gr.Button("768×1280 (Portrait)")
+                                preset_1280_768 = gr.Button("1280×768 (Landscape)")
+                            with gr.Row():
+                                preset_640_1408 = gr.Button("640×1408 (Tall)")
+                                preset_1408_640 = gr.Button("1408×640 (Wide)")
+                                preset_896_1152 = gr.Button("896×1152")
+                                preset_1152_896 = gr.Button("1152×896")
+
+                        t2i_sample_steps = gr.Slider(minimum=1, maximum=100, step=1, label="Sampling Steps", value=50)
+                        t2i_guidance_weight = gr.Slider(minimum=1.0, maximum=20.0, step=0.1, label="Guidance Weight", value=3.5)
+                        t2i_scheduler_scale = gr.Slider(minimum=0.0, maximum=20.0, step=0.1, label="Scheduler Scale", value=5.0)
+
+                        with gr.Row():
+                            t2i_seed = gr.Number(label="Seed (-1 for random)", value=-1)
+                            t2i_random_seed_btn = gr.Button("🎲")
+
+                        t2i_save_path = gr.Textbox(label="Save Path", value="outputs/t2i")
+
+                    with gr.Column():
+                        t2i_output = gr.Gallery(
+                            label="Generated Images",
+                            columns=[2], rows=[2], object_fit="contain", height="auto",
+                            show_label=True, allow_preview=True, preview=True
+                        )
+
+                # Event handlers for T2I tab
+                t2i_random_seed_btn.click(
+                    fn=lambda: (-1),
+                    outputs=[t2i_seed]
+                )
+
+                # Preset button handlers
+                preset_1024.click(lambda: (1024, 1024), outputs=[t2i_width, t2i_height])
+                preset_768_1280.click(lambda: (768, 1280), outputs=[t2i_width, t2i_height])
+                preset_1280_768.click(lambda: (1280, 768), outputs=[t2i_width, t2i_height])
+                preset_640_1408.click(lambda: (640, 1408), outputs=[t2i_width, t2i_height])
+                preset_1408_640.click(lambda: (1408, 640), outputs=[t2i_width, t2i_height])
+                preset_896_1152.click(lambda: (896, 1152), outputs=[t2i_width, t2i_height])
+                preset_1152_896.click(lambda: (1152, 896), outputs=[t2i_width, t2i_height])
+
+                t2i_generate_btn.click(
+                    fn=generate_image,
+                    inputs=[
+                        t2i_prompt, t2i_negative_prompt,
+                        t2i_width, t2i_height,
+                        t2i_sample_steps, t2i_guidance_weight, t2i_scheduler_scale,
+                        t2i_seed, t2i_save_path, t2i_batch_size
+                    ],
+                    outputs=[t2i_output, t2i_status, t2i_progress]
+                )
+
+                t2i_stop_btn.click(
+                    fn=stop_generation,
+                    outputs=[t2i_status]
                 )
 
             # Video Info Tab
