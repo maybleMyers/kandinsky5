@@ -140,7 +140,19 @@ class Qwen2_5_VLTextEmbedder:
             return_tensors="pt",
             padding=True,
             max_length = max_length
-        ).to(self.device)
+        )
+
+        # Move all tensors to device - BatchEncoding.to() doesn't always handle nested tensors
+        def move_to_device(obj):
+            if isinstance(obj, torch.Tensor):
+                return obj.to(self.device)
+            elif isinstance(obj, dict):
+                return {k: move_to_device(v) for k, v in obj.items()}
+            elif isinstance(obj, (list, tuple)):
+                return type(obj)(move_to_device(v) for v in obj)
+            return obj
+
+        inputs = move_to_device(dict(inputs))
 
         with torch.no_grad():
             embeds = self.model(**inputs, output_hidden_states=True)["hidden_states"][-1][:, crop_start:]
