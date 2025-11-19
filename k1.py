@@ -11,6 +11,8 @@ from typing import Generator, List, Tuple, Optional, Dict
 import threading
 import json
 import ffmpeg
+import io
+from PIL import Image
 
 stop_event = threading.Event()
 current_process = None  # Track the currently running process
@@ -448,6 +450,74 @@ def extract_video_details(video_path: str) -> Tuple[dict, str]:
     # Return both the updated metadata and a status message
     return metadata, "Video details extracted successfully"
 
+def send_to_generation(video_path, metadata):
+    """Extract first frame and map metadata to generation inputs."""
+    if not video_path:
+        # Return no-ops if no video loaded. 
+        # Note: Must return exact number of outputs as defined in click event
+        return [gr.update()] * 33
+
+    # 1. Extract First Frame as PIL Image
+    input_img_pil = None
+    try:
+        out, _ = (
+            ffmpeg
+            .input(video_path)
+            .filter('select', 'gte(n,0)')
+            .output('pipe:', vframes=1, format='image2', vcodec='png')
+            .run(capture_stdout=True, capture_stderr=True)
+        )
+        input_img_pil = Image.open(io.BytesIO(out))
+    except Exception as e:
+        print(f"Frame extraction failed: {e}")
+
+    # 2. Parse Metadata
+    meta = metadata if isinstance(metadata, dict) else {}
+
+    def get(k, default=gr.update()):
+        return meta.get(k, default)
+    
+    def get_num(k, default=gr.update()):
+        val = meta.get(k)
+        return val if val is not None else default
+
+    # 3. Return values to populate fields and switch tab
+    return (
+        gr.Tabs(selected="gen_tab"),    # Switch to Generation tab
+        get("prompt"),                  # prompt
+        get("negative_prompt"),         # negative_prompt
+        input_img_pil,                  # input_image (First Frame)
+        "i2v",                          # mode (Force to i2v)
+        get("model_config"),            # model_config
+        get("attention_engine"),        # attention_engine
+        get("attention_type"),          # attention_type
+        get("dit_checkpoint_path"),     # dit_checkpoint_path
+        get_num("nabla_P"),             # nabla_P
+        get_num("nabla_wT"),            # nabla_wT
+        get_num("nabla_wW"),            # nabla_wW
+        get_num("nabla_wH"),            # nabla_wH
+        get_num("width"),               # width
+        get_num("height"),              # height
+        get_num("video_duration"),      # video_duration
+        get_num("sample_steps"),        # sample_steps
+        get_num("guidance_weight"),     # guidance_weight
+        get_num("scheduler_scale"),     # scheduler_scale
+        get_num("seed"),                # seed
+        get("use_mixed_weights"),       # use_mixed_weights
+        get("use_int8"),                # use_int8
+        get("enable_block_swap"),       # enable_block_swap
+        get_num("blocks_in_memory"),    # blocks_in_memory
+        get("dtype"),                   # dtype_select
+        get("text_encoder_dtype"),      # text_encoder_dtype_select
+        get("vae_dtype"),               # vae_dtype_select
+        get("computation_dtype"),       # computation_dtype_select
+        get("enable_vae_chunking"),     # enable_vae_chunking
+        get_num("vae_temporal_tile_frames"),   # vae_temporal_tile_frames
+        get_num("vae_temporal_stride_frames"), # vae_temporal_stride_frames
+        get_num("vae_spatial_tile_height"),    # vae_spatial_tile_height
+        get_num("vae_spatial_tile_width")      # vae_spatial_tile_width
+    )
+
 def calculate_width_from_height(height, original_dims):
     """Calculate width based on height maintaining aspect ratio (divisible by 32)"""
     if not original_dims or height is None:
@@ -526,7 +596,6 @@ def update_image_dimensions(image_path):
     if image_path is None:
         return "", gr.update(), gr.update()
     try:
-        from PIL import Image
         img = Image.open(image_path)
         w, h = img.size
         original_dims_str = f"{w}x{h}"
@@ -632,271 +701,314 @@ def create_interface():
 
         gr.Markdown("# Kandinsky 5.0 I2V Pro 20B - K1 Interface")
 
-        with gr.Tab("Generation"):
-            with gr.Row():
-                with gr.Column(scale=4):
-                    prompt = gr.Textbox(
-                        scale=3,
-                        label="Enter your prompt",
-                        value="A cute tabby cat is eating a bowl of wasabi in a restaurant in Guangzhou. The cat is very good at using chopsticks and proceeds to eat the entire bowl of wasabi quickly with his chopsticks. The cat is wearing a white shirt with red accents and the cute tabby cat's shirt has the text 'spice kitten' on it. There is a large red sign in the background with '芥末' on it in white letters. A small red panda is drinking a beer beside the cat. The red panda is holding a large glass of dark beer and drinking it quickly. The panda tilts his head back and downs the entire glass of beer in one large gulp.",
-                        lines=5
-                    )
-                    negative_prompt = gr.Textbox(
-                        scale=3,
-                        label="Negative Prompt",
-                        value="Static, 2D cartoon, cartoon, 2d animation, paintings, images, worst quality, low quality, ugly, deformed, walking backwards",
-                        lines=3,
-                    )
-                with gr.Column(scale=1):
-                    batch_size = gr.Number(label="Batch Count", value=1, minimum=1, step=1)
-                with gr.Column(scale=2):
-                    batch_progress = gr.Textbox(label="Status", interactive=False, value="")
-                    progress_text = gr.Textbox(label="Progress", interactive=False, value="")
+        with gr.Tabs() as tabs:
+            with gr.Tab("Generation", id="gen_tab"):
+                with gr.Row():
+                    with gr.Column(scale=4):
+                        prompt = gr.Textbox(
+                            scale=3,
+                            label="Enter your prompt",
+                            value="A cute tabby cat is eating a bowl of wasabi in a restaurant in Guangzhou. The cat is very good at using chopsticks and proceeds to eat the entire bowl of wasabi quickly with his chopsticks. The cat is wearing a white shirt with red accents and the cute tabby cat's shirt has the text 'spice kitten' on it. There is a large red sign in the background with '芥末' on it in white letters. A small red panda is drinking a beer beside the cat. The red panda is holding a large glass of dark beer and drinking it quickly. The panda tilts his head back and downs the entire glass of beer in one large gulp.",
+                            lines=5
+                        )
+                        negative_prompt = gr.Textbox(
+                            scale=3,
+                            label="Negative Prompt",
+                            value="Static, 2D cartoon, cartoon, 2d animation, paintings, images, worst quality, low quality, ugly, deformed, walking backwards",
+                            lines=3,
+                        )
+                    with gr.Column(scale=1):
+                        batch_size = gr.Number(label="Batch Count", value=1, minimum=1, step=1)
+                    with gr.Column(scale=2):
+                        batch_progress = gr.Textbox(label="Status", interactive=False, value="")
+                        progress_text = gr.Textbox(label="Progress", interactive=False, value="")
 
-            with gr.Row():
-                generate_btn = gr.Button("Generate Video", elem_classes="green-btn")
-                stop_btn = gr.Button("Stop Generation", variant="stop")
+                with gr.Row():
+                    generate_btn = gr.Button("Generate Video", elem_classes="green-btn")
+                    stop_btn = gr.Button("Stop Generation", variant="stop")
 
-            with gr.Row():
-                with gr.Column():
-                    input_image = gr.Image(label="Input Image (for i2v mode)", type="filepath")
+                with gr.Row():
+                    with gr.Column():
+                        input_image = gr.Image(label="Input Image (for i2v mode)", type="filepath")
 
-                    gr.Markdown("### Generation Parameters")
-                    mode = gr.Dropdown(
-                        label="Mode",
-                        choices=["i2v", "t2v"],
-                        value="i2v",
-                        info="Select generation mode: i2v (image-to-video) or t2v (text-to-video)"
-                    )
+                        gr.Markdown("### Generation Parameters")
+                        mode = gr.Dropdown(
+                            label="Mode",
+                            choices=["i2v", "t2v"],
+                            value="i2v",
+                            info="Select generation mode: i2v (image-to-video) or t2v (text-to-video)"
+                        )
 
-                    model_config = gr.Dropdown(
-                        label="Model Configuration",
-                        choices=[
-                            "5s Lite (T2V)",
-                            "10s Lite (T2V)",
-                            "5s Pro 20B (T2V)",
-                            "10s Pro 20B (T2V)",
-                            "5s Pro 20B (I2V)",
-                            "5s Lite (I2V)"
-                        ],
-                        value="5s Pro 20B (I2V)",
-                        info="Select model configuration. Pro models require more VRAM but offer better quality. 10s models support longer videos."
-                    )
+                        model_config = gr.Dropdown(
+                            label="Model Configuration",
+                            choices=[
+                                "5s Lite (T2V)",
+                                "10s Lite (T2V)",
+                                "5s Pro 20B (T2V)",
+                                "10s Pro 20B (T2V)",
+                                "5s Pro 20B (I2V)",
+                                "5s Lite (I2V)"
+                            ],
+                            value="5s Pro 20B (I2V)",
+                            info="Select model configuration. Pro models require more VRAM but offer better quality. 10s models support longer videos."
+                        )
 
-                    attention_engine = gr.Dropdown(
-                        label="Attention Engine",
-                        choices=["auto", "flash_attention_2", "flash_attention_3", "sdpa", "sage"],
-                        value="auto",
-                        info="Select attention implementation. 'auto' uses config default. Flash attention is faster for Lite models. SDPA works well for Pro models."
-                    )
-
-                    with gr.Accordion("NABLA Sparse Attention Settings", open=False):
-                        gr.Markdown("""
-                        Configure NABLA sparse attention for memory-efficient long video generation. Recommended for 10s models.
-
-                        **Important for i2v:** NABLA requires resolution divisible by 128 pixels (e.g., 512, 640, 768, 1024, 1280, 1536, 1920, 2048).
-                        Invalid resolutions will be automatically rounded down to the nearest multiple of 128.
-                        """)
-                        attention_type = gr.Dropdown(
-                            label="Attention Type",
-                            choices=["auto", "flash", "nabla"],
+                        attention_engine = gr.Dropdown(
+                            label="Attention Engine",
+                            choices=["auto", "flash_attention_2", "flash_attention_3", "sdpa", "sage"],
                             value="auto",
-                            info="'auto' uses config default, 'flash' for full attention, 'nabla' for sparse attention (better for 10s videos)"
+                            info="Select attention implementation. 'auto' uses config default. Flash attention is faster for Lite models. SDPA works well for Pro models."
+                        )
+
+                        with gr.Accordion("NABLA Sparse Attention Settings", open=False):
+                            gr.Markdown("""
+                            Configure NABLA sparse attention for memory-efficient long video generation. Recommended for 10s models.
+
+                            **Important for i2v:** NABLA requires resolution divisible by 128 pixels (e.g., 512, 640, 768, 1024, 1280, 1536, 1920, 2048).
+                            Invalid resolutions will be automatically rounded down to the nearest multiple of 128.
+                            """)
+                            attention_type = gr.Dropdown(
+                                label="Attention Type",
+                                choices=["auto", "flash", "nabla"],
+                                value="auto",
+                                info="'auto' uses config default, 'flash' for full attention, 'nabla' for sparse attention (better for 10s videos)"
+                            )
+                            with gr.Row():
+                                nabla_P = gr.Slider(
+                                    minimum=0.5, maximum=1.0, value=0.9, step=0.05,
+                                    label="NABLA P (Probability Threshold)",
+                                    info="Top-k probability threshold. Higher = more tokens kept (0.9 recommended)"
+                                )
+                            with gr.Row():
+                                nabla_wT = gr.Slider(
+                                    minimum=3, maximum=21, value=11, step=2,
+                                    label="NABLA wT (Temporal Window)",
+                                    info="Temporal window size. Use 11 for 10s, 7 for 5s"
+                                )
+                                nabla_wW = gr.Slider(
+                                    minimum=1, maximum=7, value=3, step=2,
+                                    label="NABLA wW (Width Window)",
+                                    info="Width window size (default: 3)"
+                                )
+                                nabla_wH = gr.Slider(
+                                    minimum=1, maximum=7, value=3, step=2,
+                                    label="NABLA wH (Height Window)",
+                                    info="Height window size (default: 3)"
+                                )
+
+                        dit_checkpoint_path = gr.Textbox(
+                            label="DiT Checkpoint Path (optional)",
+                            value="",
+                            placeholder="./weights/model/kandinsky5pro_t2v_sft_10s.safetensors",
+                            info="Override DiT model checkpoint path. Leave empty to use config default. Provide path to your .safetensors file."
+                        )
+
+                        # Hidden state to store original image dimensions
+                        original_dims = gr.State(value="")
+
+                        gr.Markdown("### Resolution Settings")
+                        scale_slider = gr.Slider(
+                            minimum=1, maximum=200, value=100, step=1,
+                            label="Scale % (adjusts resolution while maintaining aspect ratio)",
+                            info="Scale the input image dimensions. Works for both i2v and t2v modes."
                         )
                         with gr.Row():
-                            nabla_P = gr.Slider(
-                                minimum=0.5, maximum=1.0, value=0.9, step=0.05,
-                                label="NABLA P (Probability Threshold)",
-                                info="Top-k probability threshold. Higher = more tokens kept (0.9 recommended)"
+                            width = gr.Number(label="Width", value=768, step=32, interactive=True,
+                                            info="Must be divisible by 32")
+                            calc_height_btn = gr.Button("→", size="sm")
+                            calc_width_btn = gr.Button("←", size="sm")
+                            height = gr.Number(label="Height", value=512, step=32, interactive=True,
+                                            info="Must be divisible by 32")
+
+                        video_duration = gr.Slider(minimum=1, maximum=30, step=1, label="Video Duration (seconds)", value=5)
+                        sample_steps = gr.Slider(minimum=1, maximum=100, step=1, label="Sampling Steps", value=50)
+                        guidance_weight = gr.Slider(minimum=1.0, maximum=20.0, step=0.1, label="Guidance Weight", value=5.0)
+                        scheduler_scale = gr.Slider(minimum=0.0, maximum=20.0, step=0.1, label="Scheduler Scale", value=5.0)
+                        with gr.Row():
+                            seed = gr.Number(label="Seed (-1 for random)", value=-1)
+                            random_seed_btn = gr.Button("🎲")
+
+                    with gr.Column():
+                        output = gr.Gallery(
+                            label="Generated Videos (Click to select)",
+                            columns=[2], rows=[2], object_fit="contain", height="auto",
+                            show_label=True, elem_id="gallery_k1", allow_preview=True, preview=True
+                        )
+                        with gr.Accordion("Latent Preview (During Generation)", open=True):
+                            enable_preview = gr.Checkbox(label="Enable Latent Preview", value=True)
+                            preview_steps = gr.Slider(minimum=1, maximum=50, step=1, value=5,
+                                                    label="Preview Every N Steps")
+                            preview_output = gr.Video(
+                                label="Latest Preview", height=300,
+                                interactive=False, elem_id="k1_preview_video"
+                            )
+
+                with gr.Accordion("Model Settings & Performance", open=True):
+                    with gr.Row():
+                        use_mixed_weights = gr.Checkbox(label="Use Mixed Weights", value=False, info="Preserve fp32 for critical layers (norms, embeddings)")
+                        use_int8 = gr.Checkbox(label="Use int8 matmul", value=False, info="enable int8 quantization")
+                    with gr.Row():
+                        enable_block_swap = gr.Checkbox(label="Enable Block Swap", value=True, info="Required for 24GB GPUs")
+                        blocks_in_memory = gr.Slider(minimum=1, maximum=60, step=1, label="Blocks in Memory", value=2, info="Number of transformer blocks to keep in GPU memory")
+                    with gr.Row():
+                        dtype_select = gr.Radio(choices=["bfloat16", "float16", "float32"], label="Default Data Type", value="bfloat16", info="Used for all components if specific dtypes not set")
+                    with gr.Accordion("Advanced: Component-Specific Data Types", open=False):
+                        gr.Markdown("Override dtypes for individual components. Leave empty to use default dtype.")
+                        with gr.Row():
+                            text_encoder_dtype_select = gr.Dropdown(choices=["", "bfloat16", "float16", "float32"], label="Text Encoder dtype", value="", info="Empty = use default")
+                            vae_dtype_select = gr.Dropdown(choices=["", "bfloat16", "float16", "float32"], label="VAE dtype", value="", info="Empty = use default")
+                            computation_dtype_select = gr.Dropdown(choices=["", "bfloat16", "float16", "float32"], label="Computation dtype", value="", info="Empty = use default")
+
+                    with gr.Accordion("Advanced: VAE Memory Optimization (Chunking)", open=False):
+                        gr.Markdown("""
+                        **Configure VAE temporal/spatial chunking to reduce memory usage during decode.**
+
+                        Enable this if you get OOM (Out of Memory) errors during VAE decode. Smaller chunk sizes use less memory but take longer to decode.
+
+                        - **Temporal Tile Frames**: Chunk size in frames (default: 16). Try 12 for moderate reduction, 8 for aggressive.
+                        - **Temporal Stride**: Overlap between chunks (default: auto = tile_frames - 4)
+                        - **Spatial Tile Height/Width**: Spatial chunk dimensions (default: 256)
+
+                        Leave disabled to use default settings (recommended unless you experience OOM).
+                        """)
+                        enable_vae_chunking = gr.Checkbox(
+                            label="Enable VAE Chunking",
+                            value=False,
+                            info="Enable custom VAE chunk sizes to reduce memory usage"
+                        )
+                        with gr.Row():
+                            vae_temporal_tile_frames = gr.Slider(
+                                minimum=4, maximum=32, value=12, step=4,
+                                label="Temporal Tile Frames",
+                                info="Chunk size in pixel-space frames (must be divisible by 4)"
+                            )
+                            vae_temporal_stride_frames = gr.Slider(
+                                minimum=0, maximum=28, value=0, step=4,
+                                label="Temporal Stride Frames (0 = auto)",
+                                info="Overlap between chunks. 0 = auto-calculate as tile_frames - 4"
                             )
                         with gr.Row():
-                            nabla_wT = gr.Slider(
-                                minimum=3, maximum=21, value=11, step=2,
-                                label="NABLA wT (Temporal Window)",
-                                info="Temporal window size. Use 11 for 10s, 7 for 5s"
+                            vae_spatial_tile_height = gr.Slider(
+                                minimum=128, maximum=512, value=256, step=64,
+                                label="Spatial Tile Height",
+                                info="Spatial chunk height (reduce if high resolution causes OOM)"
                             )
-                            nabla_wW = gr.Slider(
-                                minimum=1, maximum=7, value=3, step=2,
-                                label="NABLA wW (Width Window)",
-                                info="Width window size (default: 3)"
-                            )
-                            nabla_wH = gr.Slider(
-                                minimum=1, maximum=7, value=3, step=2,
-                                label="NABLA wH (Height Window)",
-                                info="Height window size (default: 3)"
+                            vae_spatial_tile_width = gr.Slider(
+                                minimum=128, maximum=512, value=256, step=64,
+                                label="Spatial Tile Width",
+                                info="Spatial chunk width (reduce if high resolution causes OOM)"
                             )
 
-                    dit_checkpoint_path = gr.Textbox(
-                        label="DiT Checkpoint Path (optional)",
-                        value="",
-                        placeholder="./weights/model/kandinsky5pro_t2v_sft_10s.safetensors",
-                        info="Override DiT model checkpoint path. Leave empty to use config default. Provide path to your .safetensors file."
-                    )
+                    save_path = gr.Textbox(label="Save Path", value="outputs")
 
-                    # Hidden state to store original image dimensions
-                    original_dims = gr.State(value="")
+                random_seed_btn.click(
+                    fn=lambda: random.randint(0, 2**32 - 1),
+                    outputs=[seed]
+                )
 
-                    gr.Markdown("### Resolution Settings")
-                    scale_slider = gr.Slider(
-                        minimum=1, maximum=200, value=100, step=1,
-                        label="Scale % (adjusts resolution while maintaining aspect ratio)",
-                        info="Scale the input image dimensions. Works for both i2v and t2v modes."
-                    )
-                    with gr.Row():
-                        width = gr.Number(label="Width", value=768, step=32, interactive=True,
-                                        info="Must be divisible by 32")
-                        calc_height_btn = gr.Button("→", size="sm")
-                        calc_width_btn = gr.Button("←", size="sm")
-                        height = gr.Number(label="Height", value=512, step=32, interactive=True,
-                                         info="Must be divisible by 32")
+                # Resolution control event handlers
+                input_image.change(
+                    fn=update_image_dimensions,
+                    inputs=[input_image],
+                    outputs=[original_dims, width, height]
+                )
 
-                    video_duration = gr.Slider(minimum=1, maximum=30, step=1, label="Video Duration (seconds)", value=5)
-                    sample_steps = gr.Slider(minimum=1, maximum=100, step=1, label="Sampling Steps", value=50)
-                    guidance_weight = gr.Slider(minimum=1.0, maximum=20.0, step=0.1, label="Guidance Weight", value=5.0)
-                    scheduler_scale = gr.Slider(minimum=0.0, maximum=20.0, step=0.1, label="Scheduler Scale", value=5.0)
-                    with gr.Row():
-                        seed = gr.Number(label="Seed (-1 for random)", value=-1)
-                        random_seed_btn = gr.Button("🎲")
+                scale_slider.change(
+                    fn=update_resolution_from_scale,
+                    inputs=[scale_slider, original_dims],
+                    outputs=[width, height]
+                )
 
-                with gr.Column():
-                    output = gr.Gallery(
-                        label="Generated Videos (Click to select)",
-                        columns=[2], rows=[2], object_fit="contain", height="auto",
-                        show_label=True, elem_id="gallery_k1", allow_preview=True, preview=True
-                    )
-                    with gr.Accordion("Latent Preview (During Generation)", open=True):
-                        enable_preview = gr.Checkbox(label="Enable Latent Preview", value=True)
-                        preview_steps = gr.Slider(minimum=1, maximum=50, step=1, value=5,
-                                                 label="Preview Every N Steps")
-                        preview_output = gr.Video(
-                            label="Latest Preview", height=300,
-                            interactive=False, elem_id="k1_preview_video"
-                        )
+                calc_width_btn.click(
+                    fn=calculate_width_from_height,
+                    inputs=[height, original_dims],
+                    outputs=[width]
+                )
 
-            with gr.Accordion("Model Settings & Performance", open=True):
+                calc_height_btn.click(
+                    fn=calculate_height_from_width,
+                    inputs=[width, original_dims],
+                    outputs=[height]
+                )
+
+                generate_btn.click(
+                    fn=generate_video,
+                    inputs=[
+                        prompt, negative_prompt, input_image, mode, model_config, dit_checkpoint_path, attention_engine,
+                        attention_type, nabla_P, nabla_wT, nabla_wW, nabla_wH,
+                        width, height, video_duration, sample_steps,
+                        guidance_weight, scheduler_scale, seed,
+                        use_mixed_weights, use_int8, enable_block_swap, blocks_in_memory, dtype_select,
+                        text_encoder_dtype_select, vae_dtype_select, computation_dtype_select,
+                        save_path, batch_size,
+                        enable_preview, preview_steps,
+                        enable_vae_chunking, vae_temporal_tile_frames, vae_temporal_stride_frames,
+                        vae_spatial_tile_height, vae_spatial_tile_width
+                    ],
+                    outputs=[output, preview_output, batch_progress, progress_text]
+                )
+
+                stop_btn.click(
+                    fn=stop_generation,
+                    outputs=[batch_progress]
+                )
+
+            # Video Info Tab
+            with gr.Tab("Video Info"):
                 with gr.Row():
-                    use_mixed_weights = gr.Checkbox(label="Use Mixed Weights", value=False, info="Preserve fp32 for critical layers (norms, embeddings)")
-                    use_int8 = gr.Checkbox(label="Use int8 matmul", value=False, info="enable int8 quantization")
+                    video_input = gr.Video(label="Upload Video", interactive=True)
+                    metadata_output = gr.JSON(label="Generation Parameters")
+
                 with gr.Row():
-                    enable_block_swap = gr.Checkbox(label="Enable Block Swap", value=True, info="Required for 24GB GPUs")
-                    blocks_in_memory = gr.Slider(minimum=1, maximum=60, step=1, label="Blocks in Memory", value=2, info="Number of transformer blocks to keep in GPU memory")
-                with gr.Row():
-                    dtype_select = gr.Radio(choices=["bfloat16", "float16", "float32"], label="Default Data Type", value="bfloat16", info="Used for all components if specific dtypes not set")
-                with gr.Accordion("Advanced: Component-Specific Data Types", open=False):
-                    gr.Markdown("Override dtypes for individual components. Leave empty to use default dtype.")
-                    with gr.Row():
-                        text_encoder_dtype_select = gr.Dropdown(choices=["", "bfloat16", "float16", "float32"], label="Text Encoder dtype", value="", info="Empty = use default")
-                        vae_dtype_select = gr.Dropdown(choices=["", "bfloat16", "float16", "float32"], label="VAE dtype", value="", info="Empty = use default")
-                        computation_dtype_select = gr.Dropdown(choices=["", "bfloat16", "float16", "float32"], label="Computation dtype", value="", info="Empty = use default")
+                    video_info_status = gr.Textbox(label="Status", interactive=False)
 
-                with gr.Accordion("Advanced: VAE Memory Optimization (Chunking)", open=False):
-                    gr.Markdown("""
-                    **Configure VAE temporal/spatial chunking to reduce memory usage during decode.**
+                send_to_gen_btn = gr.Button("Send to Generation 🚀", elem_classes="green-btn")
 
-                    Enable this if you get OOM (Out of Memory) errors during VAE decode. Smaller chunk sizes use less memory but take longer to decode.
+                video_input.upload(
+                    fn=extract_video_details,
+                    inputs=video_input,
+                    outputs=[metadata_output, video_info_status]
+                )
 
-                    - **Temporal Tile Frames**: Chunk size in frames (default: 16). Try 12 for moderate reduction, 8 for aggressive.
-                    - **Temporal Stride**: Overlap between chunks (default: auto = tile_frames - 4)
-                    - **Spatial Tile Height/Width**: Spatial chunk dimensions (default: 256)
-
-                    Leave disabled to use default settings (recommended unless you experience OOM).
-                    """)
-                    enable_vae_chunking = gr.Checkbox(
-                        label="Enable VAE Chunking",
-                        value=False,
-                        info="Enable custom VAE chunk sizes to reduce memory usage"
-                    )
-                    with gr.Row():
-                        vae_temporal_tile_frames = gr.Slider(
-                            minimum=4, maximum=32, value=12, step=4,
-                            label="Temporal Tile Frames",
-                            info="Chunk size in pixel-space frames (must be divisible by 4)"
-                        )
-                        vae_temporal_stride_frames = gr.Slider(
-                            minimum=0, maximum=28, value=0, step=4,
-                            label="Temporal Stride Frames (0 = auto)",
-                            info="Overlap between chunks. 0 = auto-calculate as tile_frames - 4"
-                        )
-                    with gr.Row():
-                        vae_spatial_tile_height = gr.Slider(
-                            minimum=128, maximum=512, value=256, step=64,
-                            label="Spatial Tile Height",
-                            info="Spatial chunk height (reduce if high resolution causes OOM)"
-                        )
-                        vae_spatial_tile_width = gr.Slider(
-                            minimum=128, maximum=512, value=256, step=64,
-                            label="Spatial Tile Width",
-                            info="Spatial chunk width (reduce if high resolution causes OOM)"
-                        )
-
-                save_path = gr.Textbox(label="Save Path", value="outputs")
-
-            random_seed_btn.click(
-                fn=lambda: random.randint(0, 2**32 - 1),
-                outputs=[seed]
-            )
-
-            # Resolution control event handlers
-            input_image.change(
-                fn=update_image_dimensions,
-                inputs=[input_image],
-                outputs=[original_dims, width, height]
-            )
-
-            scale_slider.change(
-                fn=update_resolution_from_scale,
-                inputs=[scale_slider, original_dims],
-                outputs=[width, height]
-            )
-
-            calc_width_btn.click(
-                fn=calculate_width_from_height,
-                inputs=[height, original_dims],
-                outputs=[width]
-            )
-
-            calc_height_btn.click(
-                fn=calculate_height_from_width,
-                inputs=[width, original_dims],
-                outputs=[height]
-            )
-
-            generate_btn.click(
-                fn=generate_video,
-                inputs=[
-                    prompt, negative_prompt, input_image, mode, model_config, dit_checkpoint_path, attention_engine,
-                    attention_type, nabla_P, nabla_wT, nabla_wW, nabla_wH,
-                    width, height, video_duration, sample_steps,
-                    guidance_weight, scheduler_scale, seed,
-                    use_mixed_weights, use_int8, enable_block_swap, blocks_in_memory, dtype_select,
-                    text_encoder_dtype_select, vae_dtype_select, computation_dtype_select,
-                    save_path, batch_size,
-                    enable_preview, preview_steps,
-                    enable_vae_chunking, vae_temporal_tile_frames, vae_temporal_stride_frames,
-                    vae_spatial_tile_height, vae_spatial_tile_width
-                ],
-                outputs=[output, preview_output, batch_progress, progress_text]
-            )
-
-            stop_btn.click(
-                fn=stop_generation,
-                outputs=[batch_progress]
-            )
-
-        # Video Info Tab
-        with gr.Tab("Video Info"):
-            with gr.Row():
-                video_input = gr.Video(label="Upload Video", interactive=True)
-                metadata_output = gr.JSON(label="Generation Parameters")
-
-            with gr.Row():
-                video_info_status = gr.Textbox(label="Status", interactive=False)
-
-            video_input.upload(
-                fn=extract_video_details,
-                inputs=video_input,
-                outputs=[metadata_output, video_info_status]
-            )
+                send_to_gen_btn.click(
+                    fn=send_to_generation,
+                    inputs=[video_input, metadata_output],
+                    outputs=[
+                        tabs,                       # 1. Switch Tab
+                        prompt,                     # 2
+                        negative_prompt,            # 3
+                        input_image,                # 4
+                        mode,                       # 5
+                        model_config,               # 6
+                        attention_engine,           # 7
+                        attention_type,             # 8
+                        dit_checkpoint_path,        # 9
+                        nabla_P,                    # 10
+                        nabla_wT,                   # 11
+                        nabla_wW,                   # 12
+                        nabla_wH,                   # 13
+                        width,                      # 14
+                        height,                     # 15
+                        video_duration,             # 16
+                        sample_steps,               # 17
+                        guidance_weight,            # 18
+                        scheduler_scale,            # 19
+                        seed,                       # 20
+                        use_mixed_weights,          # 21
+                        use_int8,                   # 22
+                        enable_block_swap,          # 23
+                        blocks_in_memory,           # 24
+                        dtype_select,               # 25
+                        text_encoder_dtype_select,  # 26
+                        vae_dtype_select,           # 27
+                        computation_dtype_select,   # 28
+                        enable_vae_chunking,        # 29
+                        vae_temporal_tile_frames,   # 30
+                        vae_temporal_stride_frames, # 31
+                        vae_spatial_tile_height,    # 32
+                        vae_spatial_tile_width      # 33
+                    ]
+                )
 
     return demo
 
