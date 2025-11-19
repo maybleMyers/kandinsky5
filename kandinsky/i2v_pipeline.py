@@ -150,7 +150,7 @@ def get_first_frame_from_image(image, vae, device, alignment=16):
         # Use the VAE's dtype to avoid dtype mismatch
         vae_dtype = next(vae.parameters()).dtype
         image = image.to(device=device, dtype=vae_dtype).transpose(0, 1).unsqueeze(0)
-        lat_image = vae.encode(image, opt_tiling=False).latent_dist.sample().squeeze(0).permute(1, 2, 3, 0)
+        lat_image = vae.encode(image, opt_tiling=False).latent_dist.mode().squeeze(0).permute(1, 2, 3, 0)
         lat_image = lat_image * vae.config.scaling_factor
 
     return pil_image, lat_image, k

@@ -192,6 +192,7 @@ def generate(
             if first_frames is not None:
                 first_frames = first_frames.to(device=visual_cond.device, dtype=visual_cond.dtype)
                 img[:1] = first_frames
+                visual_cond[:1] = first_frames
                 visual_cond_mask[:1] = 1
             model_input = torch.cat([img, visual_cond, visual_cond_mask], dim=-1)
         else:
