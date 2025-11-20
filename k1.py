@@ -1048,13 +1048,13 @@ def create_interface():
                         enable_block_swap = gr.Checkbox(label="Enable Block Swap", value=True, info="Required for 24GB GPUs")
                         blocks_in_memory = gr.Slider(minimum=1, maximum=60, step=1, label="Blocks in Memory", value=2, info="Number of transformer blocks to keep in GPU memory")
                     with gr.Row():
-                        dtype_select = gr.Radio(choices=["bfloat16", "float16", "float32"], label="Default Data Type", value="bfloat16", info="Used for all components if specific dtypes not set")
+                        dtype_select = gr.Radio(choices=["bfloat16", "float16", "float32", "fp8_scaled"], label="Default Data Type", value="bfloat16", info="Used for all components if specific dtypes not set. fp8_scaled provides ~50% memory savings.")
                     with gr.Accordion("Advanced: Component-Specific Data Types", open=False):
                         gr.Markdown("Override dtypes for individual components. Leave empty to use default dtype.")
                         with gr.Row():
-                            text_encoder_dtype_select = gr.Dropdown(choices=["", "bfloat16", "float16", "float32"], label="Text Encoder dtype", value="", info="Empty = use default")
-                            vae_dtype_select = gr.Dropdown(choices=["", "bfloat16", "float16", "float32"], label="VAE dtype", value="", info="Empty = use default")
-                            computation_dtype_select = gr.Dropdown(choices=["", "bfloat16", "float16", "float32"], label="Computation dtype", value="", info="Empty = use default")
+                            text_encoder_dtype_select = gr.Dropdown(choices=["", "bfloat16", "float16", "float32", "fp8_scaled"], label="Text Encoder dtype", value="", info="Empty = use default")
+                            vae_dtype_select = gr.Dropdown(choices=["", "bfloat16", "float16", "float32", "fp8_scaled"], label="VAE dtype", value="", info="Empty = use default")
+                            computation_dtype_select = gr.Dropdown(choices=["", "bfloat16", "float16", "float32", "fp8_scaled"], label="Computation dtype", value="", info="Empty = use default. fp8_scaled for transformer only.")
 
                     with gr.Accordion("Advanced: VAE Memory Optimization (Chunking)", open=False):
                         gr.Markdown("""

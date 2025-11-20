@@ -230,28 +230,28 @@ def parse_args():
         "--dtype",
         type=str,
         default="bfloat16",
-        choices=["float32", "float16", "bfloat16"],
-        help="Data type for model weights (default: bfloat16). Use bfloat16 for best memory efficiency with minimal quality loss. This sets all dtypes if specific ones are not provided."
+        choices=["float32", "float16", "bfloat16", "fp8_scaled"],
+        help="Data type for model weights (default: bfloat16). Use bfloat16 for best memory efficiency with minimal quality loss. Use fp8_scaled for maximum memory savings (~50%% vs bf16). This sets all dtypes if specific ones are not provided."
     )
     parser.add_argument(
         "--text_encoder_dtype",
         type=str,
         default=None,
-        choices=["float32", "float16", "bfloat16"],
+        choices=["float32", "float16", "bfloat16", "fp8_scaled"],
         help="Data type specifically for text encoder. If not set, uses --dtype value."
     )
     parser.add_argument(
         "--vae_dtype",
         type=str,
         default=None,
-        choices=["float32", "float16", "bfloat16"],
+        choices=["float32", "float16", "bfloat16", "fp8_scaled"],
         help="Data type specifically for VAE. If not set, uses --dtype value."
     )
     parser.add_argument(
         "--computation_dtype",
         type=str,
         default=None,
-        choices=["float32", "float16", "bfloat16"],
+        choices=["float32", "float16", "bfloat16", "fp8_scaled"],
         help="Data type for activations/computations. If not set, uses --dtype value."
     )
     parser.add_argument(
@@ -391,7 +391,15 @@ if __name__ == "__main__":
         "float32": torch.float32,
         "float16": torch.float16,
         "bfloat16": torch.bfloat16,
+        "fp8_scaled": torch.bfloat16,  # FP8 uses bfloat16 as compute dtype
     }
+
+    # Track which components should use FP8
+    use_fp8 = args.dtype == "fp8_scaled"
+    use_fp8_text_encoder = args.text_encoder_dtype == "fp8_scaled" if args.text_encoder_dtype else use_fp8
+    use_fp8_vae = args.vae_dtype == "fp8_scaled" if args.vae_dtype else use_fp8
+    use_fp8_computation = args.computation_dtype == "fp8_scaled" if args.computation_dtype else use_fp8
+
     model_dtype = dtype_map[args.dtype]
 
     # Set individual component dtypes (fall back to model_dtype if not specified)
@@ -445,6 +453,7 @@ if __name__ == "__main__":
                 computation_dtype=computation_dtype,
                 use_int8=args.use_int8,
                 int8_block_size=args.int8_block_size,
+                use_fp8=use_fp8_computation,
                 vae_temporal_tile_frames=args.vae_temporal_tile_frames,
                 vae_temporal_stride_frames=args.vae_temporal_stride_frames,
                 vae_spatial_tile_height=args.vae_spatial_tile_height,
@@ -469,6 +478,7 @@ if __name__ == "__main__":
                 computation_dtype=computation_dtype,
                 use_int8=args.use_int8,
                 int8_block_size=args.int8_block_size,
+                use_fp8=use_fp8_computation,
                 vae_temporal_tile_frames=args.vae_temporal_tile_frames,
                 vae_temporal_stride_frames=args.vae_temporal_stride_frames,
                 vae_spatial_tile_height=args.vae_spatial_tile_height,
@@ -497,6 +507,7 @@ if __name__ == "__main__":
                 computation_dtype=computation_dtype,
                 use_int8=args.use_int8,
                 int8_block_size=args.int8_block_size,
+                use_fp8=use_fp8_computation,
                 vae_temporal_tile_frames=args.vae_temporal_tile_frames,
                 vae_temporal_stride_frames=args.vae_temporal_stride_frames,
                 vae_spatial_tile_height=args.vae_spatial_tile_height,
@@ -521,6 +532,7 @@ if __name__ == "__main__":
                 computation_dtype=computation_dtype,
                 use_int8=args.use_int8,
                 int8_block_size=args.int8_block_size,
+                use_fp8=use_fp8_computation,
                 vae_temporal_tile_frames=args.vae_temporal_tile_frames,
                 vae_temporal_stride_frames=args.vae_temporal_stride_frames,
                 vae_spatial_tile_height=args.vae_spatial_tile_height,

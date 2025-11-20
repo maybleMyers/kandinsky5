@@ -12,6 +12,7 @@ from .models.dit_block_swap import get_dit_with_block_swap
 from .models.text_embedders import get_text_embedder
 from .models.vae import build_vae
 from .models.parallelize import parallelize_dit
+from .models.fp8_layers import fp8_optimization
 from .i2v_pipeline import Kandinsky5I2VPipeline
 from .t2v_pipeline import Kandinsky5T2VPipeline
 from .t2i_pipeline import Kandinsky5T2IPipeline
@@ -46,6 +47,7 @@ def get_T2V_pipeline(
     computation_dtype: torch.dtype = None,
     use_int8: bool = False,
     int8_block_size: int = 128,
+    use_fp8: bool = False,
     vae_temporal_tile_frames: int = None,
     vae_temporal_stride_frames: int = None,
     vae_spatial_tile_height: int = None,
@@ -173,7 +175,23 @@ def get_T2V_pipeline(
         state_dict = {k: v.to(computation_dtype) if v.dtype in [torch.float32, torch.float16, torch.bfloat16] else v
                       for k, v in state_dict.items()}
 
-    if use_int8:
+    if use_fp8:
+        # FP8 optimization - convert eligible weights to FP8 and apply monkey patching
+        print("FP8 quantization enabled - converting weights to FP8 format...")
+        # First load the state dict normally
+        dit.load_state_dict(state_dict, assign=True)
+        # Move to device
+        if not offload:
+            dit = dit.to(device_map["dit"])
+        # Apply FP8 optimization
+        fp8_optimization(
+            dit,
+            state_dict,
+            device=device_map["dit"] if isinstance(device_map["dit"], torch.device) else torch.device(device_map["dit"]),
+            move_to_device=not offload,
+            use_scaled_mm=True
+        )
+    elif use_int8:
         # Check if checkpoint is already quantized
         has_int8_weights = any('weight_int8' in k for k in state_dict.keys())
         if has_int8_weights:
@@ -182,15 +200,19 @@ def get_T2V_pipeline(
             print("INT8 quantization enabled - converting FP32 weights to INT8 during loading (this may take a moment)...")
         # Use strict=False to allow custom _load_from_state_dict to handle weight conversion
         dit.load_state_dict(state_dict, assign=True, strict=False)
+        if not offload:
+            if use_mixed_weights:
+                dit = dit.to(device_map["dit"])
+            else:
+                dit = dit.to(device_map["dit"], dtype=computation_dtype)
     else:
         dit.load_state_dict(state_dict, assign=True)
-
-    if not offload:
-        if use_mixed_weights:
-            # For mixed weights, move to device without dtype conversion
-            dit = dit.to(device_map["dit"])
-        else:
-            dit = dit.to(device_map["dit"], dtype=computation_dtype)
+        if not offload:
+            if use_mixed_weights:
+                # For mixed weights, move to device without dtype conversion
+                dit = dit.to(device_map["dit"])
+            else:
+                dit = dit.to(device_map["dit"], dtype=computation_dtype)
 
     if world_size > 1:
         dit = parallelize_dit(dit, device_mesh["tensor_parallel"])
@@ -229,6 +251,7 @@ def get_I2V_pipeline(
     computation_dtype: torch.dtype = None,
     use_int8: bool = False,
     int8_block_size: int = 128,
+    use_fp8: bool = False,
     vae_temporal_tile_frames: int = None,
     vae_temporal_stride_frames: int = None,
     vae_spatial_tile_height: int = None,
@@ -354,7 +377,23 @@ def get_I2V_pipeline(
         state_dict = {k: v.to(computation_dtype) if v.dtype in [torch.float32, torch.float16, torch.bfloat16] else v
                       for k, v in state_dict.items()}
 
-    if use_int8:
+    if use_fp8:
+        # FP8 optimization - convert eligible weights to FP8 and apply monkey patching
+        print("FP8 quantization enabled - converting weights to FP8 format...")
+        # First load the state dict normally
+        dit.load_state_dict(state_dict, assign=True)
+        # Move to device
+        if not offload:
+            dit = dit.to(device_map["dit"])
+        # Apply FP8 optimization
+        fp8_optimization(
+            dit,
+            state_dict,
+            device=device_map["dit"] if isinstance(device_map["dit"], torch.device) else torch.device(device_map["dit"]),
+            move_to_device=not offload,
+            use_scaled_mm=True
+        )
+    elif use_int8:
         # Check if checkpoint is already quantized
         has_int8_weights = any('weight_int8' in k for k in state_dict.keys())
         if has_int8_weights:
@@ -363,15 +402,19 @@ def get_I2V_pipeline(
             print("INT8 quantization enabled - converting FP32 weights to INT8 during loading (this may take a moment)...")
         # Use strict=False to allow custom _load_from_state_dict to handle weight conversion
         dit.load_state_dict(state_dict, assign=True, strict=False)
+        if not offload:
+            if use_mixed_weights:
+                dit = dit.to(device_map["dit"])
+            else:
+                dit = dit.to(device_map["dit"], dtype=computation_dtype)
     else:
         dit.load_state_dict(state_dict, assign=True)
-
-    if not offload:
-        if use_mixed_weights:
-            # For mixed weights, move to device without dtype conversion
-            dit = dit.to(device_map["dit"])
-        else:
-            dit = dit.to(device_map["dit"], dtype=computation_dtype)
+        if not offload:
+            if use_mixed_weights:
+                # For mixed weights, move to device without dtype conversion
+                dit = dit.to(device_map["dit"])
+            else:
+                dit = dit.to(device_map["dit"], dtype=computation_dtype)
 
     if world_size > 1:
         dit = parallelize_dit(dit, device_mesh["tensor_parallel"])
@@ -661,6 +704,7 @@ def get_I2V_pipeline_with_block_swap(
     computation_dtype: torch.dtype = None,
     use_int8: bool = False,
     int8_block_size: int = 128,
+    use_fp8: bool = False,
     vae_temporal_tile_frames: int = None,
     vae_temporal_stride_frames: int = None,
     vae_spatial_tile_height: int = None,
@@ -807,7 +851,26 @@ def get_I2V_pipeline_with_block_swap(
         state_dict = {k: v.to(computation_dtype) if v.dtype in [torch.float32, torch.float16, torch.bfloat16] else v
                       for k, v in state_dict.items()}
 
-    if use_int8:
+    if use_fp8:
+        # FP8 optimization - convert eligible weights to FP8 and apply monkey patching
+        print("FP8 quantization enabled - converting weights to FP8 format...")
+        # First load the state dict normally
+        dit.load_state_dict(state_dict, assign=True)
+        # For block swap, we need to move to GPU temporarily for FP8 conversion then back to CPU
+        target_device = device_map["dit"] if isinstance(device_map["dit"], torch.device) else torch.device(device_map["dit"])
+        dit = dit.to(target_device)
+        # Apply FP8 optimization
+        fp8_optimization(
+            dit,
+            state_dict,
+            device=target_device,
+            move_to_device=True,
+            use_scaled_mm=True
+        )
+        # Move back to CPU for block swap
+        if enable_block_swap or offload:
+            dit = dit.to('cpu')
+    elif use_int8:
         # Check if checkpoint is already quantized
         has_int8_weights = any('weight_int8' in k for k in state_dict.keys())
         if has_int8_weights:
@@ -816,17 +879,22 @@ def get_I2V_pipeline_with_block_swap(
             print("INT8 quantization enabled - converting FP32 weights to INT8 during loading (this may take a moment)...")
         # Use strict=False to allow custom _load_from_state_dict to handle weight conversion
         dit.load_state_dict(state_dict, assign=True, strict=False)
+        # Keep DiT on CPU when using offload OR block swap
+        if not offload and not enable_block_swap:
+            if use_mixed_weights:
+                dit = dit.to(device_map["dit"])
+            else:
+                dit = dit.to(device_map["dit"], dtype=computation_dtype)
     else:
         dit.load_state_dict(state_dict, assign=True)
-
-    # Keep DiT on CPU when using offload OR block swap
-    # For block swap, DiT will be loaded on-demand during generation
-    if not offload and not enable_block_swap:
-        if use_mixed_weights:
-            # For mixed weights, move to device without dtype conversion
-            dit = dit.to(device_map["dit"])
-        else:
-            dit = dit.to(device_map["dit"], dtype=computation_dtype)
+        # Keep DiT on CPU when using offload OR block swap
+        # For block swap, DiT will be loaded on-demand during generation
+        if not offload and not enable_block_swap:
+            if use_mixed_weights:
+                # For mixed weights, move to device without dtype conversion
+                dit = dit.to(device_map["dit"])
+            else:
+                dit = dit.to(device_map["dit"], dtype=computation_dtype)
 
     if world_size > 1:
         if enable_block_swap:
@@ -871,6 +939,7 @@ def get_T2V_pipeline_with_block_swap(
     computation_dtype: torch.dtype = None,
     use_int8: bool = False,
     int8_block_size: int = 128,
+    use_fp8: bool = False,
     vae_temporal_tile_frames: int = None,
     vae_temporal_stride_frames: int = None,
     vae_spatial_tile_height: int = None,
@@ -1014,7 +1083,26 @@ def get_T2V_pipeline_with_block_swap(
         state_dict = {k: v.to(computation_dtype) if v.dtype in [torch.float32, torch.float16, torch.bfloat16] else v
                       for k, v in state_dict.items()}
 
-    if use_int8:
+    if use_fp8:
+        # FP8 optimization - convert eligible weights to FP8 and apply monkey patching
+        print("FP8 quantization enabled - converting weights to FP8 format...")
+        # First load the state dict normally
+        dit.load_state_dict(state_dict, assign=True)
+        # For block swap, we need to move to GPU temporarily for FP8 conversion then back to CPU
+        target_device = device_map["dit"] if isinstance(device_map["dit"], torch.device) else torch.device(device_map["dit"])
+        dit = dit.to(target_device)
+        # Apply FP8 optimization
+        fp8_optimization(
+            dit,
+            state_dict,
+            device=target_device,
+            move_to_device=True,
+            use_scaled_mm=True
+        )
+        # Move back to CPU for block swap
+        if enable_block_swap or offload:
+            dit = dit.to('cpu')
+    elif use_int8:
         # Check if checkpoint is already quantized
         has_int8_weights = any('weight_int8' in k for k in state_dict.keys())
         if has_int8_weights:
@@ -1023,17 +1111,22 @@ def get_T2V_pipeline_with_block_swap(
             print("INT8 quantization enabled - converting FP32 weights to INT8 during loading (this may take a moment)...")
         # Use strict=False to allow custom _load_from_state_dict to handle weight conversion
         dit.load_state_dict(state_dict, assign=True, strict=False)
+        # Keep DiT on CPU when using offload OR block swap
+        if not offload and not enable_block_swap:
+            if use_mixed_weights:
+                dit = dit.to(device_map["dit"])
+            else:
+                dit = dit.to(device_map["dit"], dtype=computation_dtype)
     else:
         dit.load_state_dict(state_dict, assign=True)
-
-    # Keep DiT on CPU when using offload OR block swap
-    # For block swap, DiT will be loaded on-demand during generation
-    if not offload and not enable_block_swap:
-        if use_mixed_weights:
-            # For mixed weights, move to device without dtype conversion
-            dit = dit.to(device_map["dit"])
-        else:
-            dit = dit.to(device_map["dit"], dtype=computation_dtype)
+        # Keep DiT on CPU when using offload OR block swap
+        # For block swap, DiT will be loaded on-demand during generation
+        if not offload and not enable_block_swap:
+            if use_mixed_weights:
+                # For mixed weights, move to device without dtype conversion
+                dit = dit.to(device_map["dit"])
+            else:
+                dit = dit.to(device_map["dit"], dtype=computation_dtype)
 
     if world_size > 1:
         if enable_block_swap:
