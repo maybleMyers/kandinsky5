@@ -74,6 +74,7 @@ def generate_video(
     seed: int,
     use_mixed_weights: bool,
     use_int8: bool,
+    use_torch_compile: bool,
     enable_block_swap: bool,
     blocks_in_memory: int,
     dtype_str: str,
@@ -179,6 +180,8 @@ def generate_video(
             command.append("--use_mixed_weights")
         if use_int8:
             command.append("--use_int8")
+        if not use_torch_compile:
+            command.append("--no_compile")
 
         if negative_prompt:
             command.extend(["--negative_prompt", str(negative_prompt)])
@@ -300,6 +303,7 @@ def generate_video(
                     "seed": current_seed,
                     "use_mixed_weights": use_mixed_weights,
                     "use_int8": use_int8,
+                    "use_torch_compile": use_torch_compile,
                     "enable_block_swap": enable_block_swap,
                     "blocks_in_memory": int(blocks_in_memory) if enable_block_swap else None,
                     "dtype": dtype_str,
@@ -485,7 +489,7 @@ def extract_video_details(video_path: str) -> Tuple[dict, str]:
 def send_to_generation(video_path, metadata):
     """Extract first frame and map metadata to generation inputs using subprocess."""
     if not video_path:
-        return [gr.update()] * 33
+        return [gr.update()] * 34
 
     # 1. Extract First Frame as PIL Image using subprocess
     input_img_pil = None
@@ -543,6 +547,7 @@ def send_to_generation(video_path, metadata):
         get_num("seed"),                # seed
         get("use_mixed_weights"),       # use_mixed_weights
         get("use_int8"),                # use_int8
+        get("use_torch_compile"),       # use_torch_compile
         get("enable_block_swap"),       # enable_block_swap
         get_num("blocks_in_memory"),    # blocks_in_memory
         get("dtype"),                   # dtype_select
@@ -737,8 +742,6 @@ def create_interface():
             }
             """)
 
-        gr.Markdown("# Kandinsky 5.0 I2V Pro 20B - K1 Interface")
-
         with gr.Tabs() as tabs:
             with gr.Tab("Generation", id="gen_tab"):
                 with gr.Row():
@@ -888,6 +891,7 @@ def create_interface():
                     with gr.Row():
                         use_mixed_weights = gr.Checkbox(label="Use Mixed Weights", value=False, info="Preserve fp32 for critical layers (norms, embeddings)")
                         use_int8 = gr.Checkbox(label="Use int8 matmul", value=False, info="enable int8 quantization")
+                        use_torch_compile = gr.Checkbox(label="Use torch.compile", value=False, info="Slower startup (2-5 min) but faster inference")
                     with gr.Row():
                         enable_block_swap = gr.Checkbox(label="Enable Block Swap", value=True, info="Required for 24GB GPUs")
                         blocks_in_memory = gr.Slider(minimum=1, maximum=60, step=1, label="Blocks in Memory", value=2, info="Number of transformer blocks to keep in GPU memory")
@@ -979,7 +983,7 @@ def create_interface():
                         attention_type, nabla_P, nabla_wT, nabla_wW, nabla_wH,
                         width, height, video_duration, sample_steps,
                         guidance_weight, scheduler_scale, seed,
-                        use_mixed_weights, use_int8, enable_block_swap, blocks_in_memory, dtype_select,
+                        use_mixed_weights, use_int8, use_torch_compile, enable_block_swap, blocks_in_memory, dtype_select,
                         text_encoder_dtype_select, vae_dtype_select, computation_dtype_select,
                         save_path, batch_size,
                         enable_preview, preview_steps,
@@ -1037,17 +1041,18 @@ def create_interface():
                         seed,                       # 20
                         use_mixed_weights,          # 21
                         use_int8,                   # 22
-                        enable_block_swap,          # 23
-                        blocks_in_memory,           # 24
-                        dtype_select,               # 25
-                        text_encoder_dtype_select,  # 26
-                        vae_dtype_select,           # 27
-                        computation_dtype_select,   # 28
-                        enable_vae_chunking,        # 29
-                        vae_temporal_tile_frames,   # 30
-                        vae_temporal_stride_frames, # 31
-                        vae_spatial_tile_height,    # 32
-                        vae_spatial_tile_width      # 33
+                        use_torch_compile,          # 23
+                        enable_block_swap,          # 24
+                        blocks_in_memory,           # 25
+                        dtype_select,               # 26
+                        text_encoder_dtype_select,  # 27
+                        vae_dtype_select,           # 28
+                        computation_dtype_select,   # 29
+                        enable_vae_chunking,        # 30
+                        vae_temporal_tile_frames,   # 31
+                        vae_temporal_stride_frames, # 32
+                        vae_spatial_tile_height,    # 33
+                        vae_spatial_tile_width      # 34
                     ]
                 )
 

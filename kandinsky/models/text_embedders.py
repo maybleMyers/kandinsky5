@@ -10,6 +10,7 @@ from transformers import (
 )
 
 from .utils import freeze
+from .compile_config import USE_TORCH_COMPILE
 
 
 class ClipTextEmbedder:
@@ -106,7 +107,8 @@ class Qwen2_5_VLTextEmbedder:
             quantization_config=quantization_config
         )
         self.model = freeze(self.model)
-        self.model = torch.compile(self.model, dynamic=True)
+        if USE_TORCH_COMPILE:
+            self.model = torch.compile(self.model, dynamic=True)
         self.mode = conf.mode
         self.processor = AutoProcessor.from_pretrained(processor_path, use_fast=True)
 

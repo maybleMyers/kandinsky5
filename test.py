@@ -4,9 +4,24 @@ import warnings
 import logging
 import os
 import tempfile
+import sys
 
 import torch
 from PIL import Image
+
+# Early parse --no_compile to set the flag before importing kandinsky
+def _early_parse_no_compile():
+    for i, arg in enumerate(sys.argv):
+        if arg == '--no_compile':
+            return True
+    return False
+
+# Set global compile flag before importing kandinsky modules
+import kandinsky.models.compile_config as compile_config
+_no_compile = _early_parse_no_compile()
+compile_config.USE_TORCH_COMPILE = not _no_compile
+if _no_compile:
+    print("torch.compile() disabled for faster startup")
 
 from kandinsky import get_T2V_pipeline, get_I2V_pipeline, get_I2V_pipeline_with_block_swap, get_T2V_pipeline_with_block_swap
 
@@ -348,6 +363,12 @@ def parse_args():
         type=int,
         default=None,
         help="Spatial tile width for VAE decode (default: 256). Lower values reduce memory usage but increase processing time."
+    )
+    parser.add_argument(
+        "--no_compile",
+        action='store_true',
+        default=False,
+        help="Disable torch.compile() for faster startup (2-5 minutes faster) at the cost of slower inference"
     )
 
     args = parser.parse_args()
