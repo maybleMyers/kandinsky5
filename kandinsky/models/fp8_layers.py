@@ -328,10 +328,11 @@ def apply_fp8_monkey_patch(
                 x_fp8, x_scale = quantize_tensor_to_fp8(x_2d, x.device)
 
                 try:
-                    # Use scaled_mm - weight needs to be transposed and contiguous
-                    # For _scaled_mm, we need the second matrix in column-major format
-                    # This means we need weight.t().contiguous().t() or just store it transposed
-                    weight_t = weight_fp8.t().contiguous()
+                    # Use scaled_mm - weight needs to be in column-major format
+                    # weight_fp8 is (out, in), we need (in, out) in column-major
+                    # .t() gives (in, out) with stride (1, in) which IS column-major
+                    # DON'T call .contiguous() as that converts to row-major!
+                    weight_t = weight_fp8.t()
 
                     out = torch._scaled_mm(
                         x_fp8,
