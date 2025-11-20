@@ -461,6 +461,9 @@ def resume_from_checkpoint(
     if not use_torch_compile:
         command.append("--no_compile")
 
+    # Print command for debugging
+    print(f">>> Resume command: {' '.join(command)}", flush=True)
+
     try:
         current_process = subprocess.Popen(
             command,
@@ -475,9 +478,19 @@ def resume_from_checkpoint(
             if stop_event.is_set():
                 break
 
+            line = line.strip()
+            if not line:
+                continue
+
+            # Print all output to console for debugging
+            print(line, flush=True)
+
             progress_info = parse_progress_line(line)
             if progress_info:
                 yield [], None, "Resuming...", progress_info
+            elif ">>>" in line or "Error" in line or "error" in line:
+                # Show important messages
+                yield [], None, "Resuming...", line
 
         current_process.wait()
 

@@ -557,60 +557,70 @@ if __name__ == "__main__":
     if args.resume_from:
         print(f">>> Resume mode: Loading checkpoint from {args.resume_from}", flush=True)
 
-        # Load checkpoint to check mode
-        ckpt = torch.load(args.resume_from, map_location='cpu')
-        is_i2v_checkpoint = ckpt.get("mode") == "i2v" or ckpt.get("first_frames") is not None
+        try:
+            # Load checkpoint to check mode
+            ckpt = torch.load(args.resume_from, map_location='cpu')
+            is_i2v_checkpoint = ckpt.get("mode") == "i2v" or ckpt.get("first_frames") is not None
 
-        # Get DiT and VAE from the pipe (text embedder not needed for resume)
-        force_offload = hasattr(pipe.dit, 'enable_block_swap') and pipe.dit.enable_block_swap
+            print(f">>> Checkpoint contains: step {ckpt.get('step')}/{ckpt.get('total_steps')}", flush=True)
+            print(f">>> Mode: {'I2V' if is_i2v_checkpoint else 'T2V'}", flush=True)
 
-        if is_i2v_checkpoint:
-            print(">>> Resuming I2V generation", flush=True)
-            x = generate_sample_i2v_from_checkpoint(
-                checkpoint_path=args.resume_from,
-                dit=pipe.dit,
-                vae=pipe.vae,
-                conf=pipe.conf,
-                device="cuda",
-                vae_device="cuda",
-                progress=True,
-                offload=pipe.offload,
-                force_offload=force_offload,
-                stop_check=check_stop_signals,
-                new_checkpoint_path=checkpoint_file,
-            )
-        else:
-            print(">>> Resuming T2V generation", flush=True)
-            x = generate_sample_from_checkpoint(
-                checkpoint_path=args.resume_from,
-                dit=pipe.dit,
-                vae=pipe.vae,
-                conf=pipe.conf,
-                device="cuda",
-                vae_device="cuda",
-                progress=True,
-                offload=pipe.offload,
-                force_offload=force_offload,
-                stop_check=check_stop_signals,
-                new_checkpoint_path=checkpoint_file,
-            )
+            # Get DiT and VAE from the pipe (text embedder not needed for resume)
+            force_offload = hasattr(pipe.dit, 'enable_block_swap') and pipe.dit.enable_block_swap
 
-        # Save the video if we got results
-        if x is not None:
-            import torchvision
-            for video in x:
-                torchvision.io.write_video(
-                    args.output_filename,
-                    video.float().permute(1, 2, 3, 0).cpu().numpy(),
-                    fps=24,
-                    options={"crf": "5"},
+            if is_i2v_checkpoint:
+                print(">>> Resuming I2V generation", flush=True)
+                x = generate_sample_i2v_from_checkpoint(
+                    checkpoint_path=args.resume_from,
+                    dit=pipe.dit,
+                    vae=pipe.vae,
+                    conf=pipe.conf,
+                    device="cuda",
+                    vae_device="cuda",
+                    progress=True,
+                    offload=pipe.offload,
+                    force_offload=force_offload,
+                    stop_check=check_stop_signals,
+                    new_checkpoint_path=checkpoint_file,
+                )
+            else:
+                print(">>> Resuming T2V generation", flush=True)
+                x = generate_sample_from_checkpoint(
+                    checkpoint_path=args.resume_from,
+                    dit=pipe.dit,
+                    vae=pipe.vae,
+                    conf=pipe.conf,
+                    device="cuda",
+                    vae_device="cuda",
+                    progress=True,
+                    offload=pipe.offload,
+                    force_offload=force_offload,
+                    stop_check=check_stop_signals,
+                    new_checkpoint_path=checkpoint_file,
                 )
 
-        print(f"TIME ELAPSED: {time.perf_counter() - start_time}")
-        if x is None:
-            print(f">>> Checkpoint saved to {checkpoint_file}")
-        else:
-            print(f"Generated video is saved to {args.output_filename}")
+            # Save the video if we got results
+            if x is not None:
+                import torchvision
+                for video in x:
+                    torchvision.io.write_video(
+                        args.output_filename,
+                        video.float().permute(1, 2, 3, 0).cpu().numpy(),
+                        fps=24,
+                        options={"crf": "5"},
+                    )
+
+            print(f"TIME ELAPSED: {time.perf_counter() - start_time}")
+            if x is None:
+                print(f">>> Checkpoint saved to {checkpoint_file}")
+            else:
+                print(f"Generated video is saved to {args.output_filename}")
+
+        except Exception as e:
+            print(f">>> ERROR during resume: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            raise
 
     elif is_i2v:
         image_to_use = args.image
