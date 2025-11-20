@@ -306,10 +306,16 @@ def apply_fp8_monkey_patch(
         use_scaled_mm: Whether to use scaled_mm (if False, uses dequantization)
     """
 
-    def make_fp8_forward(original_forward, weight_fp8, weight_scale, bias, compute_dtype, use_scaled_mm):
-        """Create a new forward function that uses FP8 weights."""
+    def make_fp8_forward(module, use_scaled_mm):
+        """Create a new forward function that uses FP8 weights from module buffers."""
 
         def fp8_forward(x):
+            # Get FP8 weights from module buffers (will be on same device as module)
+            weight_fp8 = module.weight_fp8
+            weight_scale = module.weight_scale
+            bias = module.bias if hasattr(module, 'bias') else None
+            compute_dtype = module._compute_dtype
+
             original_shape = x.shape
             in_features = weight_fp8.shape[1]
             out_features = weight_fp8.shape[0]
@@ -318,19 +324,23 @@ def apply_fp8_monkey_patch(
             x_2d = x.reshape(-1, in_features).contiguous()
 
             if use_scaled_mm:
-                # Quantize input
+                # Quantize input on the same device as x
                 x_fp8, x_scale = quantize_tensor_to_fp8(x_2d, x.device)
 
                 try:
-                    # Use scaled_mm
+                    # Use scaled_mm - weight needs to be transposed and contiguous
+                    # For _scaled_mm, we need the second matrix in column-major format
+                    # This means we need weight.t().contiguous().t() or just store it transposed
+                    weight_t = weight_fp8.t().contiguous()
+
                     out = torch._scaled_mm(
                         x_fp8,
-                        weight_fp8.t().contiguous(),
+                        weight_t,
                         scale_a=x_scale,
                         scale_b=weight_scale,
                         out_dtype=compute_dtype
                     )
-                except Exception:
+                except Exception as e:
                     # Fallback to dequantization
                     x_dequant = x_fp8.float() * x_scale
                     w_dequant = weight_fp8.float() * weight_scale
@@ -354,33 +364,6 @@ def apply_fp8_monkey_patch(
     # Find all Linear layers and patch them
     patched_count = 0
 
-    def get_module_by_name(model, name):
-        """Get a module by its name (dot-separated path)."""
-        parts = name.split('.')
-        module = model
-        for part in parts:
-            if part.isdigit():
-                module = module[int(part)]
-            else:
-                module = getattr(module, part)
-        return module
-
-    def set_module_by_name(model, name, new_module):
-        """Set a module by its name."""
-        parts = name.split('.')
-        parent = model
-        for part in parts[:-1]:
-            if part.isdigit():
-                parent = parent[int(part)]
-            else:
-                parent = getattr(parent, part)
-
-        last_part = parts[-1]
-        if last_part.isdigit():
-            parent[int(last_part)] = new_module
-        else:
-            setattr(parent, last_part, new_module)
-
     # Collect modules to patch
     modules_to_patch = []
     for name, module in model.named_modules():
@@ -396,26 +379,21 @@ def apply_fp8_monkey_patch(
     for name, module, fp8_key, scale_key in modules_to_patch:
         weight_fp8 = state_dict[fp8_key]
         weight_scale = state_dict[scale_key]
-        bias = module.bias
         compute_dtype = module.weight.dtype if hasattr(module, 'weight') else torch.bfloat16
 
-        # Create new forward function
-        module.forward = make_fp8_forward(
-            module.forward,
-            weight_fp8,
-            weight_scale,
-            bias,
-            compute_dtype,
-            use_scaled_mm
-        )
+        # Store compute dtype as module attribute
+        module._compute_dtype = compute_dtype
 
-        # Store FP8 data as buffers on the module
+        # Register FP8 data as buffers on the module (will move with model.to())
         module.register_buffer('weight_fp8', weight_fp8)
         module.register_buffer('weight_scale', weight_scale)
 
         # Remove original weight to save memory
         if hasattr(module, 'weight'):
             del module.weight
+
+        # Create new forward function that accesses buffers from module
+        module.forward = make_fp8_forward(module, use_scaled_mm)
 
         patched_count += 1
 
