@@ -6,6 +6,46 @@ from tqdm import tqdm
 
 from .models.utils import fast_sta_nabla
 
+
+def adaptive_mean_std_normalization(source, reference):
+    source_mean = source.mean(dim=(1,2,3),keepdim=True)
+    source_std = source.std(dim=(1,2,3),keepdim=True)
+    #magic constants - limit changes in latents
+    clump_mean_low = 0.05
+    clump_mean_high = 0.1
+    clump_std_low = 0.1
+    clump_std_high = 0.25
+
+    reference_mean = torch.clamp(reference.mean(), source_mean - clump_mean_low, source_mean + clump_mean_high)
+    reference_std = torch.clamp(reference.std(), source_std - clump_std_low, source_std + clump_std_high)
+
+    # normalization
+    normalized = (source - source_mean) / source_std
+    normalized = normalized * reference_std + reference_mean
+
+    return normalized
+
+def normalize_first_frame(latents, reference_frames=5, clump_values=False):
+    latents_copy = latents.clone()
+    samples = latents_copy
+
+    if samples.shape[0] <= 1:
+        return latents  # Only one frame, no normalization needed
+    nFr = 4
+    first_frames = samples[:nFr]
+    reference_frames_data = samples[nFr:nFr+min(reference_frames, samples.shape[0]-1)]
+
+    normalized_first = adaptive_mean_std_normalization(first_frames, reference_frames_data)
+    if clump_values:
+        min_val = reference_frames_data.min()
+        max_val = reference_frames_data.max()
+        normalized_first = torch.clamp(normalized_first, min_val, max_val)
+
+    samples[:nFr] = normalized_first
+
+    return samples
+
+
 def log_vram_usage(stage_name, dit=None, vae=None, text_embedder=None):
     """Log VRAM usage and model locations for debugging."""
     if not torch.cuda.is_available():
@@ -464,6 +504,7 @@ def generate_sample_i2v(
             if images is not None:
                 images = images.to(device=latent_visual.device, dtype=latent_visual.dtype)
                 latent_visual[:1] = images
+                latent_visual = normalize_first_frame(latent_visual)
 
     # Offload DiT before VAE decode to free up VRAM
     # For block swapping, explicitly offload all blocks first

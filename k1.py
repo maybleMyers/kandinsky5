@@ -124,6 +124,7 @@ def generate_video(
             "5s Pro 20B (T2V)": "./configs/config_5s_t2v_pro_20b.yaml",
             "10s Pro 20B (T2V)": "./configs/config_10s_t2v_pro_20b.yaml",
             "5s Pro 20B (I2V)": "./configs/config_5s_i2v_pro_20b.yaml",
+            "5s Pro 20B HD (I2V)": "./configs/k5_pro_i2v_5s_sft_hd.yaml",
             "5s Lite (I2V)": "./configs/config_5s_i2v.yaml",
         }
 
@@ -782,10 +783,11 @@ def create_interface():
                                 "5s Pro 20B (T2V)",
                                 "10s Pro 20B (T2V)",
                                 "5s Pro 20B (I2V)",
+                                "5s Pro 20B HD (I2V)",
                                 "5s Lite (I2V)"
                             ],
                             value="5s Pro 20B (I2V)",
-                            info="Select model configuration. Pro models require more VRAM but offer better quality. 10s models support longer videos."
+                            info="Select model configuration. Pro models require more VRAM but offer better quality. HD uses NABLA sparse attention for 1024+ resolution."
                         )
 
                         attention_engine = gr.Dropdown(
