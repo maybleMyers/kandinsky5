@@ -25,8 +25,8 @@ class Kandinsky5T2VPipeline:
         conf = None,
         offload: bool = False,
     ):
-        if resolution not in [512]:
-            raise ValueError("Resolution can be only 512")
+        if resolution not in [512, 1024]:
+            raise ValueError("Resolution can be 512 or 1024")
 
         self.dit = dit
         self.text_embedder = text_embedder
@@ -45,6 +45,7 @@ class Kandinsky5T2VPipeline:
 
         self.RESOLUTIONS = {
             512: [(512, 512), (512, 768), (768, 512)],
+            1024: [(1024, 1024), (1280, 768), (768, 1280), (1408, 640), (640, 1408), (1152, 896), (896, 1152)],
         }
 
     def expand_prompt(self, prompt):

@@ -51,7 +51,7 @@ def get_T2V_pipeline(
     vae_spatial_tile_height: int = None,
     vae_spatial_tile_width: int = None,
 ) -> Kandinsky5T2VPipeline:
-    assert resolution in [512]
+    assert resolution in [512, 1024]
 
     # Set component dtypes (fall back to dtype if not specified)
     if text_encoder_dtype is None:
