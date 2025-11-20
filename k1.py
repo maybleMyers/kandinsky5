@@ -397,6 +397,106 @@ def stop_and_save():
             return f"Error creating signal file: {e}"
     return "No active generation to stop"
 
+
+def resume_from_checkpoint(
+    checkpoint_path: str,
+    model_config: str,
+    save_path: str,
+    use_torch_compile: bool,
+    enable_block_swap: bool,
+    blocks_in_memory: int,
+    dtype_str: str,
+    vae_dtype_str: str,
+) -> Generator[Tuple[List[Tuple[str, str]], Optional[str], str, str], None, None]:
+    """Resume generation from a saved checkpoint."""
+    global stop_event, current_process, current_output_filename
+    stop_event.clear()
+    current_process = None
+
+    if not checkpoint_path or not os.path.exists(checkpoint_path):
+        yield [], None, "Error: No checkpoint file selected", ""
+        return
+
+    os.makedirs(save_path, exist_ok=True)
+
+    # Generate output filename
+    timestamp = int(time.time())
+    output_filename = os.path.join(save_path, f"k1_resume_{timestamp}.mp4")
+    current_output_filename = output_filename
+
+    # Select config file based on model_config
+    config_map = {
+        "5s Lite (T2V)": "./configs/config_5s_sft.yaml",
+        "5s Pro 20B (T2V)": "./configs/k5_pro_t2v_5s_sft.yaml",
+        "5s Pro 20B HD (T2V)": "./configs/k5_pro_t2v_5s_sft_hd.yaml",
+        "5s Lite (I2V)": "./configs/config_5s_sft_i2v.yaml",
+        "5s Pro 20B (I2V)": "./configs/k5_pro_i2v_5s_sft.yaml",
+        "5s Pro 20B HD (I2V)": "./configs/k5_pro_i2v_5s_sft_hd.yaml",
+    }
+    config_file = config_map.get(model_config, "./configs/k5_pro_i2v_5s_sft.yaml")
+
+    yield [], None, "Resuming from checkpoint...", f"Loading {checkpoint_path}"
+
+    # Build command
+    command = [
+        "python", "test.py",
+        "--config", config_file,
+        "--prompt", "resume",  # Placeholder, not used in resume mode
+        "--output_filename", output_filename,
+        "--resume_from", checkpoint_path,
+    ]
+
+    # Add dtype settings
+    if dtype_str:
+        command.extend(["--dtype", dtype_str])
+    if vae_dtype_str:
+        command.extend(["--vae_dtype", vae_dtype_str])
+
+    # Add block swap settings
+    if enable_block_swap:
+        command.append("--enable_block_swap")
+        command.extend(["--blocks_in_memory", str(int(blocks_in_memory))])
+
+    # Add compile setting
+    if not use_torch_compile:
+        command.append("--no_compile")
+
+    try:
+        current_process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            universal_newlines=True
+        )
+
+        for line in iter(current_process.stdout.readline, ''):
+            if stop_event.is_set():
+                break
+
+            progress_info = parse_progress_line(line)
+            if progress_info:
+                yield [], None, "Resuming...", progress_info
+
+        current_process.wait()
+
+        if os.path.exists(output_filename):
+            yield [(output_filename, f"Resumed video")], None, "Resume complete!", ""
+        else:
+            # Check for new checkpoint
+            new_checkpoint = output_filename.replace(".mp4", "_checkpoint.pt")
+            if os.path.exists(new_checkpoint):
+                yield [], None, f"Checkpoint saved: {new_checkpoint}", ""
+            else:
+                yield [], None, "Resume stopped", ""
+
+    except Exception as e:
+        yield [], None, f"Error: {str(e)}", ""
+    finally:
+        current_process = None
+
+
 def extract_video_metadata(video_path: str) -> Dict:
     """Extract metadata from video file using ffprobe."""
     cmd = [
@@ -800,6 +900,14 @@ def create_interface():
                     stop_save_btn = gr.Button("Stop & Save Latents", elem_classes="light-blue-btn")
 
                 with gr.Row():
+                    checkpoint_file = gr.Textbox(
+                        label="Checkpoint File (for resume)",
+                        placeholder="Path to _checkpoint.pt file",
+                        scale=3
+                    )
+                    resume_btn = gr.Button("Resume from Checkpoint", elem_classes="light-blue-btn", scale=1)
+
+                with gr.Row():
                     with gr.Column():
                         input_image = gr.Image(label="Input Image (for i2v mode)", type="filepath")
 
@@ -1037,6 +1145,16 @@ def create_interface():
                 stop_save_btn.click(
                     fn=stop_and_save,
                     outputs=[batch_progress]
+                )
+
+                resume_btn.click(
+                    fn=resume_from_checkpoint,
+                    inputs=[
+                        checkpoint_file, model_config, save_path,
+                        use_torch_compile, enable_block_swap, blocks_in_memory,
+                        dtype_select, vae_dtype_select
+                    ],
+                    outputs=[output, preview_output, batch_progress, progress_text]
                 )
 
             # Video Info Tab

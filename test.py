@@ -24,6 +24,7 @@ if _no_compile:
     print("torch.compile() disabled for faster startup")
 
 from kandinsky import get_T2V_pipeline, get_I2V_pipeline, get_I2V_pipeline_with_block_swap, get_T2V_pipeline_with_block_swap
+from kandinsky.generation_utils import generate_sample_from_checkpoint, generate_sample_i2v_from_checkpoint
 
 try:
     from scripts.latentpreviewer import LatentPreviewer
@@ -370,6 +371,12 @@ def parse_args():
         default=False,
         help="Disable torch.compile() for faster startup (2-5 minutes faster) at the cost of slower inference"
     )
+    parser.add_argument(
+        "--resume_from",
+        type=str,
+        default=None,
+        help="Path to checkpoint file to resume generation from"
+    )
 
     args = parser.parse_args()
     return args
@@ -545,7 +552,67 @@ if __name__ == "__main__":
         return None
 
     start_time = time.perf_counter()
-    if is_i2v:
+
+    # Handle resume from checkpoint
+    if args.resume_from:
+        print(f">>> Resume mode: Loading checkpoint from {args.resume_from}", flush=True)
+
+        # Load checkpoint to check mode
+        ckpt = torch.load(args.resume_from, map_location='cpu')
+        is_i2v_checkpoint = ckpt.get("mode") == "i2v" or ckpt.get("first_frames") is not None
+
+        # Get DiT and VAE from the pipe (text embedder not needed for resume)
+        force_offload = hasattr(pipe.dit, 'enable_block_swap') and pipe.dit.enable_block_swap
+
+        if is_i2v_checkpoint:
+            print(">>> Resuming I2V generation", flush=True)
+            x = generate_sample_i2v_from_checkpoint(
+                checkpoint_path=args.resume_from,
+                dit=pipe.dit,
+                vae=pipe.vae,
+                conf=pipe.conf,
+                device="cuda",
+                vae_device="cuda",
+                progress=True,
+                offload=pipe.offload,
+                force_offload=force_offload,
+                stop_check=check_stop_signals,
+                new_checkpoint_path=checkpoint_file,
+            )
+        else:
+            print(">>> Resuming T2V generation", flush=True)
+            x = generate_sample_from_checkpoint(
+                checkpoint_path=args.resume_from,
+                dit=pipe.dit,
+                vae=pipe.vae,
+                conf=pipe.conf,
+                device="cuda",
+                vae_device="cuda",
+                progress=True,
+                offload=pipe.offload,
+                force_offload=force_offload,
+                stop_check=check_stop_signals,
+                new_checkpoint_path=checkpoint_file,
+            )
+
+        # Save the video if we got results
+        if x is not None:
+            import torchvision
+            for video in x:
+                torchvision.io.write_video(
+                    args.output_filename,
+                    video.float().permute(1, 2, 3, 0).cpu().numpy(),
+                    fps=24,
+                    options={"crf": "5"},
+                )
+
+        print(f"TIME ELAPSED: {time.perf_counter() - start_time}")
+        if x is None:
+            print(f">>> Checkpoint saved to {checkpoint_file}")
+        else:
+            print(f"Generated video is saved to {args.output_filename}")
+
+    elif is_i2v:
         image_to_use = args.image
         if args.width and args.height:
             alignment = 128 if args.attention_type == "nabla" else 32
