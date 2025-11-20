@@ -23,7 +23,7 @@ compile_config.USE_TORCH_COMPILE = not _no_compile
 if _no_compile:
     print("torch.compile() disabled for faster startup")
 
-from kandinsky import get_T2V_pipeline, get_I2V_pipeline, get_I2V_pipeline_with_block_swap, get_T2V_pipeline_with_block_swap, get_T2I_pipeline, get_I2I_pipeline
+from kandinsky import get_T2V_pipeline, get_I2V_pipeline, get_I2V_pipeline_with_block_swap, get_T2V_pipeline_with_block_swap, get_T2I_pipeline
 from kandinsky.generation_utils import generate_sample_from_checkpoint, generate_sample_i2v_from_checkpoint
 
 try:
@@ -429,24 +429,12 @@ if __name__ == "__main__":
 
     # Determine model type from config filename
     is_t2i = "t2i" in args.config.lower()
-    is_i2i = "i2i" in args.config.lower()
     is_i2v = "i2v" in args.config.lower()
     is_t2v_pro = "t2v" in args.config.lower() and ("pro" in args.config.lower() or "20b" in args.config.lower())
 
     if is_t2i:
         # Use T2I pipeline for text-to-image generation
         pipe = get_T2I_pipeline(
-            device_map={"dit": "cuda:0", "vae": "cuda:0",
-                        "text_embedder": "cuda:0"},
-            conf_path=args.config,
-            offload=args.offload,
-            magcache=args.magcache,
-            quantized_qwen=args.qwen_quantization,
-            attention_engine=args.attention_engine,
-        )
-    elif is_i2i:
-        # Use I2I pipeline for image-to-image generation
-        pipe = get_I2I_pipeline(
             device_map={"dit": "cuda:0", "vae": "cuda:0",
                         "text_embedder": "cuda:0"},
             conf_path=args.config,
@@ -565,7 +553,7 @@ if __name__ == "__main__":
 
     if args.output_filename is None:
         # Determine file extension based on generation mode
-        if is_t2i or is_i2i:
+        if is_t2i:
             ext = ".png"
         else:
             ext = ".mp4"
@@ -678,16 +666,6 @@ if __name__ == "__main__":
                  expand_prompts=args.expand_prompt,
                  save_path=args.output_filename,
                  seed=args.seed)
-    elif is_i2i:
-        # Image-to-Image generation
-        x = pipe(args.prompt,
-                 image=args.image,
-                 num_steps=args.sample_steps,
-                 guidance_weight=args.guidance_weight,
-                 scheduler_scale=args.scheduler_scale,
-                 expand_prompts=args.expand_prompt,
-                 save_path=args.output_filename,
-                 seed=args.seed)
     elif is_i2v:
         image_to_use = args.image
         if args.width and args.height:
@@ -730,6 +708,6 @@ if __name__ == "__main__":
         print(f">>> Checkpoint saved to {checkpoint_file}")
         print(f">>> No output generated (latents saved for later)")
     else:
-        output_type = "image" if (is_t2i or is_i2i) else "video"
+        output_type = "image" if is_t2i else "video"
         print(f"Generated {output_type} is saved to {args.output_filename}")
     
