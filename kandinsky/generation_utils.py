@@ -6,6 +6,46 @@ from tqdm import tqdm
 
 from .models.utils import fast_sta_nabla
 
+
+def adaptive_mean_std_normalization(source, reference):
+    source_mean = source.mean(dim=(1,2,3),keepdim=True)
+    source_std = source.std(dim=(1,2,3),keepdim=True)
+    #magic constants - limit changes in latents
+    clump_mean_low = 0.05
+    clump_mean_high = 0.1
+    clump_std_low = 0.1
+    clump_std_high = 0.25
+
+    reference_mean = torch.clamp(reference.mean(), source_mean - clump_mean_low, source_mean + clump_mean_high)
+    reference_std = torch.clamp(reference.std(), source_std - clump_std_low, source_std + clump_std_high)
+
+    # normalization
+    normalized = (source - source_mean) / source_std
+    normalized = normalized * reference_std + reference_mean
+
+    return normalized
+
+def normalize_first_frame(latents, reference_frames=5, clump_values=False):
+    latents_copy = latents.clone()
+    samples = latents_copy
+
+    if samples.shape[0] <= 1:
+        return latents  # Only one frame, no normalization needed
+    nFr = 4
+    first_frames = samples[:nFr]
+    reference_frames_data = samples[nFr:nFr+min(reference_frames, samples.shape[0]-1)]
+
+    normalized_first = adaptive_mean_std_normalization(first_frames, reference_frames_data)
+    if clump_values:
+        min_val = reference_frames_data.min()
+        max_val = reference_frames_data.max()
+        normalized_first = torch.clamp(normalized_first, min_val, max_val)
+
+    samples[:nFr] = normalized_first
+
+    return samples
+
+
 def log_vram_usage(stage_name, dit=None, vae=None, text_embedder=None):
     """Log VRAM usage and model locations for debugging."""
     if not torch.cuda.is_available():
@@ -173,6 +213,7 @@ def generate(
     previewer=None,
     preview_interval=None,
     preview_suffix=None,
+    stop_check=None,
 ):
     g = torch.Generator(device="cuda")
     g.manual_seed(seed)
@@ -212,6 +253,13 @@ def generate(
             null_attention_mask=null_attention_mask,
         )
         img = img + timestep_diff * pred_velocity
+
+        # Check for early stop request
+        if stop_check is not None:
+            action = stop_check()
+            if action in ("decode", "save"):
+                print(f"\n>>> Early stop requested at step {i + 1}/{num_steps} - action: {action}", flush=True)
+                return {"action": action, "latents": img, "step": i + 1, "total_steps": num_steps}
 
         if previewer is not None and preview_interval and (i + 1) % preview_interval == 0 and (i + 1) < num_steps:
             import sys
@@ -254,6 +302,8 @@ def generate_sample(
     previewer=None,
     preview_interval=None,
     preview_suffix=None,
+    stop_check=None,
+    checkpoint_path=None,
 ):
     bs, duration, height, width, dim = shape
     if duration == 1:
@@ -303,7 +353,7 @@ def generate_sample(
 
     with torch.no_grad():
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            latent_visual = generate(
+            result = generate(
                 dit,
                 device,
                 (bs * duration, height, width, dim),
@@ -324,7 +374,40 @@ def generate_sample(
                 previewer=previewer,
                 preview_interval=preview_interval,
                 preview_suffix=preview_suffix,
+                stop_check=stop_check,
             )
+
+    # Handle early stop results
+    if isinstance(result, dict) and result.get("action"):
+        action = result["action"]
+        latent_visual = result["latents"]
+        step = result["step"]
+        total_steps = result["total_steps"]
+
+        if action == "save" and checkpoint_path:
+            # Save checkpoint for later resumption
+            checkpoint = {
+                "latents": latent_visual.cpu(),
+                "step": step,
+                "total_steps": total_steps,
+                "seed": seed,
+                "text_embeds": {k: v.cpu() for k, v in bs_text_embed.items()},
+                "null_text_embeds": {k: v.cpu() for k, v in bs_null_text_embed.items()},
+                "visual_rope_pos": [v.cpu() for v in visual_rope_pos],
+                "text_rope_pos": text_rope_pos.cpu() if hasattr(text_rope_pos, 'cpu') else text_rope_pos,
+                "null_text_rope_pos": null_text_rope_pos.cpu() if hasattr(null_text_rope_pos, 'cpu') else null_text_rope_pos,
+                "shape": shape,
+                "guidance_weight": guidance_weight,
+                "scheduler_scale": scheduler_scale,
+            }
+            torch.save(checkpoint, checkpoint_path)
+            print(f">>> Checkpoint saved to {checkpoint_path} at step {step}/{total_steps}", flush=True)
+            return None  # Signal that we saved instead of decoding
+
+        # For "decode" action, continue with the current latents
+        print(f">>> Decoding video from step {step}/{total_steps}", flush=True)
+    else:
+        latent_visual = result
 
     # Offload DiT before VAE decode to free up VRAM
     # For block swapping, explicitly offload all blocks first
@@ -388,6 +471,8 @@ def generate_sample_i2v(
     previewer=None,
     preview_interval=None,
     preview_suffix=None,
+    stop_check=None,
+    checkpoint_path=None,
 ):
     text_embedder.embedder.mode = "i2v"
 
@@ -437,9 +522,12 @@ def generate_sample_i2v(
     if offload or force_offload:
         dit.to(device, non_blocking=True)
 
+    # Store first_frames for checkpoint
+    first_frames = images
+
     with torch.no_grad():
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            latent_visual = generate(
+            result = generate(
                 dit,
                 device,
                 (bs * duration, height, width, dim),
@@ -460,10 +548,50 @@ def generate_sample_i2v(
                 previewer=previewer,
                 preview_interval=preview_interval,
                 preview_suffix=preview_suffix,
+                stop_check=stop_check,
             )
-            if images is not None:
-                images = images.to(device=latent_visual.device, dtype=latent_visual.dtype)
-                latent_visual[:1] = images
+
+    # Handle early stop results
+    if isinstance(result, dict) and result.get("action"):
+        action = result["action"]
+        latent_visual = result["latents"]
+        step = result["step"]
+        total_steps = result["total_steps"]
+
+        if action == "save" and checkpoint_path:
+            # Save checkpoint for later resumption
+            checkpoint = {
+                "latents": latent_visual.cpu(),
+                "step": step,
+                "total_steps": total_steps,
+                "seed": seed,
+                "text_embeds": {k: v.cpu() for k, v in bs_text_embed.items()},
+                "null_text_embeds": {k: v.cpu() for k, v in bs_null_text_embed.items()},
+                "visual_rope_pos": [v.cpu() for v in visual_rope_pos],
+                "text_rope_pos": text_rope_pos.cpu() if hasattr(text_rope_pos, 'cpu') else text_rope_pos,
+                "null_text_rope_pos": null_text_rope_pos.cpu() if hasattr(null_text_rope_pos, 'cpu') else null_text_rope_pos,
+                "first_frames": first_frames.cpu() if first_frames is not None else None,
+                "shape": shape,
+                "guidance_weight": guidance_weight,
+                "scheduler_scale": scheduler_scale,
+                "mode": "i2v",
+            }
+            torch.save(checkpoint, checkpoint_path)
+            print(f">>> Checkpoint saved to {checkpoint_path} at step {step}/{total_steps}", flush=True)
+            return None  # Signal that we saved instead of decoding
+
+        # For "decode" action, continue with the current latents
+        print(f">>> Decoding video from step {step}/{total_steps}", flush=True)
+    else:
+        latent_visual = result
+
+    # Apply first frame normalization for i2v
+    with torch.no_grad():
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            if first_frames is not None:
+                first_frames = first_frames.to(device=latent_visual.device, dtype=latent_visual.dtype)
+                latent_visual[:1] = first_frames
+                latent_visual = normalize_first_frame(latent_visual)
 
     # Offload DiT before VAE decode to free up VRAM
     # For block swapping, explicitly offload all blocks first
@@ -531,6 +659,372 @@ def generate_sample_i2v(
     log_vram_usage("AFTER VAE DECODE, BEFORE OFFLOAD (I2V)", dit=dit, vae=vae, text_embedder=None)
 
     # Offload VAE after decode to free VRAM
+    if offload or force_offload:
+        vae = vae.to('cpu', non_blocking=True)
+    torch.cuda.empty_cache()
+
+    return images
+
+
+@torch.no_grad()
+def generate_resume(
+    model,
+    device,
+    img,
+    start_step,
+    num_steps,
+    text_embeds,
+    null_text_embeds,
+    visual_rope_pos,
+    text_rope_pos,
+    null_text_rope_pos,
+    guidance_weight,
+    scheduler_scale,
+    first_frames,
+    conf,
+    progress=False,
+    attention_mask=None,
+    null_attention_mask=None,
+    previewer=None,
+    preview_interval=None,
+    preview_suffix=None,
+    stop_check=None,
+):
+    """Resume generation from a given step with pre-computed latents."""
+    sparse_params = get_sparse_params(conf, {"visual": img}, device)
+    timesteps = torch.linspace(1, 0, num_steps + 1, device=device)
+    timesteps = scheduler_scale * timesteps / (1 + (scheduler_scale - 1) * timesteps)
+
+    # Start from the saved step
+    remaining_timesteps = list(zip(timesteps[start_step:-1], torch.diff(timesteps)[start_step:]))
+
+    print(f">>> Resuming generation from step {start_step}/{num_steps}", flush=True)
+
+    for i, (timestep, timestep_diff) in enumerate(tqdm(remaining_timesteps)):
+        actual_step = start_step + i
+        time = timestep.unsqueeze(0)
+        if model.visual_cond:
+            visual_cond = torch.zeros_like(img)
+            visual_cond_mask = torch.zeros(
+                [*img.shape[:-1], 1], dtype=img.dtype, device=img.device
+            )
+            if first_frames is not None:
+                first_frames = first_frames.to(device=visual_cond.device, dtype=visual_cond.dtype)
+                img[:1] = first_frames
+                visual_cond_mask[:1] = 1
+            model_input = torch.cat([img, visual_cond, visual_cond_mask], dim=-1)
+        else:
+            model_input = img
+        pred_velocity = get_velocity(
+            model,
+            model_input,
+            time,
+            text_embeds,
+            null_text_embeds,
+            visual_rope_pos,
+            text_rope_pos,
+            null_text_rope_pos,
+            guidance_weight,
+            conf,
+            sparse_params=sparse_params,
+            attention_mask=attention_mask,
+            null_attention_mask=null_attention_mask,
+        )
+        img = img + timestep_diff * pred_velocity
+
+        # Check for early stop request
+        if stop_check is not None:
+            action = stop_check()
+            if action in ("decode", "save"):
+                print(f"\n>>> Early stop requested at step {actual_step + 1}/{num_steps} - action: {action}", flush=True)
+                return {"action": action, "latents": img, "step": actual_step + 1, "total_steps": num_steps}
+
+        if previewer is not None and preview_interval and (actual_step + 1) % preview_interval == 0 and (actual_step + 1) < num_steps:
+            import sys
+            print(f"\n>>> PREVIEW TRIGGER at step {actual_step + 1}/{num_steps} (interval={preview_interval})", flush=True)
+            sys.stdout.flush()
+            try:
+                preview_latent = img.permute(3, 0, 1, 2).unsqueeze(0)
+                previewer.preview(preview_latent.squeeze(0), actual_step, preview_suffix=preview_suffix)
+            except Exception as e:
+                print(f">>> ERROR during preview generation at step {actual_step + 1}: {e}", flush=True)
+
+    return img
+
+
+def generate_sample_from_checkpoint(
+    checkpoint_path,
+    dit,
+    vae,
+    conf,
+    device="cuda",
+    vae_device="cuda",
+    progress=True,
+    offload=False,
+    force_offload=False,
+    image_vae=False,
+    previewer=None,
+    preview_interval=None,
+    preview_suffix=None,
+    stop_check=None,
+    new_checkpoint_path=None,
+):
+    """Resume T2V generation from a saved checkpoint."""
+    print(f">>> Loading checkpoint from {checkpoint_path}", flush=True)
+    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+
+    # Extract checkpoint data
+    img = checkpoint["latents"].to(device)
+    start_step = checkpoint["step"]
+    num_steps = checkpoint["total_steps"]
+    bs_text_embed = {k: v.to(device, dtype=torch.bfloat16) for k, v in checkpoint["text_embeds"].items()}
+    bs_null_text_embed = {k: v.to(device, dtype=torch.bfloat16) for k, v in checkpoint["null_text_embeds"].items()}
+    visual_rope_pos = [v.to(device) if hasattr(v, 'to') else v for v in checkpoint["visual_rope_pos"]]
+    text_rope_pos = checkpoint["text_rope_pos"]
+    null_text_rope_pos = checkpoint["null_text_rope_pos"]
+    if hasattr(text_rope_pos, 'to'):
+        text_rope_pos = text_rope_pos.to(device)
+    if hasattr(null_text_rope_pos, 'to'):
+        null_text_rope_pos = null_text_rope_pos.to(device)
+    shape = checkpoint["shape"]
+    guidance_weight = checkpoint["guidance_weight"]
+    scheduler_scale = checkpoint["scheduler_scale"]
+
+    bs = shape[0]
+
+    # Log VRAM before DiT inference
+    log_vram_usage("BEFORE DiT INFERENCE (RESUME T2V)", dit=dit, vae=vae, text_embedder=None)
+
+    if offload or force_offload:
+        dit.to(device, non_blocking=True)
+
+    with torch.no_grad():
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            result = generate_resume(
+                dit,
+                device,
+                img,
+                start_step,
+                num_steps,
+                bs_text_embed,
+                bs_null_text_embed,
+                visual_rope_pos,
+                text_rope_pos,
+                null_text_rope_pos,
+                guidance_weight,
+                scheduler_scale,
+                None,  # first_frames (T2V doesn't use this)
+                conf,
+                progress=progress,
+                previewer=previewer,
+                preview_interval=preview_interval,
+                preview_suffix=preview_suffix,
+                stop_check=stop_check,
+            )
+
+    # Handle early stop results
+    if isinstance(result, dict) and result.get("action"):
+        action = result["action"]
+        latent_visual = result["latents"]
+        step = result["step"]
+        total_steps = result["total_steps"]
+
+        if action == "save" and new_checkpoint_path:
+            # Save new checkpoint
+            new_checkpoint = {
+                "latents": latent_visual.cpu(),
+                "step": step,
+                "total_steps": total_steps,
+                "seed": checkpoint.get("seed", 0),
+                "text_embeds": {k: v.cpu() for k, v in bs_text_embed.items()},
+                "null_text_embeds": {k: v.cpu() for k, v in bs_null_text_embed.items()},
+                "visual_rope_pos": [v.cpu() if hasattr(v, 'cpu') else v for v in visual_rope_pos],
+                "text_rope_pos": text_rope_pos.cpu() if hasattr(text_rope_pos, 'cpu') else text_rope_pos,
+                "null_text_rope_pos": null_text_rope_pos.cpu() if hasattr(null_text_rope_pos, 'cpu') else null_text_rope_pos,
+                "shape": shape,
+                "guidance_weight": guidance_weight,
+                "scheduler_scale": scheduler_scale,
+            }
+            torch.save(new_checkpoint, new_checkpoint_path)
+            print(f">>> Checkpoint saved to {new_checkpoint_path} at step {step}/{total_steps}", flush=True)
+            return None
+
+        print(f">>> Decoding video from step {step}/{total_steps}", flush=True)
+    else:
+        latent_visual = result
+
+    # Offload DiT before VAE decode
+    if hasattr(dit, 'offload_all_blocks'):
+        dit.offload_all_blocks()
+
+    if offload or force_offload:
+        dit = dit.to('cpu', non_blocking=True)
+    torch.cuda.empty_cache()
+
+    if offload or force_offload:
+        vae = vae.to(vae_device, non_blocking=True)
+
+    with torch.no_grad():
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            images = latent_visual.reshape(
+                bs,
+                -1,
+                latent_visual.shape[-3],
+                latent_visual.shape[-2],
+                latent_visual.shape[-1],
+            )
+            images = images.to(device=vae_device)
+            images = (images / vae.config.scaling_factor).permute(0, 4, 1, 2, 3)
+            if image_vae:
+                images = images[:,:,0]
+            images = vae.decode(images).sample
+            images = ((images.clamp(-1.0, 1.0) + 1.0) * 127.5).to(torch.uint8)
+
+    if offload or force_offload:
+        vae = vae.to('cpu', non_blocking=True)
+    torch.cuda.empty_cache()
+
+    return images
+
+
+def generate_sample_i2v_from_checkpoint(
+    checkpoint_path,
+    dit,
+    vae,
+    conf,
+    device="cuda",
+    vae_device="cuda",
+    progress=True,
+    offload=False,
+    force_offload=False,
+    previewer=None,
+    preview_interval=None,
+    preview_suffix=None,
+    stop_check=None,
+    new_checkpoint_path=None,
+):
+    """Resume I2V generation from a saved checkpoint."""
+    print(f">>> Loading checkpoint from {checkpoint_path}", flush=True)
+    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+
+    # Extract checkpoint data
+    img = checkpoint["latents"].to(device)
+    start_step = checkpoint["step"]
+    num_steps = checkpoint["total_steps"]
+    bs_text_embed = {k: v.to(device, dtype=torch.bfloat16) for k, v in checkpoint["text_embeds"].items()}
+    bs_null_text_embed = {k: v.to(device, dtype=torch.bfloat16) for k, v in checkpoint["null_text_embeds"].items()}
+    visual_rope_pos = [v.to(device) if hasattr(v, 'to') else v for v in checkpoint["visual_rope_pos"]]
+    text_rope_pos = checkpoint["text_rope_pos"]
+    null_text_rope_pos = checkpoint["null_text_rope_pos"]
+    if hasattr(text_rope_pos, 'to'):
+        text_rope_pos = text_rope_pos.to(device)
+    if hasattr(null_text_rope_pos, 'to'):
+        null_text_rope_pos = null_text_rope_pos.to(device)
+    first_frames = checkpoint.get("first_frames")
+    if first_frames is not None:
+        first_frames = first_frames.to(device)
+    shape = checkpoint["shape"]
+    guidance_weight = checkpoint["guidance_weight"]
+    scheduler_scale = checkpoint["scheduler_scale"]
+
+    bs = shape[0]
+
+    # Log VRAM before DiT inference
+    log_vram_usage("BEFORE DiT INFERENCE (RESUME I2V)", dit=dit, vae=vae, text_embedder=None)
+
+    if offload or force_offload:
+        dit.to(device, non_blocking=True)
+
+    with torch.no_grad():
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            result = generate_resume(
+                dit,
+                device,
+                img,
+                start_step,
+                num_steps,
+                bs_text_embed,
+                bs_null_text_embed,
+                visual_rope_pos,
+                text_rope_pos,
+                null_text_rope_pos,
+                guidance_weight,
+                scheduler_scale,
+                first_frames,
+                conf,
+                progress=progress,
+                previewer=previewer,
+                preview_interval=preview_interval,
+                preview_suffix=preview_suffix,
+                stop_check=stop_check,
+            )
+
+    # Handle early stop results
+    if isinstance(result, dict) and result.get("action"):
+        action = result["action"]
+        latent_visual = result["latents"]
+        step = result["step"]
+        total_steps = result["total_steps"]
+
+        if action == "save" and new_checkpoint_path:
+            # Save new checkpoint
+            new_checkpoint = {
+                "latents": latent_visual.cpu(),
+                "step": step,
+                "total_steps": total_steps,
+                "seed": checkpoint.get("seed", 0),
+                "text_embeds": {k: v.cpu() for k, v in bs_text_embed.items()},
+                "null_text_embeds": {k: v.cpu() for k, v in bs_null_text_embed.items()},
+                "visual_rope_pos": [v.cpu() if hasattr(v, 'cpu') else v for v in visual_rope_pos],
+                "text_rope_pos": text_rope_pos.cpu() if hasattr(text_rope_pos, 'cpu') else text_rope_pos,
+                "null_text_rope_pos": null_text_rope_pos.cpu() if hasattr(null_text_rope_pos, 'cpu') else null_text_rope_pos,
+                "first_frames": first_frames.cpu() if first_frames is not None else None,
+                "shape": shape,
+                "guidance_weight": guidance_weight,
+                "scheduler_scale": scheduler_scale,
+                "mode": "i2v",
+            }
+            torch.save(new_checkpoint, new_checkpoint_path)
+            print(f">>> Checkpoint saved to {new_checkpoint_path} at step {step}/{total_steps}", flush=True)
+            return None
+
+        print(f">>> Decoding video from step {step}/{total_steps}", flush=True)
+    else:
+        latent_visual = result
+
+    # Apply first frame normalization for i2v
+    with torch.no_grad():
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            if first_frames is not None:
+                first_frames = first_frames.to(device=latent_visual.device, dtype=latent_visual.dtype)
+                latent_visual[:1] = first_frames
+                latent_visual = normalize_first_frame(latent_visual)
+
+    # Offload DiT before VAE decode
+    if hasattr(dit, 'offload_all_blocks'):
+        dit.offload_all_blocks()
+
+    if offload or force_offload:
+        dit = dit.to('cpu', non_blocking=True)
+    torch.cuda.empty_cache()
+
+    if offload or force_offload:
+        vae = vae.to(vae_device, non_blocking=True)
+
+    with torch.no_grad():
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            images = latent_visual.reshape(
+                bs,
+                -1,
+                latent_visual.shape[-3],
+                latent_visual.shape[-2],
+                latent_visual.shape[-1],
+            )
+            images = images.to(device=vae_device)
+            images = (images / vae.config.scaling_factor).permute(0, 4, 1, 2, 3)
+            images = vae.decode(images).sample
+            images = ((images.clamp(-1.0, 1.0) + 1.0) * 127.5).to(torch.uint8)
+
     if offload or force_offload:
         vae = vae.to('cpu', non_blocking=True)
     torch.cuda.empty_cache()

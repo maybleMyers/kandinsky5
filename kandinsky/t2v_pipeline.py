@@ -25,8 +25,8 @@ class Kandinsky5T2VPipeline:
         conf = None,
         offload: bool = False,
     ):
-        if resolution not in [512]:
-            raise ValueError("Resolution can be only 512")
+        if resolution not in [512, 1024]:
+            raise ValueError("Resolution can be 512 or 1024")
 
         self.dit = dit
         self.text_embedder = text_embedder
@@ -45,6 +45,7 @@ class Kandinsky5T2VPipeline:
 
         self.RESOLUTIONS = {
             512: [(512, 512), (512, 768), (768, 512)],
+            1024: [(1024, 1024), (1280, 768), (768, 1280), (1408, 640), (640, 1408), (1152, 896), (896, 1152)],
         }
 
     def expand_prompt(self, prompt):
@@ -106,6 +107,8 @@ class Kandinsky5T2VPipeline:
         progress: bool = True,
         preview: int = None,
         preview_suffix: str = None,
+        stop_check=None,
+        checkpoint_path=None,
     ):
         num_steps = self.num_steps if num_steps is None else num_steps
         guidance_weight = self.guidance_weight if guidance_weight is None else guidance_weight
@@ -199,7 +202,18 @@ class Kandinsky5T2VPipeline:
             previewer=previewer,
             preview_interval=preview,
             preview_suffix=preview_suffix,
+            stop_check=stop_check,
+            checkpoint_path=checkpoint_path,
         )
+
+        # Handle checkpoint save (images will be None)
+        if images is None:
+            # Delete text encoder to free RAM
+            del self.text_embedder
+            torch.cuda.empty_cache()
+            import gc
+            gc.collect()
+            return None
 
         # Delete text encoder to free RAM - it's no longer needed
         del self.text_embedder

@@ -772,6 +772,95 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
     def _decode(
         self, z: torch.Tensor, return_dict: bool = True
     ) -> Union[DecoderOutput, torch.Tensor]:
+        """
+        Decode with automatic fallback strategy.
+        Tries aggressive (faster, source-style) approach first, falls back to conservative on OOM.
+        """
+        try:
+            return self._decode_aggressive(z, return_dict)
+        except torch.cuda.OutOfMemoryError:
+            print(f"\nOOM during aggressive VAE decode, falling back to conservative tiling...")
+            torch.cuda.empty_cache()
+            return self._decode_conservative(z, return_dict)
+
+    def _decode_aggressive(
+        self, z: torch.Tensor, return_dict: bool = True
+    ) -> Union[DecoderOutput, torch.Tensor]:
+        """
+        Source-style decoding: minimal tiling based on available GPU memory.
+        Uses larger tiles or no tiling when memory permits for better performance.
+        """
+        _, _, num_frames, height, width = z.shape
+
+        # Get source-style tiling (may return None for no spatial tiling)
+        tiling = self._get_source_style_tiling(z.shape)
+
+        # Temporal tiling defaults
+        tile_latent_min_num_frames = 16 // self.temporal_compression_ratio
+
+        if tiling is None:
+            # No spatial tiling needed - check if temporal tiling required
+            if self.use_framewise_decoding and num_frames > (tile_latent_min_num_frames + 1):
+                # Set up for full-resolution temporal-only tiling
+                h_pix, w_pix = height * 8, width * 8
+                old_h, old_w = self.tile_sample_min_height, self.tile_sample_min_width
+                old_sh, old_sw = self.tile_sample_stride_height, self.tile_sample_stride_width
+
+                # Use full resolution (no spatial tiling)
+                self.tile_sample_min_height = h_pix
+                self.tile_sample_min_width = w_pix
+                self.tile_sample_stride_height = h_pix
+                self.tile_sample_stride_width = w_pix
+
+                try:
+                    print(f"\nVAE Aggressive Mode: No spatial tiling (full {h_pix}x{w_pix}), temporal only")
+                    return self._temporal_tiled_decode(z, return_dict=return_dict)
+                finally:
+                    # Restore original settings
+                    self.tile_sample_min_height = old_h
+                    self.tile_sample_min_width = old_w
+                    self.tile_sample_stride_height = old_sh
+                    self.tile_sample_stride_width = old_sw
+            else:
+                # Direct decode - no tiling at all
+                print(f"\nVAE Aggressive Mode: Direct decode (no tiling)")
+                z = self.post_quant_conv(z)
+                dec = self.decoder(z)
+                if not return_dict:
+                    return (dec,)
+                return DecoderOutput(sample=dec)
+        else:
+            # Use calculated larger tiles from source-style approach
+            ht, wt, hs, ws = tiling
+            old_h, old_w = self.tile_sample_min_height, self.tile_sample_min_width
+            old_sh, old_sw = self.tile_sample_stride_height, self.tile_sample_stride_width
+
+            self.tile_sample_min_height = ht
+            self.tile_sample_min_width = wt
+            self.tile_sample_stride_height = hs
+            self.tile_sample_stride_width = ws
+
+            try:
+                print(f"\nVAE Aggressive Mode: Using {ht}x{wt} tiles (stride: {hs}x{ws})")
+                # Check temporal tiling first
+                if self.use_framewise_decoding and num_frames > (tile_latent_min_num_frames + 1):
+                    return self._temporal_tiled_decode(z, return_dict=return_dict)
+                else:
+                    return self.tiled_decode(z, return_dict=return_dict)
+            finally:
+                # Restore original settings
+                self.tile_sample_min_height = old_h
+                self.tile_sample_min_width = old_w
+                self.tile_sample_stride_height = old_sh
+                self.tile_sample_stride_width = old_sw
+
+    def _decode_conservative(
+        self, z: torch.Tensor, return_dict: bool = True
+    ) -> Union[DecoderOutput, torch.Tensor]:
+        """
+        Conservative decoding: resolution-based safe tiling.
+        Uses smaller tiles to guarantee memory safety at the cost of speed.
+        """
         _, _, num_frames, height, width = z.shape
         tile_latent_min_height = (
             self.tile_sample_min_height // self.spatial_compression_ratio
@@ -782,6 +871,8 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
         tile_latent_min_num_frames = (
             self.tile_sample_min_num_frames // self.temporal_compression_ratio
         )
+
+        print(f"\nVAE Conservative Mode: Using {self.tile_sample_min_height}x{self.tile_sample_min_width} tiles")
 
         if self.use_framewise_decoding and num_frames > (
             tile_latent_min_num_frames + 1
@@ -808,6 +899,9 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
         r"""
         Decode a batch of images.
 
+        Uses automatic fallback strategy: tries aggressive (source-style) decoding first
+        for better performance, falls back to conservative tiling on OOM.
+
         Args:
             z (`torch.Tensor`): Input batch of latent vectors.
             return_dict (`bool`, *optional*, defaults to `True`):
@@ -818,19 +912,13 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
                 If return_dict is True, a [`~models.vae.DecoderOutput`] is returned,
                 otherwise a plain `tuple` is returned.
         """
+        # Set up conservative tiling as fallback (resolution-based safe defaults)
         tile_size, tile_stride = self.get_dec_optimal_tiling(z.shape)
         if tile_size != self.tile_size:
             self.tile_size = tile_size
             self.apply_tiling(tile_size, tile_stride)
 
-            # Log tiling configuration (only on first decode or when changed)
-            if not self.use_manual_tiling:
-                b, c, f, h, w = z.shape
-                h_pix, w_pix = h * 8, w * 8
-                print(f"\nVAE Adaptive Tiling Activated (Resolution: {h_pix}x{w_pix}):")
-                print(f"  Temporal: {self.tile_sample_min_num_frames} frames (stride: {self.tile_sample_stride_num_frames})")
-                print(f"  Spatial: {self.tile_sample_min_height}x{self.tile_sample_min_width} pixels (stride: {self.tile_sample_stride_height}x{self.tile_sample_stride_width})\n")
-
+        # _decode() will try aggressive first, fall back to conservative on OOM
         decoded = self._decode(z).sample
 
         if not return_dict:
@@ -982,29 +1070,26 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
         rows = []
         i_range = list(range(0, height - tile_latent_min_height + 1, tile_latent_stride_height))
         j_range = list(range(0, width - tile_latent_min_width + 1, tile_latent_stride_width))
-        total_tiles = len(i_range) * len(j_range)
 
-        with tqdm(total=total_tiles, desc="VAE spatial tiling", unit="tile") as pbar:
-            for i in i_range:
-                row = []
-                for j in j_range:
-                    tile = z[
-                        :,
-                        :,
-                        :,
-                        i : i + tile_latent_min_height,
-                        j : j + tile_latent_min_width,
-                    ]
-                    tile = self.post_quant_conv(tile)
-                    decoded = self.decoder(tile).clone()
-                    row.append(decoded)
-                    pbar.update(1)
+        for i in i_range:
+            row = []
+            for j in j_range:
+                tile = z[
+                    :,
+                    :,
+                    :,
+                    i : i + tile_latent_min_height,
+                    j : j + tile_latent_min_width,
+                ]
+                tile = self.post_quant_conv(tile)
+                decoded = self.decoder(tile).clone()
+                row.append(decoded)
 
-                    # Clear cache every few tiles to prevent memory accumulation
-                    if (len(row) % 4 == 0) and torch.cuda.is_available():
-                        torch.cuda.empty_cache()
+                # Clear cache every few tiles to prevent memory accumulation
+                if (len(row) % 4 == 0) and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
-                rows.append(row)
+            rows.append(row)
 
         result_rows = []
         for i, row in enumerate(rows):
@@ -1287,6 +1372,58 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
         stride_f = 12  # Default temporal stride (pixel-space frames)
 
         return (1, tile_f + 1, tile_h, tile_w), (stride_f, stride_h, stride_w)
+
+    def _get_source_style_tiling(self, shape: List[int]):
+        """
+        Source repository's memory-based tile calculation.
+        Returns None if no spatial tiling needed, otherwise returns (tile_h, tile_w, stride_h, stride_w).
+        """
+        b, _, f, h, w = shape
+        h_pix, w_pix = h * 8, w * 8
+
+        free_mem = torch.cuda.mem_get_info()[0]
+        max_area = free_mem / 256 / 17 / 8
+        num_vals = 256 * 17 * (h_pix + 32) * (w_pix + 32)
+
+        # If we can fit entire frame in memory without tiling
+        if h_pix * w_pix < max_area and num_vals < 2**31:
+            return None  # Signal no spatial tiling needed
+
+        # Calculate minimal tiling based on memory
+        k = max(h_pix / w_pix, w_pix / h_pix)
+        N = max(ceil(h_pix * w_pix / max_area), ceil(num_vals / 2**31))
+
+        def factorize(n, k):
+            a = sqrt(n / k)
+            b = sqrt(n * k)
+            aa = [floor(a), ceil(a)]
+            bb = [floor(b), ceil(b)]
+            for a_val in aa:
+                for b_val in bb:
+                    if a_val * b_val >= n:
+                        return a_val, b_val
+            return ceil(a), ceil(b)
+
+        a, b = factorize(N, k)
+        if h_pix >= w_pix:
+            wn, hn = a, b
+        else:
+            wn, hn = b, a
+
+        if wn > 1:
+            wt = ceil(w_pix / wn / 8) * 8 + 16
+            ws = wt - 32
+        else:
+            wt = w_pix
+            ws = w_pix
+        if hn > 1:
+            ht = ceil(h_pix / hn / 8) * 8 + 16
+            hs = ht - 32
+        else:
+            ht = h_pix
+            hs = h_pix
+
+        return (ht, wt, hs, ws)  # tile_h, tile_w, stride_h, stride_w
 
 
 def build_vae(

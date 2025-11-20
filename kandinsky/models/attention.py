@@ -2,6 +2,8 @@ import torch
 import torch.nn.functional as F
 from torch.nn.attention.flex_attention import flex_attention
 
+from .compile_config import maybe_compile
+
 try:
     from flash_attn import flash_attn_func as flash_attention_2
     print("FlashAttention 2 is found")
@@ -20,7 +22,7 @@ try:
 except:
     sageattention = None
 
-@torch.compile(mode="max-autotune-no-cudagraphs", dynamic=True)
+@maybe_compile(mode="max-autotune-no-cudagraphs", dynamic=True)
 def sdpa(q, k, v, attn_mask=None):
     query = q.transpose(1, 2).contiguous()
     key = k.transpose(1, 2).contiguous()
@@ -37,7 +39,7 @@ def sdpa(q, k, v, attn_mask=None):
     )
     return out
 
-@torch.compile(mode="max-autotune-no-cudagraphs", dynamic=True)
+@maybe_compile(mode="max-autotune-no-cudagraphs", dynamic=True)
 def sage_attn(q, k, v):
     out = (
         sageattention.sageattn(

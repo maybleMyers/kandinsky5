@@ -17,6 +17,7 @@ from .nn import (
     apply_gate_sum,
 )
 from .utils import fractal_flatten, fractal_unflatten
+from .compile_config import maybe_compile
 
 
 class TransformerEncoderBlock(nn.Module):
@@ -166,7 +167,7 @@ class DiffusionTransformer3D(nn.Module):
 
         self.out_layer = OutLayer(model_dim, time_dim, out_visual_dim, patch_size)
 
-    @torch.compile()
+    @maybe_compile()
     def before_text_transformer_blocks(self, text_embed, time, pooled_text_embed, x,
                                        text_rope_pos):
         text_embed = self.text_embeddings(text_embed)
@@ -176,7 +177,7 @@ class DiffusionTransformer3D(nn.Module):
         text_rope = self.text_rope_embeddings(text_rope_pos)
         return text_embed, time_embed, text_rope, visual_embed
 
-    @torch.compile()
+    @maybe_compile()
     def before_visual_transformer_blocks(self, visual_embed, visual_rope_pos, scale_factor,
                                          sparse_params):
         visual_shape = visual_embed.shape[:-1]

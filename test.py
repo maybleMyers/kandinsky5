@@ -4,11 +4,27 @@ import warnings
 import logging
 import os
 import tempfile
+import sys
 
 import torch
 from PIL import Image
 
+# Early parse --no_compile to set the flag before importing kandinsky
+def _early_parse_no_compile():
+    for i, arg in enumerate(sys.argv):
+        if arg == '--no_compile':
+            return True
+    return False
+
+# Set global compile flag before importing kandinsky modules
+import kandinsky.models.compile_config as compile_config
+_no_compile = _early_parse_no_compile()
+compile_config.USE_TORCH_COMPILE = not _no_compile
+if _no_compile:
+    print("torch.compile() disabled for faster startup")
+
 from kandinsky import get_T2V_pipeline, get_I2V_pipeline, get_I2V_pipeline_with_block_swap, get_T2V_pipeline_with_block_swap
+from kandinsky.generation_utils import generate_sample_from_checkpoint, generate_sample_i2v_from_checkpoint
 
 try:
     from scripts.latentpreviewer import LatentPreviewer
@@ -214,28 +230,28 @@ def parse_args():
         "--dtype",
         type=str,
         default="bfloat16",
-        choices=["float32", "float16", "bfloat16"],
-        help="Data type for model weights (default: bfloat16). Use bfloat16 for best memory efficiency with minimal quality loss. This sets all dtypes if specific ones are not provided."
+        choices=["float32", "float16", "bfloat16", "fp8_scaled"],
+        help="Data type for model weights (default: bfloat16). Use bfloat16 for best memory efficiency with minimal quality loss. Use fp8_scaled for maximum memory savings (~50%% vs bf16). This sets all dtypes if specific ones are not provided."
     )
     parser.add_argument(
         "--text_encoder_dtype",
         type=str,
         default=None,
-        choices=["float32", "float16", "bfloat16"],
+        choices=["float32", "float16", "bfloat16", "fp8_scaled"],
         help="Data type specifically for text encoder. If not set, uses --dtype value."
     )
     parser.add_argument(
         "--vae_dtype",
         type=str,
         default=None,
-        choices=["float32", "float16", "bfloat16"],
+        choices=["float32", "float16", "bfloat16", "fp8_scaled"],
         help="Data type specifically for VAE. If not set, uses --dtype value."
     )
     parser.add_argument(
         "--computation_dtype",
         type=str,
         default=None,
-        choices=["float32", "float16", "bfloat16"],
+        choices=["float32", "float16", "bfloat16", "fp8_scaled"],
         help="Data type for activations/computations. If not set, uses --dtype value."
     )
     parser.add_argument(
@@ -349,6 +365,18 @@ def parse_args():
         default=None,
         help="Spatial tile width for VAE decode (default: 256). Lower values reduce memory usage but increase processing time."
     )
+    parser.add_argument(
+        "--no_compile",
+        action='store_true',
+        default=False,
+        help="Disable torch.compile() for faster startup (2-5 minutes faster) at the cost of slower inference"
+    )
+    parser.add_argument(
+        "--resume_from",
+        type=str,
+        default=None,
+        help="Path to checkpoint file to resume generation from"
+    )
 
     args = parser.parse_args()
     return args
@@ -363,7 +391,15 @@ if __name__ == "__main__":
         "float32": torch.float32,
         "float16": torch.float16,
         "bfloat16": torch.bfloat16,
+        "fp8_scaled": torch.bfloat16,  # FP8 uses bfloat16 as compute dtype
     }
+
+    # Track which components should use FP8
+    use_fp8 = args.dtype == "fp8_scaled"
+    use_fp8_text_encoder = args.text_encoder_dtype == "fp8_scaled" if args.text_encoder_dtype else use_fp8
+    use_fp8_vae = args.vae_dtype == "fp8_scaled" if args.vae_dtype else use_fp8
+    use_fp8_computation = args.computation_dtype == "fp8_scaled" if args.computation_dtype else use_fp8
+
     model_dtype = dtype_map[args.dtype]
 
     # Set individual component dtypes (fall back to model_dtype if not specified)
@@ -417,6 +453,7 @@ if __name__ == "__main__":
                 computation_dtype=computation_dtype,
                 use_int8=args.use_int8,
                 int8_block_size=args.int8_block_size,
+                use_fp8=use_fp8_computation,
                 vae_temporal_tile_frames=args.vae_temporal_tile_frames,
                 vae_temporal_stride_frames=args.vae_temporal_stride_frames,
                 vae_spatial_tile_height=args.vae_spatial_tile_height,
@@ -441,6 +478,7 @@ if __name__ == "__main__":
                 computation_dtype=computation_dtype,
                 use_int8=args.use_int8,
                 int8_block_size=args.int8_block_size,
+                use_fp8=use_fp8_computation,
                 vae_temporal_tile_frames=args.vae_temporal_tile_frames,
                 vae_temporal_stride_frames=args.vae_temporal_stride_frames,
                 vae_spatial_tile_height=args.vae_spatial_tile_height,
@@ -469,6 +507,7 @@ if __name__ == "__main__":
                 computation_dtype=computation_dtype,
                 use_int8=args.use_int8,
                 int8_block_size=args.int8_block_size,
+                use_fp8=use_fp8_computation,
                 vae_temporal_tile_frames=args.vae_temporal_tile_frames,
                 vae_temporal_stride_frames=args.vae_temporal_stride_frames,
                 vae_spatial_tile_height=args.vae_spatial_tile_height,
@@ -493,6 +532,7 @@ if __name__ == "__main__":
                 computation_dtype=computation_dtype,
                 use_int8=args.use_int8,
                 int8_block_size=args.int8_block_size,
+                use_fp8=use_fp8_computation,
                 vae_temporal_tile_frames=args.vae_temporal_tile_frames,
                 vae_temporal_stride_frames=args.vae_temporal_stride_frames,
                 vae_spatial_tile_height=args.vae_spatial_tile_height,
@@ -502,8 +542,99 @@ if __name__ == "__main__":
     if args.output_filename is None:
         args.output_filename = "./" + args.prompt.replace(" ", "_") + ".mp4"
 
+    # Set up file-based signal checking for early stop
+    stop_decode_file = args.output_filename + ".stop_decode"
+    stop_save_file = args.output_filename + ".stop_save"
+    checkpoint_file = args.output_filename.replace(".mp4", "_checkpoint.pt")
+
+    def check_stop_signals():
+        """Check for stop signal files and return action if found."""
+        if os.path.exists(stop_decode_file):
+            try:
+                os.remove(stop_decode_file)
+            except:
+                pass
+            return "decode"
+        if os.path.exists(stop_save_file):
+            try:
+                os.remove(stop_save_file)
+            except:
+                pass
+            return "save"
+        return None
+
     start_time = time.perf_counter()
-    if is_i2v:
+
+    # Handle resume from checkpoint
+    if args.resume_from:
+        print(f">>> Resume mode: Loading checkpoint from {args.resume_from}", flush=True)
+
+        try:
+            # Load checkpoint to check mode
+            ckpt = torch.load(args.resume_from, map_location='cpu')
+            is_i2v_checkpoint = ckpt.get("mode") == "i2v" or ckpt.get("first_frames") is not None
+
+            print(f">>> Checkpoint contains: step {ckpt.get('step')}/{ckpt.get('total_steps')}", flush=True)
+            print(f">>> Mode: {'I2V' if is_i2v_checkpoint else 'T2V'}", flush=True)
+
+            # Get DiT and VAE from the pipe (text embedder not needed for resume)
+            force_offload = hasattr(pipe.dit, 'enable_block_swap') and pipe.dit.enable_block_swap
+
+            if is_i2v_checkpoint:
+                print(">>> Resuming I2V generation", flush=True)
+                x = generate_sample_i2v_from_checkpoint(
+                    checkpoint_path=args.resume_from,
+                    dit=pipe.dit,
+                    vae=pipe.vae,
+                    conf=pipe.conf,
+                    device="cuda",
+                    vae_device="cuda",
+                    progress=True,
+                    offload=pipe.offload,
+                    force_offload=force_offload,
+                    stop_check=check_stop_signals,
+                    new_checkpoint_path=checkpoint_file,
+                )
+            else:
+                print(">>> Resuming T2V generation", flush=True)
+                x = generate_sample_from_checkpoint(
+                    checkpoint_path=args.resume_from,
+                    dit=pipe.dit,
+                    vae=pipe.vae,
+                    conf=pipe.conf,
+                    device="cuda",
+                    vae_device="cuda",
+                    progress=True,
+                    offload=pipe.offload,
+                    force_offload=force_offload,
+                    stop_check=check_stop_signals,
+                    new_checkpoint_path=checkpoint_file,
+                )
+
+            # Save the video if we got results
+            if x is not None:
+                import torchvision
+                for video in x:
+                    torchvision.io.write_video(
+                        args.output_filename,
+                        video.float().permute(1, 2, 3, 0).cpu().numpy(),
+                        fps=24,
+                        options={"crf": "5"},
+                    )
+
+            print(f"TIME ELAPSED: {time.perf_counter() - start_time}")
+            if x is None:
+                print(f">>> Checkpoint saved to {checkpoint_file}")
+            else:
+                print(f"Generated video is saved to {args.output_filename}")
+
+        except Exception as e:
+            print(f">>> ERROR during resume: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            raise
+
+    elif is_i2v:
         image_to_use = args.image
         if args.width and args.height:
             alignment = 128 if args.attention_type == "nabla" else 32
@@ -520,7 +651,9 @@ if __name__ == "__main__":
                  save_path=args.output_filename,
                  seed=args.seed,
                  preview=args.preview,
-                 preview_suffix=args.preview_suffix)
+                 preview_suffix=args.preview_suffix,
+                 stop_check=check_stop_signals,
+                 checkpoint_path=checkpoint_file)
     else:
         x = pipe(args.prompt,
              time_length=args.video_duration,
@@ -533,7 +666,15 @@ if __name__ == "__main__":
              save_path=args.output_filename,
              seed=args.seed,
              preview=args.preview,
-             preview_suffix=args.preview_suffix)
+             preview_suffix=args.preview_suffix,
+             stop_check=check_stop_signals,
+             checkpoint_path=checkpoint_file)
+
     print(f"TIME ELAPSED: {time.perf_counter() - start_time}")
-    print(f"Generated video is saved to {args.output_filename}")
+
+    if x is None:
+        print(f">>> Checkpoint saved to {checkpoint_file}")
+        print(f">>> No video generated (latents saved for later)")
+    else:
+        print(f"Generated video is saved to {args.output_filename}")
     

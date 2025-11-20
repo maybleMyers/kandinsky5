@@ -15,6 +15,7 @@ from PIL import Image
 
 stop_event = threading.Event()
 current_process = None  # Track the currently running process
+current_output_filename = None  # Track current output filename for early stop signals
 
 def parse_progress_line(line: str) -> Optional[str]:
     """Parse progress bar lines and extract useful information."""
@@ -74,6 +75,7 @@ def generate_video(
     seed: int,
     use_mixed_weights: bool,
     use_int8: bool,
+    use_torch_compile: bool,
     enable_block_swap: bool,
     blocks_in_memory: int,
     dtype_str: str,
@@ -90,9 +92,10 @@ def generate_video(
     vae_spatial_tile_height: int,
     vae_spatial_tile_width: int,
 ) -> Generator[Tuple[List[Tuple[str, str]], Optional[str], str, str], None, None]:
-    global stop_event, current_process
+    global stop_event, current_process, current_output_filename
     stop_event.clear()
     current_process = None
+    current_output_filename = None
 
     os.makedirs(save_path, exist_ok=True)
     all_generated_videos = []
@@ -116,14 +119,18 @@ def generate_video(
         run_id = f"{timestamp}_{random.randint(1000, 9999)}"
         unique_preview_suffix = f"k1_{run_id}"
         output_filename = os.path.join(save_path, f"k1_{mode}_{timestamp}_{current_seed}.mp4")
+        current_output_filename = output_filename  # Track for early stop signals
 
         # Select config file based on model_config selection
         config_map = {
             "5s Lite (T2V)": "./configs/config_5s_sft.yaml",
             "10s Lite (T2V)": "./configs/config_10s_sft.yaml",
             "5s Pro 20B (T2V)": "./configs/config_5s_t2v_pro_20b.yaml",
+            "5s Pro 20B HD (T2V)": "./configs/k5_pro_t2v_5s_sft_hd.yaml",
             "10s Pro 20B (T2V)": "./configs/config_10s_t2v_pro_20b.yaml",
+            "10s Pro 20B HD (T2V)": "./configs/k5_pro_t2v_10s_sft_hd.yaml",
             "5s Pro 20B (I2V)": "./configs/config_5s_i2v_pro_20b.yaml",
+            "5s Pro 20B HD (I2V)": "./configs/k5_pro_i2v_5s_sft_hd.yaml",
             "5s Lite (I2V)": "./configs/config_5s_i2v.yaml",
         }
 
@@ -176,6 +183,8 @@ def generate_video(
             command.append("--use_mixed_weights")
         if use_int8:
             command.append("--use_int8")
+        if not use_torch_compile:
+            command.append("--no_compile")
 
         if negative_prompt:
             command.extend(["--negative_prompt", str(negative_prompt)])
@@ -297,6 +306,7 @@ def generate_video(
                     "seed": current_seed,
                     "use_mixed_weights": use_mixed_weights,
                     "use_int8": use_int8,
+                    "use_torch_compile": use_torch_compile,
                     "enable_block_swap": enable_block_swap,
                     "blocks_in_memory": int(blocks_in_memory) if enable_block_swap else None,
                     "dtype": dtype_str,
@@ -360,6 +370,145 @@ def stop_generation():
             print(f"Error stopping process: {e}")
 
     return "Stopping generation..."
+
+def stop_and_decode():
+    """Signal the generation to stop and decode the current latents."""
+    global current_output_filename
+    if current_output_filename:
+        signal_file = current_output_filename + ".stop_decode"
+        try:
+            with open(signal_file, 'w') as f:
+                f.write('decode')
+            return "Signaling stop & decode..."
+        except Exception as e:
+            return f"Error creating signal file: {e}"
+    return "No active generation to stop"
+
+def stop_and_save():
+    """Signal the generation to stop and save the current latents."""
+    global current_output_filename
+    if current_output_filename:
+        signal_file = current_output_filename + ".stop_save"
+        try:
+            with open(signal_file, 'w') as f:
+                f.write('save')
+            return "Signaling stop & save latents..."
+        except Exception as e:
+            return f"Error creating signal file: {e}"
+    return "No active generation to stop"
+
+
+def resume_from_checkpoint(
+    checkpoint_path: str,
+    model_config: str,
+    save_path: str,
+    use_torch_compile: bool,
+    enable_block_swap: bool,
+    blocks_in_memory: int,
+    dtype_str: str,
+    vae_dtype_str: str,
+) -> Generator[Tuple[List[Tuple[str, str]], Optional[str], str, str], None, None]:
+    """Resume generation from a saved checkpoint."""
+    global stop_event, current_process, current_output_filename
+    stop_event.clear()
+    current_process = None
+
+    if not checkpoint_path or not os.path.exists(checkpoint_path):
+        yield [], None, "Error: No checkpoint file selected", ""
+        return
+
+    os.makedirs(save_path, exist_ok=True)
+
+    # Generate output filename
+    timestamp = int(time.time())
+    output_filename = os.path.join(save_path, f"k1_resume_{timestamp}.mp4")
+    current_output_filename = output_filename
+
+    # Select config file based on model_config
+    config_map = {
+        "5s Lite (T2V)": "./configs/config_5s_sft.yaml",
+        "5s Pro 20B (T2V)": "./configs/k5_pro_t2v_5s_sft.yaml",
+        "5s Pro 20B HD (T2V)": "./configs/k5_pro_t2v_5s_sft_hd.yaml",
+        "5s Lite (I2V)": "./configs/config_5s_sft_i2v.yaml",
+        "5s Pro 20B (I2V)": "./configs/k5_pro_i2v_5s_sft.yaml",
+        "5s Pro 20B HD (I2V)": "./configs/k5_pro_i2v_5s_sft_hd.yaml",
+    }
+    config_file = config_map.get(model_config, "./configs/k5_pro_i2v_5s_sft.yaml")
+
+    yield [], None, "Resuming from checkpoint...", f"Loading {checkpoint_path}"
+
+    # Build command
+    command = [
+        "python", "test.py",
+        "--config", config_file,
+        "--prompt", "resume",  # Placeholder, not used in resume mode
+        "--output_filename", output_filename,
+        "--resume_from", checkpoint_path,
+    ]
+
+    # Add dtype settings
+    if dtype_str:
+        command.extend(["--dtype", dtype_str])
+    if vae_dtype_str:
+        command.extend(["--vae_dtype", vae_dtype_str])
+
+    # Add block swap settings
+    if enable_block_swap:
+        command.append("--enable_block_swap")
+        command.extend(["--blocks_in_memory", str(int(blocks_in_memory))])
+
+    # Add compile setting
+    if not use_torch_compile:
+        command.append("--no_compile")
+
+    # Print command for debugging
+    print(f">>> Resume command: {' '.join(command)}", flush=True)
+
+    try:
+        current_process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            universal_newlines=True
+        )
+
+        for line in iter(current_process.stdout.readline, ''):
+            if stop_event.is_set():
+                break
+
+            line = line.strip()
+            if not line:
+                continue
+
+            # Print all output to console for debugging
+            print(line, flush=True)
+
+            progress_info = parse_progress_line(line)
+            if progress_info:
+                yield [], None, "Resuming...", progress_info
+            elif ">>>" in line or "Error" in line or "error" in line:
+                # Show important messages
+                yield [], None, "Resuming...", line
+
+        current_process.wait()
+
+        if os.path.exists(output_filename):
+            yield [(output_filename, f"Resumed video")], None, "Resume complete!", ""
+        else:
+            # Check for new checkpoint
+            new_checkpoint = output_filename.replace(".mp4", "_checkpoint.pt")
+            if os.path.exists(new_checkpoint):
+                yield [], None, f"Checkpoint saved: {new_checkpoint}", ""
+            else:
+                yield [], None, "Resume stopped", ""
+
+    except Exception as e:
+        yield [], None, f"Error: {str(e)}", ""
+    finally:
+        current_process = None
+
 
 def extract_video_metadata(video_path: str) -> Dict:
     """Extract metadata from video file using ffprobe."""
@@ -482,7 +631,7 @@ def extract_video_details(video_path: str) -> Tuple[dict, str]:
 def send_to_generation(video_path, metadata):
     """Extract first frame and map metadata to generation inputs using subprocess."""
     if not video_path:
-        return [gr.update()] * 33
+        return [gr.update()] * 34
 
     # 1. Extract First Frame as PIL Image using subprocess
     input_img_pil = None
@@ -540,6 +689,7 @@ def send_to_generation(video_path, metadata):
         get_num("seed"),                # seed
         get("use_mixed_weights"),       # use_mixed_weights
         get("use_int8"),                # use_int8
+        get("use_torch_compile"),       # use_torch_compile
         get("enable_block_swap"),       # enable_block_swap
         get_num("blocks_in_memory"),    # blocks_in_memory
         get("dtype"),                   # dtype_select
@@ -734,8 +884,6 @@ def create_interface():
             }
             """)
 
-        gr.Markdown("# Kandinsky 5.0 I2V Pro 20B - K1 Interface")
-
         with gr.Tabs() as tabs:
             with gr.Tab("Generation", id="gen_tab"):
                 with gr.Row():
@@ -761,6 +909,16 @@ def create_interface():
                 with gr.Row():
                     generate_btn = gr.Button("Generate Video", elem_classes="green-btn")
                     stop_btn = gr.Button("Stop Generation", variant="stop")
+                    stop_decode_btn = gr.Button("Stop & Decode", elem_classes="light-blue-btn")
+                    stop_save_btn = gr.Button("Stop & Save Latents", elem_classes="light-blue-btn")
+
+                with gr.Row():
+                    checkpoint_file = gr.Textbox(
+                        label="Checkpoint File (for resume)",
+                        placeholder="Path to _checkpoint.pt file",
+                        scale=3
+                    )
+                    resume_btn = gr.Button("Resume from Checkpoint", elem_classes="light-blue-btn", scale=1)
 
                 with gr.Row():
                     with gr.Column():
@@ -780,12 +938,15 @@ def create_interface():
                                 "5s Lite (T2V)",
                                 "10s Lite (T2V)",
                                 "5s Pro 20B (T2V)",
+                                "5s Pro 20B HD (T2V)",
                                 "10s Pro 20B (T2V)",
+                                "10s Pro 20B HD (T2V)",
                                 "5s Pro 20B (I2V)",
+                                "5s Pro 20B HD (I2V)",
                                 "5s Lite (I2V)"
                             ],
                             value="5s Pro 20B (I2V)",
-                            info="Select model configuration. Pro models require more VRAM but offer better quality. 10s models support longer videos."
+                            info="Select model configuration. Pro models require more VRAM but offer better quality. HD uses NABLA sparse attention for 1024+ resolution."
                         )
 
                         attention_engine = gr.Dropdown(
@@ -882,17 +1043,18 @@ def create_interface():
                     with gr.Row():
                         use_mixed_weights = gr.Checkbox(label="Use Mixed Weights", value=False, info="Preserve fp32 for critical layers (norms, embeddings)")
                         use_int8 = gr.Checkbox(label="Use int8 matmul", value=False, info="enable int8 quantization")
+                        use_torch_compile = gr.Checkbox(label="Use torch.compile", value=False, info="Slower startup (2-5 min) but faster inference")
                     with gr.Row():
                         enable_block_swap = gr.Checkbox(label="Enable Block Swap", value=True, info="Required for 24GB GPUs")
                         blocks_in_memory = gr.Slider(minimum=1, maximum=60, step=1, label="Blocks in Memory", value=2, info="Number of transformer blocks to keep in GPU memory")
                     with gr.Row():
-                        dtype_select = gr.Radio(choices=["bfloat16", "float16", "float32"], label="Default Data Type", value="bfloat16", info="Used for all components if specific dtypes not set")
+                        dtype_select = gr.Radio(choices=["bfloat16", "float16", "float32", "fp8_scaled"], label="Default Data Type", value="bfloat16", info="Used for all components if specific dtypes not set. fp8_scaled provides ~50% memory savings.")
                     with gr.Accordion("Advanced: Component-Specific Data Types", open=False):
                         gr.Markdown("Override dtypes for individual components. Leave empty to use default dtype.")
                         with gr.Row():
-                            text_encoder_dtype_select = gr.Dropdown(choices=["", "bfloat16", "float16", "float32"], label="Text Encoder dtype", value="", info="Empty = use default")
-                            vae_dtype_select = gr.Dropdown(choices=["", "bfloat16", "float16", "float32"], label="VAE dtype", value="", info="Empty = use default")
-                            computation_dtype_select = gr.Dropdown(choices=["", "bfloat16", "float16", "float32"], label="Computation dtype", value="", info="Empty = use default")
+                            text_encoder_dtype_select = gr.Dropdown(choices=["", "bfloat16", "float16", "float32", "fp8_scaled"], label="Text Encoder dtype", value="", info="Empty = use default")
+                            vae_dtype_select = gr.Dropdown(choices=["", "bfloat16", "float16", "float32", "fp8_scaled"], label="VAE dtype", value="", info="Empty = use default")
+                            computation_dtype_select = gr.Dropdown(choices=["", "bfloat16", "float16", "float32", "fp8_scaled"], label="Computation dtype", value="", info="Empty = use default. fp8_scaled for transformer only.")
 
                     with gr.Accordion("Advanced: VAE Memory Optimization (Chunking)", open=False):
                         gr.Markdown("""
@@ -973,7 +1135,7 @@ def create_interface():
                         attention_type, nabla_P, nabla_wT, nabla_wW, nabla_wH,
                         width, height, video_duration, sample_steps,
                         guidance_weight, scheduler_scale, seed,
-                        use_mixed_weights, use_int8, enable_block_swap, blocks_in_memory, dtype_select,
+                        use_mixed_weights, use_int8, use_torch_compile, enable_block_swap, blocks_in_memory, dtype_select,
                         text_encoder_dtype_select, vae_dtype_select, computation_dtype_select,
                         save_path, batch_size,
                         enable_preview, preview_steps,
@@ -986,6 +1148,26 @@ def create_interface():
                 stop_btn.click(
                     fn=stop_generation,
                     outputs=[batch_progress]
+                )
+
+                stop_decode_btn.click(
+                    fn=stop_and_decode,
+                    outputs=[batch_progress]
+                )
+
+                stop_save_btn.click(
+                    fn=stop_and_save,
+                    outputs=[batch_progress]
+                )
+
+                resume_btn.click(
+                    fn=resume_from_checkpoint,
+                    inputs=[
+                        checkpoint_file, model_config, save_path,
+                        use_torch_compile, enable_block_swap, blocks_in_memory,
+                        dtype_select, vae_dtype_select
+                    ],
+                    outputs=[output, preview_output, batch_progress, progress_text]
                 )
 
             # Video Info Tab
@@ -1031,17 +1213,18 @@ def create_interface():
                         seed,                       # 20
                         use_mixed_weights,          # 21
                         use_int8,                   # 22
-                        enable_block_swap,          # 23
-                        blocks_in_memory,           # 24
-                        dtype_select,               # 25
-                        text_encoder_dtype_select,  # 26
-                        vae_dtype_select,           # 27
-                        computation_dtype_select,   # 28
-                        enable_vae_chunking,        # 29
-                        vae_temporal_tile_frames,   # 30
-                        vae_temporal_stride_frames, # 31
-                        vae_spatial_tile_height,    # 32
-                        vae_spatial_tile_width      # 33
+                        use_torch_compile,          # 23
+                        enable_block_swap,          # 24
+                        blocks_in_memory,           # 25
+                        dtype_select,               # 26
+                        text_encoder_dtype_select,  # 27
+                        vae_dtype_select,           # 28
+                        computation_dtype_select,   # 29
+                        enable_vae_chunking,        # 30
+                        vae_temporal_tile_frames,   # 31
+                        vae_temporal_stride_frames, # 32
+                        vae_spatial_tile_height,    # 33
+                        vae_spatial_tile_width      # 34
                     ]
                 )
 
