@@ -15,6 +15,7 @@ from PIL import Image
 
 stop_event = threading.Event()
 current_process = None  # Track the currently running process
+current_output_filename = None  # Track current output filename for early stop signals
 
 def parse_progress_line(line: str) -> Optional[str]:
     """Parse progress bar lines and extract useful information."""
@@ -91,9 +92,10 @@ def generate_video(
     vae_spatial_tile_height: int,
     vae_spatial_tile_width: int,
 ) -> Generator[Tuple[List[Tuple[str, str]], Optional[str], str, str], None, None]:
-    global stop_event, current_process
+    global stop_event, current_process, current_output_filename
     stop_event.clear()
     current_process = None
+    current_output_filename = None
 
     os.makedirs(save_path, exist_ok=True)
     all_generated_videos = []
@@ -117,6 +119,7 @@ def generate_video(
         run_id = f"{timestamp}_{random.randint(1000, 9999)}"
         unique_preview_suffix = f"k1_{run_id}"
         output_filename = os.path.join(save_path, f"k1_{mode}_{timestamp}_{current_seed}.mp4")
+        current_output_filename = output_filename  # Track for early stop signals
 
         # Select config file based on model_config selection
         config_map = {
@@ -367,6 +370,32 @@ def stop_generation():
             print(f"Error stopping process: {e}")
 
     return "Stopping generation..."
+
+def stop_and_decode():
+    """Signal the generation to stop and decode the current latents."""
+    global current_output_filename
+    if current_output_filename:
+        signal_file = current_output_filename + ".stop_decode"
+        try:
+            with open(signal_file, 'w') as f:
+                f.write('decode')
+            return "Signaling stop & decode..."
+        except Exception as e:
+            return f"Error creating signal file: {e}"
+    return "No active generation to stop"
+
+def stop_and_save():
+    """Signal the generation to stop and save the current latents."""
+    global current_output_filename
+    if current_output_filename:
+        signal_file = current_output_filename + ".stop_save"
+        try:
+            with open(signal_file, 'w') as f:
+                f.write('save')
+            return "Signaling stop & save latents..."
+        except Exception as e:
+            return f"Error creating signal file: {e}"
+    return "No active generation to stop"
 
 def extract_video_metadata(video_path: str) -> Dict:
     """Extract metadata from video file using ffprobe."""
@@ -767,6 +796,8 @@ def create_interface():
                 with gr.Row():
                     generate_btn = gr.Button("Generate Video", elem_classes="green-btn")
                     stop_btn = gr.Button("Stop Generation", variant="stop")
+                    stop_decode_btn = gr.Button("Stop & Decode", elem_classes="light-blue-btn")
+                    stop_save_btn = gr.Button("Stop & Save Latents", elem_classes="light-blue-btn")
 
                 with gr.Row():
                     with gr.Column():
@@ -995,6 +1026,16 @@ def create_interface():
 
                 stop_btn.click(
                     fn=stop_generation,
+                    outputs=[batch_progress]
+                )
+
+                stop_decode_btn.click(
+                    fn=stop_and_decode,
+                    outputs=[batch_progress]
+                )
+
+                stop_save_btn.click(
+                    fn=stop_and_save,
                     outputs=[batch_progress]
                 )
 

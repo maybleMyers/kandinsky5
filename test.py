@@ -523,6 +523,27 @@ if __name__ == "__main__":
     if args.output_filename is None:
         args.output_filename = "./" + args.prompt.replace(" ", "_") + ".mp4"
 
+    # Set up file-based signal checking for early stop
+    stop_decode_file = args.output_filename + ".stop_decode"
+    stop_save_file = args.output_filename + ".stop_save"
+    checkpoint_file = args.output_filename.replace(".mp4", "_checkpoint.pt")
+
+    def check_stop_signals():
+        """Check for stop signal files and return action if found."""
+        if os.path.exists(stop_decode_file):
+            try:
+                os.remove(stop_decode_file)
+            except:
+                pass
+            return "decode"
+        if os.path.exists(stop_save_file):
+            try:
+                os.remove(stop_save_file)
+            except:
+                pass
+            return "save"
+        return None
+
     start_time = time.perf_counter()
     if is_i2v:
         image_to_use = args.image
@@ -541,7 +562,9 @@ if __name__ == "__main__":
                  save_path=args.output_filename,
                  seed=args.seed,
                  preview=args.preview,
-                 preview_suffix=args.preview_suffix)
+                 preview_suffix=args.preview_suffix,
+                 stop_check=check_stop_signals,
+                 checkpoint_path=checkpoint_file)
     else:
         x = pipe(args.prompt,
              time_length=args.video_duration,
@@ -554,7 +577,15 @@ if __name__ == "__main__":
              save_path=args.output_filename,
              seed=args.seed,
              preview=args.preview,
-             preview_suffix=args.preview_suffix)
+             preview_suffix=args.preview_suffix,
+             stop_check=check_stop_signals,
+             checkpoint_path=checkpoint_file)
+
     print(f"TIME ELAPSED: {time.perf_counter() - start_time}")
-    print(f"Generated video is saved to {args.output_filename}")
+
+    if x is None:
+        print(f">>> Checkpoint saved to {checkpoint_file}")
+        print(f">>> No video generated (latents saved for later)")
+    else:
+        print(f"Generated video is saved to {args.output_filename}")
     

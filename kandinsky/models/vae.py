@@ -1070,29 +1070,26 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
         rows = []
         i_range = list(range(0, height - tile_latent_min_height + 1, tile_latent_stride_height))
         j_range = list(range(0, width - tile_latent_min_width + 1, tile_latent_stride_width))
-        total_tiles = len(i_range) * len(j_range)
 
-        with tqdm(total=total_tiles, desc="VAE spatial tiling", unit="tile") as pbar:
-            for i in i_range:
-                row = []
-                for j in j_range:
-                    tile = z[
-                        :,
-                        :,
-                        :,
-                        i : i + tile_latent_min_height,
-                        j : j + tile_latent_min_width,
-                    ]
-                    tile = self.post_quant_conv(tile)
-                    decoded = self.decoder(tile).clone()
-                    row.append(decoded)
-                    pbar.update(1)
+        for i in i_range:
+            row = []
+            for j in j_range:
+                tile = z[
+                    :,
+                    :,
+                    :,
+                    i : i + tile_latent_min_height,
+                    j : j + tile_latent_min_width,
+                ]
+                tile = self.post_quant_conv(tile)
+                decoded = self.decoder(tile).clone()
+                row.append(decoded)
 
-                    # Clear cache every few tiles to prevent memory accumulation
-                    if (len(row) % 4 == 0) and torch.cuda.is_available():
-                        torch.cuda.empty_cache()
+                # Clear cache every few tiles to prevent memory accumulation
+                if (len(row) % 4 == 0) and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
-                rows.append(row)
+            rows.append(row)
 
         result_rows = []
         for i, row in enumerate(rows):
