@@ -828,8 +828,6 @@ def get_I2V_pipeline_with_block_swap(
     )
 
     if magcache:
-        if enable_block_swap:
-            print("Warning: MagCache with block swapping not tested. Proceed with caution.")
         mag_ratios = conf.magcache.mag_ratios
         num_steps = conf.model.num_steps
         no_cfg = False
@@ -1056,8 +1054,6 @@ def get_T2V_pipeline_with_block_swap(
     )
 
     if magcache:
-        if enable_block_swap:
-            print("Warning: MagCache with block swapping not tested. Proceed with caution.")
         mag_ratios = conf.magcache.mag_ratios
         num_steps = conf.model.num_steps
         no_cfg = False
