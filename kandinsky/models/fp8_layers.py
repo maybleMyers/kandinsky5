@@ -86,27 +86,29 @@ def should_quantize_to_fp8(key: str) -> bool:
 
 def quantize_tensor_to_fp8(
     tensor: torch.Tensor,
-    device: torch.device = None
+    device: torch.device = None,
+    return_on_cpu: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Quantize a tensor to FP8 format with per-tensor scaling.
 
     Args:
         tensor: Input tensor to quantize
-        device: Device to perform quantization on
+        device: Device to perform quantization on (for GPU acceleration)
+        return_on_cpu: If True, return tensors on CPU to save VRAM
 
     Returns:
         Tuple of (fp8_tensor, scale)
     """
     if device is None:
-        device = tensor.device
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # Move to device if needed
-    tensor = tensor.to(device)
+    # Move to GPU for fast computation
+    tensor_gpu = tensor.to(device)
 
     # Calculate scale factor (per-tensor quantization)
     # FP8 E4M3 has range ~[-448, 448]
-    amax = tensor.abs().max().float()
+    amax = tensor_gpu.abs().max().float()
     scale = amax / 448.0
 
     # Avoid division by zero
@@ -116,8 +118,15 @@ def quantize_tensor_to_fp8(
         scale = scale.to(torch.float32)
 
     # Scale and convert to FP8
-    scaled_tensor = tensor.float() / scale
+    scaled_tensor = tensor_gpu.float() / scale
     fp8_tensor = scaled_tensor.to(torch.float8_e4m3fn)
+
+    # Free GPU memory immediately
+    del tensor_gpu, scaled_tensor
+
+    if return_on_cpu:
+        fp8_tensor = fp8_tensor.cpu()
+        scale = scale.cpu()
 
     return fp8_tensor, scale
 
@@ -131,6 +140,8 @@ def optimize_state_dict_with_fp8(
 ) -> Dict[str, torch.Tensor]:
     """
     Optimize a state dict by converting eligible weights to FP8.
+
+    Processes tensors one at a time to minimize GPU memory usage.
 
     Args:
         state_dict: Model state dict to optimize
@@ -166,21 +177,19 @@ def optimize_state_dict_with_fp8(
                 should_quantize = True
 
         if should_quantize:
-            # Quantize to FP8
-            fp8_tensor, scale = quantize_tensor_to_fp8(tensor, device)
+            # Quantize to FP8 - process on GPU but return on CPU to save VRAM
+            # This way we only need GPU memory for one tensor at a time
+            fp8_tensor, scale = quantize_tensor_to_fp8(tensor, device, return_on_cpu=True)
 
             # Store FP8 weight and scale with modified keys
             base_key = key[:-7]  # Remove '.weight'
-            optimized_dict[f"{base_key}.weight_fp8"] = fp8_tensor if move_to_device else fp8_tensor.cpu()
-            optimized_dict[f"{base_key}.weight_scale"] = scale if move_to_device else scale.cpu()
+            optimized_dict[f"{base_key}.weight_fp8"] = fp8_tensor
+            optimized_dict[f"{base_key}.weight_scale"] = scale
 
             num_quantized += 1
         else:
-            # Keep original tensor
-            if move_to_device:
-                optimized_dict[key] = tensor.to(device)
-            else:
-                optimized_dict[key] = tensor
+            # Keep original tensor on CPU
+            optimized_dict[key] = tensor
             num_skipped += 1
 
     print(f"FP8 optimization: {num_quantized} weights quantized, {num_skipped} kept in original precision")
@@ -426,14 +435,15 @@ def fp8_optimization(
     Optimize the model with FP8 quantization.
 
     This is the main entry point for FP8 optimization. It:
-    1. Converts eligible weights to FP8 format
-    2. Applies monkey patching to use scaled_mm
+    1. Converts eligible weights to FP8 format (one tensor at a time on GPU)
+    2. Loads the original weights into model first
+    3. Applies monkey patching to use scaled_mm with FP8 weights
 
     Args:
         model: The model to optimize
         state_dict: The state dict to load
-        device: Device for computation
-        move_to_device: Whether to keep weights on device
+        device: Device for computation (used for FP8 conversion)
+        move_to_device: Whether to keep weights on device (usually False, model moved later)
         use_scaled_mm: Whether to use torch._scaled_mm
 
     Returns:
@@ -446,16 +456,19 @@ def fp8_optimization(
 
     print(f"FP8 optimization: Converting weights to FP8 format...")
 
-    # Optimize state dict
+    # First load the original state dict into model (on CPU)
+    model.load_state_dict(state_dict, assign=True)
+
+    # Optimize state dict - process tensors one at a time on GPU, keep results on CPU
     optimized_state_dict = optimize_state_dict_with_fp8(
         state_dict,
         device,
         target_keys=FP8_TARGET_KEYS,
         exclude_keys=FP8_EXCLUDE_KEYS,
-        move_to_device=move_to_device
+        move_to_device=False  # Always keep on CPU, model will be moved later
     )
 
-    # Apply monkey patching
+    # Apply monkey patching to replace Linear forwards with FP8 versions
     apply_fp8_monkey_patch(model, optimized_state_dict, use_scaled_mm=use_scaled_mm)
 
     return optimized_state_dict
