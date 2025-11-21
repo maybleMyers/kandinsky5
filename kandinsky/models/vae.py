@@ -1319,7 +1319,7 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
             ht = h
             hs = h
 
-        return (1, 17, ht, wt), (hs, ws, 8)
+        return (1, 17, ht, wt), (8, hs, ws)
 
     def get_dec_optimal_tiling(
         self, shape: List[int]
