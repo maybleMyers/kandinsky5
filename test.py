@@ -1,16 +1,3 @@
-import argparse
-import time
-import warnings
-import logging
-import os
-import tempfile
-import sys
-
-import torch
-from PIL import Image
-
-# Early parse --no_compile to set the flag before importing kandinsky
-def _early_parse_no_compile():
     for i, arg in enumerate(sys.argv):
         if arg == '--no_compile':
             return True
