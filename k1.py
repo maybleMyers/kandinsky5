@@ -1073,7 +1073,7 @@ def create_interface():
                                 label="Latest Preview", height=300,
                                 interactive=False, elem_id="k1_preview_video"
                             )
-                        stop_decode_btn = gr.Button("Stop & Decode", elem_classes="light-blue-btn")
+                        stop_decode_btn = gr.Button("Stop & Decode", elem_classes="light-blue-btn", visible=False)
                         stop_save_btn = gr.Button("Stop & Save Latents", elem_classes="light-blue-btn")
                         checkpoint_file = gr.Textbox(
                             label="Checkpoint File (for resume)",
