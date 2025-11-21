@@ -103,6 +103,7 @@ def generate_video(
     vae_spatial_tile_height: int,
     vae_spatial_tile_width: int,
     use_prompt_expansion: bool,
+    clip_prompt: str,
 ) -> Generator[Tuple[List[Tuple[str, str]], Optional[str], str, str], None, None]:
     global stop_event, current_process, current_output_filename
     stop_event.clear()
@@ -243,6 +244,10 @@ def generate_video(
 
         # Add expand_prompt parameter
         command.extend(["--expand_prompt", "1" if use_prompt_expansion else "0"])
+
+        # Add clip_prompt if provided
+        if clip_prompt and clip_prompt.strip():
+            command.extend(["--clip_prompt", clip_prompt.strip()])
 
         # Print the command for debugging/transparency
         print("\n" + "="*80)
@@ -937,6 +942,21 @@ def create_interface():
                         progress_text = gr.Textbox(label="Progress", interactive=False, value="")
 
                 with gr.Row():
+                    with gr.Column(scale=4):
+                        clip_prompt = gr.Textbox(
+                            label="CLIP Prompt (Optional)",
+                            placeholder="Leave empty to use main prompt for CLIP. Enter custom text to use a separate prompt for global conditioning.",
+                            lines=2,
+                            info="Separate prompt for CLIP encoder (77 token max). Controls global style/mood."
+                        )
+                    with gr.Column(scale=1):
+                        clip_token_count = gr.Textbox(
+                            label="CLIP Tokens",
+                            value="0",
+                            interactive=False
+                        )
+
+                with gr.Row():
                     generate_btn = gr.Button("Generate Video", elem_classes="green-btn")
                     stop_btn = gr.Button("Stop Generation", variant="stop")
 
@@ -1139,6 +1159,13 @@ def create_interface():
                     outputs=[token_count_display]
                 )
 
+                # CLIP token count update
+                clip_prompt.change(
+                    fn=lambda text: str(count_tokens(text)) if text else "0",
+                    inputs=[clip_prompt],
+                    outputs=[clip_token_count]
+                )
+
                 # Resolution control event handlers
                 input_image.change(
                     fn=update_image_dimensions,
@@ -1177,7 +1204,7 @@ def create_interface():
                         enable_preview, preview_steps,
                         enable_vae_chunking, vae_temporal_tile_frames, vae_temporal_stride_frames,
                         vae_spatial_tile_height, vae_spatial_tile_width,
-                        use_prompt_expansion
+                        use_prompt_expansion, clip_prompt
                     ],
                     outputs=[output, preview_output, batch_progress, progress_text]
                 )

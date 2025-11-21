@@ -135,6 +135,12 @@ def parse_args():
         help="Negative prompt for classifier-free guidance"
     )
     parser.add_argument(
+        "--clip_prompt",
+        type=str,
+        default=None,
+        help="Separate prompt for CLIP encoder (if not provided, uses main prompt)"
+    )
+    parser.add_argument(
         "--width",
         type=int,
         default=768,
@@ -680,6 +686,7 @@ if __name__ == "__main__":
                  guidance_weight=args.guidance_weight,
                  scheduler_scale=args.scheduler_scale,
                  expand_prompts=args.expand_prompt,
+                 clip_prompt=args.clip_prompt,
                  save_path=args.output_filename,
                  seed=args.seed,
                  preview=args.preview,
@@ -695,6 +702,7 @@ if __name__ == "__main__":
              guidance_weight=args.guidance_weight,
              scheduler_scale=args.scheduler_scale,
              expand_prompts=args.expand_prompt,
+             clip_prompt=args.clip_prompt,
              save_path=args.output_filename,
              seed=args.seed,
              preview=args.preview,

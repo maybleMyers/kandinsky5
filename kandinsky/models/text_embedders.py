@@ -217,9 +217,11 @@ class Kandinsky5TextEmbedder:
         self.clip_embedder = ClipTextEmbedder(conf.clip, device, dtype)
         self.conf = conf
 
-    def encode(self, texts, images=None, type_of_content="image"):
+    def encode(self, texts, images=None, type_of_content="image", clip_texts=None):
         text_embeds, cu_seqlens, attention_mask = self.embedder(texts, images=images, type_of_content=type_of_content)
-        pooled_embed = self.clip_embedder(texts)
+        # Use separate clip_texts if provided, otherwise use main texts
+        clip_input = clip_texts if clip_texts is not None else texts
+        pooled_embed = self.clip_embedder(clip_input)
         return {"text_embeds": text_embeds, "pooled_embed": pooled_embed}, cu_seqlens, attention_mask.to(torch.bool)
 
     def to(self, device):

@@ -301,6 +301,7 @@ def generate_sample(
     guidance_weight=5.0,
     scheduler_scale=1,
     negative_caption="",
+    clip_prompt=None,
     seed=6554,
     device="cuda",
     vae_device="cuda",
@@ -322,8 +323,10 @@ def generate_sample(
         type_of_content = "video"
 
     with torch.no_grad():
+        # Pass clip_texts if a separate clip_prompt is provided
+        clip_texts = [clip_prompt] if clip_prompt else None
         bs_text_embed, text_cu_seqlens, attention_mask = text_embedder.encode(
-            [caption], type_of_content=type_of_content
+            [caption], type_of_content=type_of_content, clip_texts=clip_texts
         )
         bs_null_text_embed, null_text_cu_seqlens, null_attention_mask = text_embedder.encode(
             [negative_caption], type_of_content=type_of_content
@@ -346,6 +349,8 @@ def generate_sample(
         bs_null_text_embed[key] = bs_null_text_embed[key].to(device=device,dtype=torch.bfloat16)
     text_cu_seqlens = text_cu_seqlens.to(device=device)[-1].item()
     null_text_cu_seqlens = null_text_cu_seqlens.to(device=device)[-1].item()
+    attention_mask = attention_mask.to(device=device)
+    null_attention_mask = null_attention_mask.to(device=device)
 
     visual_rope_pos = [
         torch.arange(duration),
@@ -482,6 +487,7 @@ def generate_sample_i2v(
     guidance_weight=5.0,
     scheduler_scale=1,
     negative_caption="",
+    clip_prompt=None,
     seed=6554,
     device="cuda",
     vae_device="cuda",
@@ -503,8 +509,10 @@ def generate_sample_i2v(
         type_of_content = "video"
 
     with torch.no_grad():
+        # Pass clip_texts if a separate clip_prompt is provided
+        clip_texts = [clip_prompt] if clip_prompt else None
         bs_text_embed, text_cu_seqlens, attention_mask = text_embedder.encode(
-            [caption], type_of_content=type_of_content
+            [caption], type_of_content=type_of_content, clip_texts=clip_texts
         )
         bs_null_text_embed, null_text_cu_seqlens, null_attention_mask = text_embedder.encode(
             [negative_caption], type_of_content=type_of_content
@@ -527,6 +535,8 @@ def generate_sample_i2v(
         bs_null_text_embed[key] = bs_null_text_embed[key].to(device=device)
     text_cu_seqlens = text_cu_seqlens.to(device=device)[-1].item()
     null_text_cu_seqlens = null_text_cu_seqlens.to(device=device)[-1].item()
+    attention_mask = attention_mask.to(device=device)
+    null_attention_mask = null_attention_mask.to(device=device)
 
     visual_rope_pos = [
         torch.arange(duration),
