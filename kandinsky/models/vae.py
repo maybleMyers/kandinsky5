@@ -1194,7 +1194,7 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
         row = []
         temporal_chunks = list(range(
             0,
-            num_frames - tile_latent_min_num_frames + 1,
+            num_frames - tile_latent_min_num_frames,
             tile_latent_stride_num_frames,
         ))
 
