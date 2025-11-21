@@ -2,16 +2,21 @@
 This will work on a 24gb gpu with like 80GB RAM used, could maybe lower duration to use less or something.  
 
 To install I would use python 3.10 and torch 2.8. Linux is much less painless for you to use.    
-python3.10 -m venv env  
-pip install torch==2.8.0+cu128 torchvision --index-url https://download.pytorch.org/whl/cu128  
-pip install -r requirements.txt   
-you need to clone the full model into the kandinsky5 folder to make it work.  
+```bash
+python3.10 -m venv env
+pip install torch==2.8.0+cu128 torchvision --index-url https://download.pytorch.org/whl/cu128
+pip install -r requirements.txt
+```
+
+you need to clone the full model into the kandinsky5 folder to make it work or edit the .yaml in configs for the model you are using.  
 git-lfs clone https://huggingface.co/kandinskylab/Kandinsky-5.0-I2V-Pro-sft-5s-Diffusers  
 
 to use the gui:  
-source env/bin/activate  (or env/scripts/activate if you are a windows powershell console)  
-python k1.py  
-open browser goto 127.0.0.1:7860
+```bash
+source env/bin/activate  # or env/scripts/activate on Windows PowerShell
+python k1.py
+```
+open browser goto 127.0.0.1:7860  
 
 I added some mixed models here: https://huggingface.co/maybleMyers/kan/  
 You can input them in the DiT Checkpoint Path in the gui.  
@@ -25,6 +30,8 @@ download https://huggingface.co/kandinskylab/Kandinsky-5.0-I2V-Lite-5s/blob/main
 
 
 Changlog:  
+  11/21/2025  
+    Add mag cache, token counter, some other bugs. You need to pip install tiktoken or reinstall requirements.    
   11/20/2025  
     Add support for fp8 scaled, disabled compile, intermediate generation saving, hd gens.  
   11/18/2025  
