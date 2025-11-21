@@ -77,12 +77,24 @@ def magcache_forward(
             self.accumulated_steps[self.cnt%2] = 0
             self.accumulated_ratio[self.cnt%2] = 1.0
 
-    if skip_forward: 
+    if skip_forward:
         visual_embed =  visual_embed + residual_visual_embed
     else:
-        for visual_transformer_block in self.visual_transformer_blocks:
+        # Check if block swapping is enabled
+        use_block_swap = hasattr(self, 'enable_block_swap') and self.enable_block_swap
+        device = visual_embed.device
+
+        for i, visual_transformer_block in enumerate(self.visual_transformer_blocks):
+            # Block swapping: ensure blocks are on GPU
+            if use_block_swap:
+                # Prefetch next block
+                if i + 1 < len(self.visual_transformer_blocks):
+                    self._ensure_block_on_gpu(i + 1, device)
+                # Ensure current block is on GPU
+                self._ensure_block_on_gpu(i, device)
+
             visual_embed = visual_transformer_block(visual_embed, text_embed, time_embed,
-                                                    visual_rope, sparse_params, attention_mask) 
+                                                    visual_rope, sparse_params, attention_mask)
         residual_visual_embed = visual_embed - ori_visual_embed
 
     self.residual_cache[self.cnt%2] = residual_visual_embed 

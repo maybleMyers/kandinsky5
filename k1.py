@@ -12,6 +12,16 @@ import threading
 import json
 import io
 from PIL import Image
+import tiktoken
+
+# Initialize tiktoken encoder for fast token counting
+enc = tiktoken.get_encoding("cl100k_base")
+
+def count_tokens(text):
+    """Count tokens in text using tiktoken."""
+    if not text:
+        return 0
+    return len(enc.encode(text))
 
 stop_event = threading.Event()
 current_process = None  # Track the currently running process
@@ -76,6 +86,7 @@ def generate_video(
     use_mixed_weights: bool,
     use_int8: bool,
     use_torch_compile: bool,
+    use_magcache: bool,
     enable_block_swap: bool,
     blocks_in_memory: int,
     dtype_str: str,
@@ -185,6 +196,8 @@ def generate_video(
             command.append("--use_int8")
         if not use_torch_compile:
             command.append("--no_compile")
+        if use_magcache:
+            command.append("--magcache")
 
         if negative_prompt:
             command.extend(["--negative_prompt", str(negative_prompt)])
@@ -307,6 +320,7 @@ def generate_video(
                     "use_mixed_weights": use_mixed_weights,
                     "use_int8": use_int8,
                     "use_torch_compile": use_torch_compile,
+                    "use_magcache": use_magcache,
                     "enable_block_swap": enable_block_swap,
                     "blocks_in_memory": int(blocks_in_memory) if enable_block_swap else None,
                     "dtype": dtype_str,
@@ -631,7 +645,7 @@ def extract_video_details(video_path: str) -> Tuple[dict, str]:
 def send_to_generation(video_path, metadata):
     """Extract first frame and map metadata to generation inputs using subprocess."""
     if not video_path:
-        return [gr.update()] * 34
+        return [gr.update()] * 35
 
     # 1. Extract First Frame as PIL Image using subprocess
     input_img_pil = None
@@ -690,6 +704,7 @@ def send_to_generation(video_path, metadata):
         get("use_mixed_weights"),       # use_mixed_weights
         get("use_int8"),                # use_int8
         get("use_torch_compile"),       # use_torch_compile
+        get("use_magcache"),            # use_magcache
         get("enable_block_swap"),       # enable_block_swap
         get_num("blocks_in_memory"),    # blocks_in_memory
         get("dtype"),                   # dtype_select
@@ -704,23 +719,23 @@ def send_to_generation(video_path, metadata):
     )
 
 def calculate_width_from_height(height, original_dims):
-    """Calculate width based on height maintaining aspect ratio (divisible by 32)"""
+    """Calculate width based on height maintaining aspect ratio (divisible by 64)"""
     if not original_dims or height is None:
         return gr.update()
     try:
-        # Ensure height is an integer and divisible by 32
+        # Ensure height is an integer and divisible by 64
         height = int(height)
         if height <= 0:
             return gr.update()
-        height = (height // 32) * 32
-        height = max(64, height)  # Min height (64 is divisible by 32)
+        height = (height // 64) * 64
+        height = max(64, height)  # Min height (64 is divisible by 64)
 
         orig_w, orig_h = map(int, original_dims.split('x'))
         if orig_h == 0:
             return gr.update()
         aspect_ratio = orig_w / orig_h
-        # Calculate new width, rounding to the nearest multiple of 32
-        new_width = round((height * aspect_ratio) / 32) * 32
+        # Calculate new width, rounding to the nearest multiple of 64
+        new_width = round((height * aspect_ratio) / 64) * 64
         return gr.update(value=max(64, new_width))  # Ensure minimum size
 
     except Exception as e:
@@ -728,23 +743,23 @@ def calculate_width_from_height(height, original_dims):
         return gr.update()
 
 def calculate_height_from_width(width, original_dims):
-    """Calculate height based on width maintaining aspect ratio (divisible by 32)"""
+    """Calculate height based on width maintaining aspect ratio (divisible by 64)"""
     if not original_dims or width is None:
         return gr.update()
     try:
-        # Ensure width is an integer and divisible by 32
+        # Ensure width is an integer and divisible by 64
         width = int(width)
         if width <= 0:
             return gr.update()
-        width = (width // 32) * 32
-        width = max(64, width)  # Min width (64 is divisible by 32)
+        width = (width // 64) * 64
+        width = max(64, width)  # Min width (64 is divisible by 64)
 
         orig_w, orig_h = map(int, original_dims.split('x'))
         if orig_w == 0:
             return gr.update()
         aspect_ratio = orig_w / orig_h
-        # Calculate new height, rounding to the nearest multiple of 32
-        new_height = round((width / aspect_ratio) / 32) * 32
+        # Calculate new height, rounding to the nearest multiple of 64
+        new_height = round((width / aspect_ratio) / 64) * 64
         return gr.update(value=max(64, new_height))  # Ensure minimum size
 
     except Exception as e:
@@ -752,7 +767,7 @@ def calculate_height_from_width(width, original_dims):
         return gr.update()
 
 def update_resolution_from_scale(scale, original_dims):
-    """Update dimensions based on scale percentage (divisible by 32)"""
+    """Update dimensions based on scale percentage (divisible by 64)"""
     if not original_dims:
         return gr.update(), gr.update()
     try:
@@ -763,12 +778,12 @@ def update_resolution_from_scale(scale, original_dims):
         orig_w, orig_h = map(int, original_dims.split('x'))
         scale_factor = scale / 100.0
 
-        # Calculate and round to the nearest multiple of 32
-        new_w = round((orig_w * scale_factor) / 32) * 32
-        new_h = round((orig_h * scale_factor) / 32) * 32
+        # Calculate and round to the nearest multiple of 64
+        new_w = round((orig_w * scale_factor) / 64) * 64
+        new_h = round((orig_h * scale_factor) / 64) * 64
 
-        # Ensure minimum size (must be multiple of 32)
-        new_w = max(64, new_w)  # 64 is divisible by 32
+        # Ensure minimum size (must be multiple of 64)
+        new_w = max(64, new_w)  # 64 is divisible by 64
         new_h = max(64, new_h)
 
         return gr.update(value=new_w), gr.update(value=new_h)
@@ -784,9 +799,9 @@ def update_image_dimensions(image_path):
         img = Image.open(image_path)
         w, h = img.size
         original_dims_str = f"{w}x{h}"
-        # Calculate dimensions snapped to nearest multiple of 32 while maintaining aspect ratio
-        new_w = round(w / 32) * 32
-        new_h = round(h / 32) * 32
+        # Calculate dimensions snapped to nearest multiple of 64 while maintaining aspect ratio
+        new_w = round(w / 64) * 64
+        new_h = round(h / 64) * 64
         new_w = max(64, new_w)
         new_h = max(64, new_h)
         return original_dims_str, gr.update(value=new_w), gr.update(value=new_h)
@@ -902,6 +917,12 @@ def create_interface():
                         )
                     with gr.Column(scale=1):
                         batch_size = gr.Number(label="Batch Count", value=1, minimum=1, step=1)
+                        token_count_display = gr.Textbox(
+                            label="Token Count",
+                            value=str(count_tokens("A cute tabby cat is eating a bowl of wasabi in a restaurant in Guangzhou. The cat is very good at using chopsticks and proceeds to eat the entire bowl of wasabi quickly with his chopsticks. The cat is wearing a white shirt with red accents and the cute tabby cat's shirt has the text 'spice kitten' on it. There is a large red sign in the background with '芥末' on it in white letters. A small red panda is drinking a beer beside the cat. The red panda is holding a large glass of dark beer and drinking it quickly. The panda tilts his head back and downs the entire glass of beer in one large gulp.")),
+                            interactive=False,
+                            scale=1
+                        )                        
                     with gr.Column(scale=2):
                         batch_progress = gr.Textbox(label="Status", interactive=False, value="")
                         progress_text = gr.Textbox(label="Progress", interactive=False, value="")
@@ -909,16 +930,6 @@ def create_interface():
                 with gr.Row():
                     generate_btn = gr.Button("Generate Video", elem_classes="green-btn")
                     stop_btn = gr.Button("Stop Generation", variant="stop")
-                    stop_decode_btn = gr.Button("Stop & Decode", elem_classes="light-blue-btn")
-                    stop_save_btn = gr.Button("Stop & Save Latents", elem_classes="light-blue-btn")
-
-                with gr.Row():
-                    checkpoint_file = gr.Textbox(
-                        label="Checkpoint File (for resume)",
-                        placeholder="Path to _checkpoint.pt file",
-                        scale=3
-                    )
-                    resume_btn = gr.Button("Resume from Checkpoint", elem_classes="light-blue-btn", scale=1)
 
                 with gr.Row():
                     with gr.Column():
@@ -1009,12 +1020,12 @@ def create_interface():
                             info="Scale the input image dimensions. Works for both i2v and t2v modes."
                         )
                         with gr.Row():
-                            width = gr.Number(label="Width", value=768, step=32, interactive=True,
-                                            info="Must be divisible by 32")
+                            width = gr.Number(label="Width", value=768, step=64, interactive=True,
+                                            info="Must be divisible by 64")
                             calc_height_btn = gr.Button("→", size="sm")
                             calc_width_btn = gr.Button("←", size="sm")
-                            height = gr.Number(label="Height", value=512, step=32, interactive=True,
-                                            info="Must be divisible by 32")
+                            height = gr.Number(label="Height", value=512, step=64, interactive=True,
+                                            info="Must be divisible by 64")
 
                         video_duration = gr.Slider(minimum=1, maximum=30, step=1, label="Video Duration (seconds)", value=5)
                         sample_steps = gr.Slider(minimum=1, maximum=100, step=1, label="Sampling Steps", value=50)
@@ -1038,12 +1049,21 @@ def create_interface():
                                 label="Latest Preview", height=300,
                                 interactive=False, elem_id="k1_preview_video"
                             )
+                        stop_decode_btn = gr.Button("Stop & Decode", elem_classes="light-blue-btn")
+                        stop_save_btn = gr.Button("Stop & Save Latents", elem_classes="light-blue-btn")
+                        checkpoint_file = gr.Textbox(
+                            label="Checkpoint File (for resume)",
+                            placeholder="Path to _checkpoint.pt file",
+                            scale=3
+                        )
+                        resume_btn = gr.Button("Resume from Checkpoint", elem_classes="light-blue-btn", scale=1)                            
 
                 with gr.Accordion("Model Settings & Performance", open=True):
                     with gr.Row():
                         use_mixed_weights = gr.Checkbox(label="Use Mixed Weights", value=False, info="Preserve fp32 for critical layers (norms, embeddings)")
                         use_int8 = gr.Checkbox(label="Use int8 matmul", value=False, info="enable int8 quantization")
                         use_torch_compile = gr.Checkbox(label="Use torch.compile", value=False, info="Slower startup (2-5 min) but faster inference")
+                        use_magcache = gr.Checkbox(label="Use MagCache", value=False, info="Skip redundant computations (50-step models only)")
                     with gr.Row():
                         enable_block_swap = gr.Checkbox(label="Enable Block Swap", value=True, info="Required for 24GB GPUs")
                         blocks_in_memory = gr.Slider(minimum=1, maximum=60, step=1, label="Blocks in Memory", value=2, info="Number of transformer blocks to keep in GPU memory")
@@ -1103,6 +1123,13 @@ def create_interface():
                     outputs=[seed]
                 )
 
+                # Token count update - real-time as user types
+                prompt.change(
+                    fn=lambda text: str(count_tokens(text)),
+                    inputs=[prompt],
+                    outputs=[token_count_display]
+                )
+
                 # Resolution control event handlers
                 input_image.change(
                     fn=update_image_dimensions,
@@ -1135,7 +1162,7 @@ def create_interface():
                         attention_type, nabla_P, nabla_wT, nabla_wW, nabla_wH,
                         width, height, video_duration, sample_steps,
                         guidance_weight, scheduler_scale, seed,
-                        use_mixed_weights, use_int8, use_torch_compile, enable_block_swap, blocks_in_memory, dtype_select,
+                        use_mixed_weights, use_int8, use_torch_compile, use_magcache, enable_block_swap, blocks_in_memory, dtype_select,
                         text_encoder_dtype_select, vae_dtype_select, computation_dtype_select,
                         save_path, batch_size,
                         enable_preview, preview_steps,
@@ -1214,17 +1241,18 @@ def create_interface():
                         use_mixed_weights,          # 21
                         use_int8,                   # 22
                         use_torch_compile,          # 23
-                        enable_block_swap,          # 24
-                        blocks_in_memory,           # 25
-                        dtype_select,               # 26
-                        text_encoder_dtype_select,  # 27
-                        vae_dtype_select,           # 28
-                        computation_dtype_select,   # 29
-                        enable_vae_chunking,        # 30
-                        vae_temporal_tile_frames,   # 31
-                        vae_temporal_stride_frames, # 32
-                        vae_spatial_tile_height,    # 33
-                        vae_spatial_tile_width      # 34
+                        use_magcache,               # 24
+                        enable_block_swap,          # 25
+                        blocks_in_memory,           # 26
+                        dtype_select,               # 27
+                        text_encoder_dtype_select,  # 28
+                        vae_dtype_select,           # 29
+                        computation_dtype_select,   # 30
+                        enable_vae_chunking,        # 31
+                        vae_temporal_tile_frames,   # 32
+                        vae_temporal_stride_frames, # 33
+                        vae_spatial_tile_height,    # 34
+                        vae_spatial_tile_width      # 35
                     ]
                 )
 

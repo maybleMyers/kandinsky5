@@ -16,7 +16,7 @@ open browser goto 127.0.0.1:7860
 I added some mixed models here: https://huggingface.co/maybleMyers/kan/  
 You can input them in the DiT Checkpoint Path in the gui.  
 
-Windows install is hard, I would recommend activating linux before trying to run.  
+Windows install is hard, I would recommend activating linux before trying to run, someone said triton-windows 3.3.1 works.  
 
 I added support to save latents and continue from saved latents checkpoint because some of the hd generations take a long time.  
 

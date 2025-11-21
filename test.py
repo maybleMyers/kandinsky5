@@ -23,7 +23,7 @@ compile_config.USE_TORCH_COMPILE = not _no_compile
 if _no_compile:
     print("torch.compile() disabled for faster startup")
 
-from kandinsky import get_T2V_pipeline, get_I2V_pipeline, get_I2V_pipeline_with_block_swap, get_T2V_pipeline_with_block_swap
+from kandinsky import get_T2V_pipeline, get_I2V_pipeline, get_I2V_pipeline_with_block_swap, get_T2V_pipeline_with_block_swap, get_T2I_pipeline
 from kandinsky.generation_utils import generate_sample_from_checkpoint, generate_sample_i2v_from_checkpoint
 
 try:
@@ -428,10 +428,22 @@ if __name__ == "__main__":
             })
 
     # Determine model type from config filename
+    is_t2i = "t2i" in args.config.lower()
     is_i2v = "i2v" in args.config.lower()
     is_t2v_pro = "t2v" in args.config.lower() and ("pro" in args.config.lower() or "20b" in args.config.lower())
 
-    if is_i2v:
+    if is_t2i:
+        # Use T2I pipeline for text-to-image generation
+        pipe = get_T2I_pipeline(
+            device_map={"dit": "cuda:0", "vae": "cuda:0",
+                        "text_embedder": "cuda:0"},
+            conf_path=args.config,
+            offload=args.offload,
+            magcache=args.magcache,
+            quantized_qwen=args.qwen_quantization,
+            attention_engine=args.attention_engine,
+        )
+    elif is_i2v:
         if args.enable_block_swap:
             # Use block swapping pipeline for large I2V models
             pipe = get_I2V_pipeline_with_block_swap(
@@ -540,12 +552,21 @@ if __name__ == "__main__":
             )
 
     if args.output_filename is None:
-        args.output_filename = "./" + args.prompt.replace(" ", "_") + ".mp4"
+        # Determine file extension based on generation mode
+        if is_t2i:
+            ext = ".png"
+        else:
+            ext = ".mp4"
+        args.output_filename = "./" + args.prompt.replace(" ", "_") + ext
 
     # Set up file-based signal checking for early stop
     stop_decode_file = args.output_filename + ".stop_decode"
     stop_save_file = args.output_filename + ".stop_save"
-    checkpoint_file = args.output_filename.replace(".mp4", "_checkpoint.pt")
+    # Checkpoint file handling for both image and video outputs
+    if args.output_filename.endswith(".png"):
+        checkpoint_file = args.output_filename.replace(".png", "_checkpoint.pt")
+    else:
+        checkpoint_file = args.output_filename.replace(".mp4", "_checkpoint.pt")
 
     def check_stop_signals():
         """Check for stop signal files and return action if found."""
@@ -634,6 +655,17 @@ if __name__ == "__main__":
             traceback.print_exc()
             raise
 
+    elif is_t2i:
+        # Text-to-Image generation
+        x = pipe(args.prompt,
+                 width=args.width,
+                 height=args.height,
+                 num_steps=args.sample_steps,
+                 guidance_weight=args.guidance_weight,
+                 scheduler_scale=args.scheduler_scale,
+                 expand_prompts=args.expand_prompt,
+                 save_path=args.output_filename,
+                 seed=args.seed)
     elif is_i2v:
         image_to_use = args.image
         if args.width and args.height:
@@ -674,7 +706,8 @@ if __name__ == "__main__":
 
     if x is None:
         print(f">>> Checkpoint saved to {checkpoint_file}")
-        print(f">>> No video generated (latents saved for later)")
+        print(f">>> No output generated (latents saved for later)")
     else:
-        print(f"Generated video is saved to {args.output_filename}")
+        output_type = "image" if is_t2i else "video"
+        print(f"Generated {output_type} is saved to {args.output_filename}")
     

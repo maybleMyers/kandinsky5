@@ -219,6 +219,9 @@ def generate(
     g.manual_seed(seed)
     img = torch.randn(*shape, device=device, generator=g)
 
+    # Store original noise for early-stop decode
+    original_noise = img.clone()
+
     sparse_params = get_sparse_params(conf, {"visual": img}, device)
     timesteps = torch.linspace(1, 0, num_steps + 1, device=device)
     timesteps = scheduler_scale * timesteps / (1 + (scheduler_scale - 1) * timesteps)
@@ -259,7 +262,14 @@ def generate(
             action = stop_check()
             if action in ("decode", "save"):
                 print(f"\n>>> Early stop requested at step {i + 1}/{num_steps} - action: {action}", flush=True)
-                return {"action": action, "latents": img, "step": i + 1, "total_steps": num_steps}
+                return {
+                    "action": action,
+                    "latents": img,
+                    "step": i + 1,
+                    "total_steps": num_steps,
+                    "original_noise": original_noise,
+                    "timesteps": timesteps
+                }
 
         if previewer is not None and preview_interval and (i + 1) % preview_interval == 0 and (i + 1) < num_steps:
             import sys
@@ -383,6 +393,8 @@ def generate_sample(
         latent_visual = result["latents"]
         step = result["step"]
         total_steps = result["total_steps"]
+        original_noise = result.get("original_noise")
+        timesteps = result.get("timesteps")
 
         if action == "save" and checkpoint_path:
             # Save checkpoint for later resumption
@@ -404,8 +416,16 @@ def generate_sample(
             print(f">>> Checkpoint saved to {checkpoint_path} at step {step}/{total_steps}", flush=True)
             return None  # Signal that we saved instead of decoding
 
-        # For "decode" action, continue with the current latents
+        # For "decode" action, subtract remaining noise before decoding
         print(f">>> Decoding video from step {step}/{total_steps}", flush=True)
+
+        # Subtract remaining noise (like preview does) to get clean latents
+        if original_noise is not None and timesteps is not None:
+            # timesteps[step] gives the noise level at the current step
+            # We need to subtract this portion of the original noise
+            noise_remaining = timesteps[step]
+            latent_visual = latent_visual - (original_noise * noise_remaining)
+            print(f">>> Subtracted {noise_remaining.item():.4f} of original noise", flush=True)
     else:
         latent_visual = result
 
@@ -557,6 +577,8 @@ def generate_sample_i2v(
         latent_visual = result["latents"]
         step = result["step"]
         total_steps = result["total_steps"]
+        original_noise = result.get("original_noise")
+        timesteps = result.get("timesteps")
 
         if action == "save" and checkpoint_path:
             # Save checkpoint for later resumption
@@ -580,8 +602,16 @@ def generate_sample_i2v(
             print(f">>> Checkpoint saved to {checkpoint_path} at step {step}/{total_steps}", flush=True)
             return None  # Signal that we saved instead of decoding
 
-        # For "decode" action, continue with the current latents
+        # For "decode" action, subtract remaining noise before decoding
         print(f">>> Decoding video from step {step}/{total_steps}", flush=True)
+
+        # Subtract remaining noise (like preview does) to get clean latents
+        if original_noise is not None and timesteps is not None:
+            # timesteps[step] gives the noise level at the current step
+            # We need to subtract this portion of the original noise
+            noise_remaining = timesteps[step]
+            latent_visual = latent_visual - (original_noise * noise_remaining)
+            print(f">>> Subtracted {noise_remaining.item():.4f} of original noise", flush=True)
     else:
         latent_visual = result
 
@@ -737,7 +767,16 @@ def generate_resume(
             action = stop_check()
             if action in ("decode", "save"):
                 print(f"\n>>> Early stop requested at step {actual_step + 1}/{num_steps} - action: {action}", flush=True)
-                return {"action": action, "latents": img, "step": actual_step + 1, "total_steps": num_steps}
+                # Note: original_noise not available for resumed generation
+                # Noise subtraction won't work for early-stop decode from checkpoints
+                return {
+                    "action": action,
+                    "latents": img,
+                    "step": actual_step + 1,
+                    "total_steps": num_steps,
+                    "original_noise": None,
+                    "timesteps": timesteps
+                }
 
         if previewer is not None and preview_interval and (actual_step + 1) % preview_interval == 0 and (actual_step + 1) < num_steps:
             import sys
