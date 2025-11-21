@@ -12,6 +12,16 @@ import threading
 import json
 import io
 from PIL import Image
+import tiktoken
+
+# Initialize tiktoken encoder for fast token counting
+enc = tiktoken.get_encoding("cl100k_base")
+
+def count_tokens(text):
+    """Count tokens in text using tiktoken."""
+    if not text:
+        return 0
+    return len(enc.encode(text))
 
 stop_event = threading.Event()
 current_process = None  # Track the currently running process
@@ -899,6 +909,12 @@ def create_interface():
                             value="A cute tabby cat is eating a bowl of wasabi in a restaurant in Guangzhou. The cat is very good at using chopsticks and proceeds to eat the entire bowl of wasabi quickly with his chopsticks. The cat is wearing a white shirt with red accents and the cute tabby cat's shirt has the text 'spice kitten' on it. There is a large red sign in the background with '芥末' on it in white letters. A small red panda is drinking a beer beside the cat. The red panda is holding a large glass of dark beer and drinking it quickly. The panda tilts his head back and downs the entire glass of beer in one large gulp.",
                             lines=5
                         )
+                        token_count_display = gr.Textbox(
+                            label="Token Count",
+                            value=str(count_tokens("A cute tabby cat is eating a bowl of wasabi in a restaurant in Guangzhou. The cat is very good at using chopsticks and proceeds to eat the entire bowl of wasabi quickly with his chopsticks. The cat is wearing a white shirt with red accents and the cute tabby cat's shirt has the text 'spice kitten' on it. There is a large red sign in the background with '芥末' on it in white letters. A small red panda is drinking a beer beside the cat. The red panda is holding a large glass of dark beer and drinking it quickly. The panda tilts his head back and downs the entire glass of beer in one large gulp.")),
+                            interactive=False,
+                            scale=1
+                        )
                         negative_prompt = gr.Textbox(
                             scale=3,
                             label="Negative Prompt",
@@ -1105,6 +1121,13 @@ def create_interface():
                 random_seed_btn.click(
                     fn=lambda: (-1),
                     outputs=[seed]
+                )
+
+                # Token count update - real-time as user types
+                prompt.change(
+                    fn=lambda text: str(count_tokens(text)),
+                    inputs=[prompt],
+                    outputs=[token_count_display]
                 )
 
                 # Resolution control event handlers
