@@ -15,7 +15,8 @@
 In this repository, we provide a family of diffusion models to generate a video or an image given a textual prompt and/or image.
 
 
-https://github.com/user-attachments/assets/f511c337-59ba-4f85-8fe9-cf90523ae97f
+
+https://github.com/user-attachments/assets/b06f56de-1b05-4def-a611-1a3159ed71b0
 
 
 
@@ -781,5 +782,6 @@ We gratefully acknowledge the open-source projects and research that made Kandin
 - [ComfyUI](https://github.com/comfyanonymous/ComfyUI) — for integration into node-based workflows.  
 
 We deeply appreciate the contributions of these communities and researchers to the open-source ecosystem.
+
 
 
