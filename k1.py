@@ -920,7 +920,7 @@ def create_interface():
                         )
                         clip_prompt = gr.Textbox(
                             label="CLIP Prompt (Optional max 77 tokens)",
-                            placeholder="Leave empty to use main prompt for CLIP. Enter custom text to use a separate prompt for global conditioning.",
+                            placeholder="Leave empty to use processed main prompt for CLIP. Enter custom text to use a separate prompt for global conditioning.",
                             lines=2,
                         )                                                
                         negative_prompt = gr.Textbox(
