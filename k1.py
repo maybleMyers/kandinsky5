@@ -102,6 +102,7 @@ def generate_video(
     vae_temporal_stride_frames: int,
     vae_spatial_tile_height: int,
     vae_spatial_tile_width: int,
+    use_prompt_expansion: bool,
 ) -> Generator[Tuple[List[Tuple[str, str]], Optional[str], str, str], None, None]:
     global stop_event, current_process, current_output_filename
     stop_event.clear()
@@ -239,6 +240,9 @@ def generate_video(
                 command.extend(["--vae_spatial_tile_height", str(int(vae_spatial_tile_height))])
             if vae_spatial_tile_width and vae_spatial_tile_width > 0:
                 command.extend(["--vae_spatial_tile_width", str(int(vae_spatial_tile_width))])
+
+        # Add expand_prompt parameter
+        command.extend(["--expand_prompt", "1" if use_prompt_expansion else "0"])
 
         # Print the command for debugging/transparency
         print("\n" + "="*80)
@@ -922,7 +926,12 @@ def create_interface():
                             value=str(count_tokens("A cute tabby cat is eating a bowl of wasabi in a restaurant in Guangzhou. The cat is very good at using chopsticks and proceeds to eat the entire bowl of wasabi quickly with his chopsticks. The cat is wearing a white shirt with red accents and the cute tabby cat's shirt has the text 'spice kitten' on it. There is a large red sign in the background with '芥末' on it in white letters. A small red panda is drinking a beer beside the cat. The red panda is holding a large glass of dark beer and drinking it quickly. The panda tilts his head back and downs the entire glass of beer in one large gulp.")),
                             interactive=False,
                             scale=1
-                        )                        
+                        )
+                        use_prompt_expansion = gr.Checkbox(
+                            label="Use Prompt Expansion",
+                            value=True,
+                            info="Expand prompt using Qwen 2.5 VL"
+                        )
                     with gr.Column(scale=2):
                         batch_progress = gr.Textbox(label="Status", interactive=False, value="")
                         progress_text = gr.Textbox(label="Progress", interactive=False, value="")
@@ -1167,7 +1176,8 @@ def create_interface():
                         save_path, batch_size,
                         enable_preview, preview_steps,
                         enable_vae_chunking, vae_temporal_tile_frames, vae_temporal_stride_frames,
-                        vae_spatial_tile_height, vae_spatial_tile_width
+                        vae_spatial_tile_height, vae_spatial_tile_width,
+                        use_prompt_expansion
                     ],
                     outputs=[output, preview_output, batch_progress, progress_text]
                 )

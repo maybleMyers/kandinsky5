@@ -33,6 +33,16 @@ class ClipTextEmbedder:
             return_tensors="pt",
         ).to(self.model.device)
 
+        # Print CLIP tokenization info
+        print("\n" + "="*80)
+        print("CLIP TOKENIZATION (max 77 tokens):")
+        print("="*80)
+        truncated_text = self.tokenizer.decode(inputs.input_ids[0], skip_special_tokens=True)
+        token_count = (inputs.input_ids[0] != self.tokenizer.pad_token_id).sum().item()
+        print(f"Token count: {token_count}")
+        print(f"Truncated text: {truncated_text}")
+        print("="*80 + "\n")
+
         with torch.no_grad():
             pooled_embed = self.model(**inputs)["pooler_output"]
         return pooled_embed
