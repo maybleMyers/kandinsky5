@@ -709,23 +709,23 @@ def send_to_generation(video_path, metadata):
     )
 
 def calculate_width_from_height(height, original_dims):
-    """Calculate width based on height maintaining aspect ratio (divisible by 32)"""
+    """Calculate width based on height maintaining aspect ratio (divisible by 64)"""
     if not original_dims or height is None:
         return gr.update()
     try:
-        # Ensure height is an integer and divisible by 32
+        # Ensure height is an integer and divisible by 64
         height = int(height)
         if height <= 0:
             return gr.update()
-        height = (height // 32) * 32
-        height = max(64, height)  # Min height (64 is divisible by 32)
+        height = (height // 64) * 64
+        height = max(64, height)  # Min height (64 is divisible by 64)
 
         orig_w, orig_h = map(int, original_dims.split('x'))
         if orig_h == 0:
             return gr.update()
         aspect_ratio = orig_w / orig_h
-        # Calculate new width, rounding to the nearest multiple of 32
-        new_width = round((height * aspect_ratio) / 32) * 32
+        # Calculate new width, rounding to the nearest multiple of 64
+        new_width = round((height * aspect_ratio) / 64) * 64
         return gr.update(value=max(64, new_width))  # Ensure minimum size
 
     except Exception as e:
@@ -733,23 +733,23 @@ def calculate_width_from_height(height, original_dims):
         return gr.update()
 
 def calculate_height_from_width(width, original_dims):
-    """Calculate height based on width maintaining aspect ratio (divisible by 32)"""
+    """Calculate height based on width maintaining aspect ratio (divisible by 64)"""
     if not original_dims or width is None:
         return gr.update()
     try:
-        # Ensure width is an integer and divisible by 32
+        # Ensure width is an integer and divisible by 64
         width = int(width)
         if width <= 0:
             return gr.update()
-        width = (width // 32) * 32
-        width = max(64, width)  # Min width (64 is divisible by 32)
+        width = (width // 64) * 64
+        width = max(64, width)  # Min width (64 is divisible by 64)
 
         orig_w, orig_h = map(int, original_dims.split('x'))
         if orig_w == 0:
             return gr.update()
         aspect_ratio = orig_w / orig_h
-        # Calculate new height, rounding to the nearest multiple of 32
-        new_height = round((width / aspect_ratio) / 32) * 32
+        # Calculate new height, rounding to the nearest multiple of 64
+        new_height = round((width / aspect_ratio) / 64) * 64
         return gr.update(value=max(64, new_height))  # Ensure minimum size
 
     except Exception as e:
@@ -757,7 +757,7 @@ def calculate_height_from_width(width, original_dims):
         return gr.update()
 
 def update_resolution_from_scale(scale, original_dims):
-    """Update dimensions based on scale percentage (divisible by 32)"""
+    """Update dimensions based on scale percentage (divisible by 64)"""
     if not original_dims:
         return gr.update(), gr.update()
     try:
@@ -768,12 +768,12 @@ def update_resolution_from_scale(scale, original_dims):
         orig_w, orig_h = map(int, original_dims.split('x'))
         scale_factor = scale / 100.0
 
-        # Calculate and round to the nearest multiple of 32
-        new_w = round((orig_w * scale_factor) / 32) * 32
-        new_h = round((orig_h * scale_factor) / 32) * 32
+        # Calculate and round to the nearest multiple of 64
+        new_w = round((orig_w * scale_factor) / 64) * 64
+        new_h = round((orig_h * scale_factor) / 64) * 64
 
-        # Ensure minimum size (must be multiple of 32)
-        new_w = max(64, new_w)  # 64 is divisible by 32
+        # Ensure minimum size (must be multiple of 64)
+        new_w = max(64, new_w)  # 64 is divisible by 64
         new_h = max(64, new_h)
 
         return gr.update(value=new_w), gr.update(value=new_h)
@@ -789,9 +789,9 @@ def update_image_dimensions(image_path):
         img = Image.open(image_path)
         w, h = img.size
         original_dims_str = f"{w}x{h}"
-        # Calculate dimensions snapped to nearest multiple of 32 while maintaining aspect ratio
-        new_w = round(w / 32) * 32
-        new_h = round(h / 32) * 32
+        # Calculate dimensions snapped to nearest multiple of 64 while maintaining aspect ratio
+        new_w = round(w / 64) * 64
+        new_h = round(h / 64) * 64
         new_w = max(64, new_w)
         new_h = max(64, new_h)
         return original_dims_str, gr.update(value=new_w), gr.update(value=new_h)
@@ -914,16 +914,6 @@ def create_interface():
                 with gr.Row():
                     generate_btn = gr.Button("Generate Video", elem_classes="green-btn")
                     stop_btn = gr.Button("Stop Generation", variant="stop")
-                    stop_decode_btn = gr.Button("Stop & Decode", elem_classes="light-blue-btn")
-                    stop_save_btn = gr.Button("Stop & Save Latents", elem_classes="light-blue-btn")
-
-                with gr.Row():
-                    checkpoint_file = gr.Textbox(
-                        label="Checkpoint File (for resume)",
-                        placeholder="Path to _checkpoint.pt file",
-                        scale=3
-                    )
-                    resume_btn = gr.Button("Resume from Checkpoint", elem_classes="light-blue-btn", scale=1)
 
                 with gr.Row():
                     with gr.Column():
@@ -1014,12 +1004,12 @@ def create_interface():
                             info="Scale the input image dimensions. Works for both i2v and t2v modes."
                         )
                         with gr.Row():
-                            width = gr.Number(label="Width", value=768, step=32, interactive=True,
-                                            info="Must be divisible by 32")
+                            width = gr.Number(label="Width", value=768, step=64, interactive=True,
+                                            info="Must be divisible by 64")
                             calc_height_btn = gr.Button("→", size="sm")
                             calc_width_btn = gr.Button("←", size="sm")
-                            height = gr.Number(label="Height", value=512, step=32, interactive=True,
-                                            info="Must be divisible by 32")
+                            height = gr.Number(label="Height", value=512, step=64, interactive=True,
+                                            info="Must be divisible by 64")
 
                         video_duration = gr.Slider(minimum=1, maximum=30, step=1, label="Video Duration (seconds)", value=5)
                         sample_steps = gr.Slider(minimum=1, maximum=100, step=1, label="Sampling Steps", value=50)
@@ -1043,6 +1033,14 @@ def create_interface():
                                 label="Latest Preview", height=300,
                                 interactive=False, elem_id="k1_preview_video"
                             )
+                        stop_decode_btn = gr.Button("Stop & Decode", elem_classes="light-blue-btn")
+                        stop_save_btn = gr.Button("Stop & Save Latents", elem_classes="light-blue-btn")
+                        checkpoint_file = gr.Textbox(
+                            label="Checkpoint File (for resume)",
+                            placeholder="Path to _checkpoint.pt file",
+                            scale=3
+                        )
+                        resume_btn = gr.Button("Resume from Checkpoint", elem_classes="light-blue-btn", scale=1)                            
 
                 with gr.Accordion("Model Settings & Performance", open=True):
                     with gr.Row():
