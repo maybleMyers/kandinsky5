@@ -1,13 +1,3 @@
-import argparse
-import time
-try:
-    from scripts.latentpreviewer import LatentPreviewer
-except ImportError:
-    LatentPreviewer = None
-
-
-
-def disable_warnings():
     warnings.filterwarnings("ignore")
     logging.getLogger("torch").setLevel(logging.ERROR)
     torch._logging.set_logs(
