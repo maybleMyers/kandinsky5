@@ -716,6 +716,9 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
 
         # Track if manual tile sizes were set (to prevent automatic overriding)
         self.use_manual_tiling = False
+        # Store original manual values (to survive encode corruption)
+        self._manual_tile_sample_min_num_frames = None
+        self._manual_tile_sample_stride_num_frames = None
 
     def _encode(self, x: torch.Tensor) -> torch.Tensor:
         _, _, num_frames, height, width = x.shape
@@ -1329,12 +1332,14 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
         If manual tiling is set, respects those settings.
         Otherwise, adaptively calculates based on resolution and available memory.
         """
-        # If manual tiling is enabled, use current settings
+        # If manual tiling is enabled, use stored original values (not potentially corrupted current values)
         if self.use_manual_tiling:
+            min_frames = self._manual_tile_sample_min_num_frames if self._manual_tile_sample_min_num_frames is not None else self.tile_sample_min_num_frames
+            stride_frames = self._manual_tile_sample_stride_num_frames if self._manual_tile_sample_stride_num_frames is not None else self.tile_sample_stride_num_frames
             return (
-                (1, self.tile_sample_min_num_frames + 1,
+                (1, min_frames + 1,
                  self.tile_sample_min_height, self.tile_sample_min_width),
-                (self.tile_sample_stride_num_frames,
+                (stride_frames,
                  self.tile_sample_stride_height, self.tile_sample_stride_width)
             )
 
@@ -1485,6 +1490,9 @@ def build_vae(
         # Enable manual tiling flag if any manual settings were provided
         if has_manual_settings:
             vae.use_manual_tiling = True
+            # Store original manual values (to survive encode corruption)
+            vae._manual_tile_sample_min_num_frames = vae.tile_sample_min_num_frames
+            vae._manual_tile_sample_stride_num_frames = vae.tile_sample_stride_num_frames
             print(f"VAE Manual Tiling Enabled:")
             print(f"  Temporal: {vae.tile_sample_min_num_frames} frames (stride: {vae.tile_sample_stride_num_frames})")
             print(f"  Spatial: {vae.tile_sample_min_height}x{vae.tile_sample_min_width} pixels (stride: {vae.tile_sample_stride_height}x{vae.tile_sample_stride_width})")
