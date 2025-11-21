@@ -1,39 +1,5 @@
 import argparse
 import time
-import warnings
-import logging
-import os
-import tempfile
-import sys
-
-# Mock triton on Windows if cl.exe is missing to prevent bitsandbytes/diffusers crash
-if sys.platform == "win32":
-    import shutil
-    if shutil.which("cl.exe") is None:
-        from unittest.mock import MagicMock
-        sys.modules["triton"] = MagicMock()
-        print("WARNING: Triton mocked to bypass missing cl.exe (C++ compiler).")
-
-import torch
-from PIL import Image
-
-# Early parse --no_compile to set the flag before importing kandinsky
-def _early_parse_no_compile():
-    for i, arg in enumerate(sys.argv):
-        if arg == '--no_compile':
-            return True
-    return False
-
-# Set global compile flag before importing kandinsky modules
-import kandinsky.models.compile_config as compile_config
-_no_compile = _early_parse_no_compile()
-compile_config.USE_TORCH_COMPILE = not _no_compile
-if _no_compile:
-    print("torch.compile() disabled for faster startup")
-
-from kandinsky import get_T2V_pipeline, get_I2V_pipeline, get_I2V_pipeline_with_block_swap, get_T2V_pipeline_with_block_swap, get_T2I_pipeline
-from kandinsky.generation_utils import generate_sample_from_checkpoint, generate_sample_i2v_from_checkpoint
-
 try:
     from scripts.latentpreviewer import LatentPreviewer
 except ImportError:
