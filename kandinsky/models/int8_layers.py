@@ -21,7 +21,7 @@ try:
 
     from int8_matmul import act_quant, weight_dequant, int8_gemm
     TRITON_AVAILABLE = True
-except ImportError as e:
+except Exception as e:
     TRITON_AVAILABLE = False
     warnings.warn(f"Triton INT8 kernels not available: {e}. INT8 layers will fall back to standard precision.")
 
