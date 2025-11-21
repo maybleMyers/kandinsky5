@@ -12,7 +12,7 @@ python k1.py
 
 you need to clone the full model into the kandinsky5 folder to make it work or edit the .yaml in configs for the model you are using.  
 ```bash
-git-lfs clone https://huggingface.co/kandinskylab/Kandinsky-5.0-I2V-Pro-sft-5s-Diffusers  
+git-lfs clone https://huggingface.co/kandinskylab/Kandinsky-5.0-I2V-Pro-sft-5s-Diffusers
 ```
   
 to use the gui:  

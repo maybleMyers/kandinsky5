@@ -195,6 +195,7 @@ class Kandinsky5I2VPipeline:
         scheduler_scale: float = 10.0,
         negative_caption: str = "Static, 2D cartoon, cartoon, 2d animation, paintings, images, worst quality, low quality, ugly, deformed, walking backwards",
         expand_prompts: bool = True,
+        clip_prompt: str = None,
         save_path: str = None,
         progress: bool = True,
         preview: int = None,
@@ -257,6 +258,11 @@ class Kandinsky5I2VPipeline:
                 if self.offload or force_offload:
                     self.text_embedder = self.text_embedder.to(self.device_map["text_embedder"])
                 caption = self.text_embedder.embedder.expand_text_prompt(caption, image, device=self.device_map["text_embedder"])
+                print("\n" + "="*80)
+                print("EXPANDED QWEN 2.5 PROMPT:")
+                print("="*80)
+                print(caption)
+                print("="*80 + "\n")
             if self.world_size > 1:
                 caption = [caption]
                 torch.distributed.broadcast_object_list(caption, 0)
@@ -324,6 +330,7 @@ class Kandinsky5I2VPipeline:
             guidance_weight=guidance_weight,
             scheduler_scale=scheduler_scale,
             negative_caption=negative_caption,
+            clip_prompt=clip_prompt,
             seed=seed,
             device=self.device_map["dit"],
             vae_device=self.device_map["vae"],

@@ -102,6 +102,8 @@ def generate_video(
     vae_temporal_stride_frames: int,
     vae_spatial_tile_height: int,
     vae_spatial_tile_width: int,
+    use_prompt_expansion: bool,
+    clip_prompt: str,
 ) -> Generator[Tuple[List[Tuple[str, str]], Optional[str], str, str], None, None]:
     global stop_event, current_process, current_output_filename
     stop_event.clear()
@@ -239,6 +241,13 @@ def generate_video(
                 command.extend(["--vae_spatial_tile_height", str(int(vae_spatial_tile_height))])
             if vae_spatial_tile_width and vae_spatial_tile_width > 0:
                 command.extend(["--vae_spatial_tile_width", str(int(vae_spatial_tile_width))])
+
+        # Add expand_prompt parameter
+        command.extend(["--expand_prompt", "1" if use_prompt_expansion else "0"])
+
+        # Add clip_prompt if provided
+        if clip_prompt and clip_prompt.strip():
+            command.extend(["--clip_prompt", clip_prompt.strip()])
 
         # Print the command for debugging/transparency
         print("\n" + "="*80)
@@ -909,6 +918,11 @@ def create_interface():
                             value="A cute tabby cat is eating a bowl of wasabi in a restaurant in Guangzhou. The cat is very good at using chopsticks and proceeds to eat the entire bowl of wasabi quickly with his chopsticks. The cat is wearing a white shirt with red accents and the cute tabby cat's shirt has the text 'spice kitten' on it. There is a large red sign in the background with '芥末' on it in white letters. A small red panda is drinking a beer beside the cat. The red panda is holding a large glass of dark beer and drinking it quickly. The panda tilts his head back and downs the entire glass of beer in one large gulp.",
                             lines=5
                         )
+                        clip_prompt = gr.Textbox(
+                            label="CLIP Prompt (Optional max 77 tokens)",
+                            placeholder="Leave empty to use processed main prompt for CLIP. Enter custom text to use a separate prompt for global conditioning.",
+                            lines=2,
+                        )                                                
                         negative_prompt = gr.Textbox(
                             scale=3,
                             label="Negative Prompt",
@@ -918,10 +932,20 @@ def create_interface():
                     with gr.Column(scale=1):
                         batch_size = gr.Number(label="Batch Count", value=1, minimum=1, step=1)
                         token_count_display = gr.Textbox(
-                            label="Token Count",
-                            value=str(count_tokens("A cute tabby cat is eating a bowl of wasabi in a restaurant in Guangzhou. The cat is very good at using chopsticks and proceeds to eat the entire bowl of wasabi quickly with his chopsticks. The cat is wearing a white shirt with red accents and the cute tabby cat's shirt has the text 'spice kitten' on it. There is a large red sign in the background with '芥末' on it in white letters. A small red panda is drinking a beer beside the cat. The red panda is holding a large glass of dark beer and drinking it quickly. The panda tilts his head back and downs the entire glass of beer in one large gulp.")),
+                            label="Prompt Token Count",
+                            value="0",
                             interactive=False,
                             scale=1
+                        )
+                        use_prompt_expansion = gr.Checkbox(
+                            label="Use Prompt Expansion",
+                            value=True,
+                            info="Expand prompt using Qwen 2.5 VL"
+                        )
+                        clip_token_count = gr.Textbox(
+                            label="CLIP prompt Tokens",
+                            value="0",
+                            interactive=False
                         )                        
                     with gr.Column(scale=2):
                         batch_progress = gr.Textbox(label="Status", interactive=False, value="")
@@ -1049,7 +1073,7 @@ def create_interface():
                                 label="Latest Preview", height=300,
                                 interactive=False, elem_id="k1_preview_video"
                             )
-                        stop_decode_btn = gr.Button("Stop & Decode", elem_classes="light-blue-btn")
+                        stop_decode_btn = gr.Button("Stop & Decode", elem_classes="light-blue-btn", visible=False)
                         stop_save_btn = gr.Button("Stop & Save Latents", elem_classes="light-blue-btn")
                         checkpoint_file = gr.Textbox(
                             label="Checkpoint File (for resume)",
@@ -1130,6 +1154,13 @@ def create_interface():
                     outputs=[token_count_display]
                 )
 
+                # CLIP token count update
+                clip_prompt.change(
+                    fn=lambda text: str(count_tokens(text)) if text else "0",
+                    inputs=[clip_prompt],
+                    outputs=[clip_token_count]
+                )
+
                 # Resolution control event handlers
                 input_image.change(
                     fn=update_image_dimensions,
@@ -1167,7 +1198,8 @@ def create_interface():
                         save_path, batch_size,
                         enable_preview, preview_steps,
                         enable_vae_chunking, vae_temporal_tile_frames, vae_temporal_stride_frames,
-                        vae_spatial_tile_height, vae_spatial_tile_width
+                        vae_spatial_tile_height, vae_spatial_tile_width,
+                        use_prompt_expansion, clip_prompt
                     ],
                     outputs=[output, preview_output, batch_progress, progress_text]
                 )
