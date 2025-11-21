@@ -918,6 +918,11 @@ def create_interface():
                             value="A cute tabby cat is eating a bowl of wasabi in a restaurant in Guangzhou. The cat is very good at using chopsticks and proceeds to eat the entire bowl of wasabi quickly with his chopsticks. The cat is wearing a white shirt with red accents and the cute tabby cat's shirt has the text 'spice kitten' on it. There is a large red sign in the background with '芥末' on it in white letters. A small red panda is drinking a beer beside the cat. The red panda is holding a large glass of dark beer and drinking it quickly. The panda tilts his head back and downs the entire glass of beer in one large gulp.",
                             lines=5
                         )
+                        clip_prompt = gr.Textbox(
+                            label="CLIP Prompt (Optional max 77 tokens)",
+                            placeholder="Leave empty to use main prompt for CLIP. Enter custom text to use a separate prompt for global conditioning.",
+                            lines=2,
+                        )                                                
                         negative_prompt = gr.Textbox(
                             scale=3,
                             label="Negative Prompt",
@@ -927,8 +932,8 @@ def create_interface():
                     with gr.Column(scale=1):
                         batch_size = gr.Number(label="Batch Count", value=1, minimum=1, step=1)
                         token_count_display = gr.Textbox(
-                            label="Token Count",
-                            value=str(count_tokens("A cute tabby cat is eating a bowl of wasabi in a restaurant in Guangzhou. The cat is very good at using chopsticks and proceeds to eat the entire bowl of wasabi quickly with his chopsticks. The cat is wearing a white shirt with red accents and the cute tabby cat's shirt has the text 'spice kitten' on it. There is a large red sign in the background with '芥末' on it in white letters. A small red panda is drinking a beer beside the cat. The red panda is holding a large glass of dark beer and drinking it quickly. The panda tilts his head back and downs the entire glass of beer in one large gulp.")),
+                            label="Prompt Token Count",
+                            value="0",
                             interactive=False,
                             scale=1
                         )
@@ -937,24 +942,14 @@ def create_interface():
                             value=True,
                             info="Expand prompt using Qwen 2.5 VL"
                         )
+                        clip_token_count = gr.Textbox(
+                            label="CLIP prompt Tokens",
+                            value="0",
+                            interactive=False
+                        )                        
                     with gr.Column(scale=2):
                         batch_progress = gr.Textbox(label="Status", interactive=False, value="")
                         progress_text = gr.Textbox(label="Progress", interactive=False, value="")
-
-                with gr.Row():
-                    with gr.Column(scale=4):
-                        clip_prompt = gr.Textbox(
-                            label="CLIP Prompt (Optional)",
-                            placeholder="Leave empty to use main prompt for CLIP. Enter custom text to use a separate prompt for global conditioning.",
-                            lines=2,
-                            info="Separate prompt for CLIP encoder (77 token max). Controls global style/mood."
-                        )
-                    with gr.Column(scale=1):
-                        clip_token_count = gr.Textbox(
-                            label="CLIP Tokens",
-                            value="0",
-                            interactive=False
-                        )
 
                 with gr.Row():
                     generate_btn = gr.Button("Generate Video", elem_classes="green-btn")
