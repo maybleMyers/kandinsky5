@@ -1184,6 +1184,9 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
         tile_latent_stride_num_frames = (
             self.tile_sample_stride_num_frames // self.temporal_compression_ratio
         )
+        # Ensure stride is at least 1 to avoid range() error
+        if tile_latent_stride_num_frames < 1:
+            tile_latent_stride_num_frames = 1
         blend_num_frames = (
             self.tile_sample_min_num_frames - self.tile_sample_stride_num_frames
         )
