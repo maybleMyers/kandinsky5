@@ -1,11 +1,3 @@
-    for i, arg in enumerate(sys.argv):
-        if arg == '--no_compile':
-            return True
-    return False
-
-# Set global compile flag before importing kandinsky modules
-import kandinsky.models.compile_config as compile_config
-_no_compile = _early_parse_no_compile()
 compile_config.USE_TORCH_COMPILE = not _no_compile
 if _no_compile:
     print("torch.compile() disabled for faster startup")
