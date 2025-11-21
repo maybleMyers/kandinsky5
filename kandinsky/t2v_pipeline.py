@@ -136,6 +136,11 @@ class Kandinsky5T2VPipeline:
                 if self.offload or force_offload:
                     self.text_embedder = self.text_embedder.to(self.device_map["text_embedder"])
                 caption = self.expand_prompt(caption)
+                print("\n" + "="*80)
+                print("EXPANDED QWEN 2.5 PROMPT:")
+                print("="*80)
+                print(caption)
+                print("="*80 + "\n")
             if self.world_size > 1:
                 caption = [caption]
                 torch.distributed.broadcast_object_list(caption, 0)
