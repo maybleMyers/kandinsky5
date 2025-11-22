@@ -371,11 +371,9 @@ class MultiheadSelfAttentionDec(nn.Module):
         full_key = torch.cat([k_cache, key], dim=0)
         full_value = torch.cat([v_cache, value], dim=0)
 
-        # Attention: query attends to full key/value
-        if sparse_params is not None:
-            out = self.nabla(query, full_key, full_value, sparse_params=sparse_params)
-        else:
-            out = self.attention(query, full_key, full_value)
+        # Always use regular attention for KV cache mode
+        # NABLA sparse patterns don't work with concatenated sequences
+        out = self.attention(query, full_key, full_value)
 
         out = self.out_l(out)
         return out
