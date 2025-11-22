@@ -202,6 +202,7 @@ class Kandinsky5I2VPipeline:
         preview_suffix: str = None,
         stop_check=None,
         checkpoint_path=None,
+        save_latents=None,
     ):
         num_steps = self.num_steps if num_steps is None else num_steps
         guidance_weight = self.guidance_weight if guidance_weight is None else guidance_weight
@@ -342,6 +343,7 @@ class Kandinsky5I2VPipeline:
             preview_suffix=preview_suffix,
             stop_check=stop_check,
             checkpoint_path=checkpoint_path,
+            save_latents=save_latents,
         )
 
         # Handle checkpoint save (images will be None)

@@ -315,6 +315,7 @@ def generate_sample(
     preview_suffix=None,
     stop_check=None,
     checkpoint_path=None,
+    save_latents=None,
 ):
     bs, duration, height, width, dim = shape
     if duration == 1:
@@ -434,6 +435,18 @@ def generate_sample(
     else:
         latent_visual = result
 
+    # Save latents before VAE decoding if requested
+    if save_latents:
+        latent_checkpoint = {
+            "latents": latent_visual.cpu(),
+            "shape": shape,
+            "mode": "t2i" if duration == 1 else "t2v",
+            "vae_scaling_factor": vae.config.scaling_factor,
+            "latents_dtype": str(latent_visual.dtype),
+        }
+        torch.save(latent_checkpoint, save_latents)
+        print(f">>> Latents saved to {save_latents}", flush=True)
+
     # Offload DiT before VAE decode to free up VRAM
     # For block swapping, explicitly offload all blocks first
     if hasattr(dit, 'offload_all_blocks'):
@@ -499,6 +512,7 @@ def generate_sample_i2v(
     preview_suffix=None,
     stop_check=None,
     checkpoint_path=None,
+    save_latents=None,
 ):
     text_embedder.embedder.mode = "i2v"
 
@@ -632,6 +646,18 @@ def generate_sample_i2v(
                 first_frames = first_frames.to(device=latent_visual.device, dtype=latent_visual.dtype)
                 latent_visual[:1] = first_frames
                 latent_visual = normalize_first_frame(latent_visual)
+
+    # Save latents before VAE decoding if requested
+    if save_latents:
+        latent_checkpoint = {
+            "latents": latent_visual.cpu(),
+            "shape": shape,
+            "mode": "i2v",
+            "vae_scaling_factor": vae.config.scaling_factor,
+            "latents_dtype": str(latent_visual.dtype),
+        }
+        torch.save(latent_checkpoint, save_latents)
+        print(f">>> Latents saved to {save_latents}", flush=True)
 
     # Offload DiT before VAE decode to free up VRAM
     # For block swapping, explicitly offload all blocks first
