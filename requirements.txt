@@ -26,6 +26,6 @@ ninja
 numpy
 bitsandbytes
 peft
-gradio >= 4.0
+gradio == 5.23.1
 ffmpeg
 tiktoken
