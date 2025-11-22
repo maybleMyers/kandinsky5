@@ -12,15 +12,18 @@ if sys.platform == "win32":
     import shutil
     if shutil.which("cl.exe") is None:
         from unittest.mock import MagicMock
+        from importlib.machinery import ModuleSpec
         import types
         
         # Create a mock module for triton
         triton_mock = MagicMock()
+        triton_mock.__spec__ = ModuleSpec(name="triton", loader=None)
         triton_mock.__path__ = [] # Essential to make it behave like a package
         sys.modules["triton"] = triton_mock
         
         # Create a mock module for triton.language
         triton_language_mock = MagicMock()
+        triton_language_mock.__spec__ = ModuleSpec(name="triton.language", loader=None)
         sys.modules["triton.language"] = triton_language_mock
         triton_mock.language = triton_language_mock
         
