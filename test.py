@@ -26,6 +26,15 @@ if sys.platform == "win32":
         triton_language_mock.__spec__ = ModuleSpec(name="triton.language", loader=None)
         sys.modules["triton.language"] = triton_language_mock
         triton_mock.language = triton_language_mock
+
+        # Create a mock module for triton.compiler
+        triton_compiler_mock = MagicMock()
+        triton_compiler_mock.__spec__ = ModuleSpec(name="triton.compiler", loader=None)
+        sys.modules["triton.compiler"] = triton_compiler_mock
+        triton_mock.compiler = triton_compiler_mock
+        
+        # Add CompiledKernel to triton.compiler
+        triton_compiler_mock.CompiledKernel = MagicMock()
         
         print("WARNING: Triton mocked to bypass missing cl.exe (C++ compiler).")
 
@@ -44,6 +53,18 @@ if _no_compile:
 
 import torch
 from PIL import Image
+
+# Monkeypatch torch.compile to be a no-op if --no_compile is set
+# This prevents bitsandbytes and other libraries from triggering compilation
+if _no_compile:
+    print("Overriding torch.compile to be a no-op...")
+    def no_op_compile(model=None, **kwargs):
+        if model is None:
+            def decorator(func):
+                return func
+            return decorator
+        return model
+    torch.compile = no_op_compile
 
 # Now it is safe to import kandinsky modules
 import kandinsky.models.compile_config as compile_config
