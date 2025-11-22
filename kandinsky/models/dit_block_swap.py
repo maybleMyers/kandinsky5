@@ -149,9 +149,12 @@ class DiffusionTransformer3DBlockSwap(DiffusionTransformer3D):
         text_rope_pos,
         scale_factor=(1.0, 1.0, 1.0),
         sparse_params=None,
-        attention_mask=None
+        attention_mask=None,
+        num_cond_latents=None,
+        return_kv=False,
+        kv_cache_dict=None
     ):
-        """Forward pass with block swapping"""
+        """Forward pass with block swapping and KV cache support"""
 
         # Get device from input
         device = x.device
@@ -166,7 +169,9 @@ class DiffusionTransformer3DBlockSwap(DiffusionTransformer3D):
         visual_embed, visual_shape, to_fractal, visual_rope = self.before_visual_transformer_blocks(
             visual_embed, visual_rope_pos, scale_factor, sparse_params)
 
-        # Visual transformer blocks with block swapping
+        # Visual transformer blocks with block swapping and KV cache support
+        kv_cache_dict_ret = {}
+
         if self.enable_block_swap:
             for i, visual_transformer_block in enumerate(self.visual_transformer_blocks):
                 # Prefetch next block while processing current one
@@ -176,20 +181,47 @@ class DiffusionTransformer3DBlockSwap(DiffusionTransformer3D):
                 # Ensure current block is on GPU
                 self._ensure_block_on_gpu(i, device)
 
-                # Process block
-                visual_embed = visual_transformer_block(
+                # Get KV cache for this block if using cache
+                block_kv_cache = kv_cache_dict.get(i) if kv_cache_dict else None
+
+                # Process block with KV cache support
+                block_output = visual_transformer_block(
                     visual_embed, text_embed, time_embed,
-                    visual_rope, sparse_params, attention_mask
-                )
-        else:
-            # Normal forward pass without swapping
-            for visual_transformer_block in self.visual_transformer_blocks:
-                visual_embed = visual_transformer_block(
-                    visual_embed, text_embed, time_embed,
-                    visual_rope, sparse_params, attention_mask
+                    visual_rope, sparse_params, attention_mask,
+                    num_cond_latents=num_cond_latents,
+                    return_kv=return_kv,
+                    kv_cache=block_kv_cache
                 )
 
+                if return_kv:
+                    visual_embed, kv_cache = block_output
+                    kv_cache_dict_ret[i] = kv_cache
+                else:
+                    visual_embed = block_output
+        else:
+            # Normal forward pass without swapping
+            for i, visual_transformer_block in enumerate(self.visual_transformer_blocks):
+                # Get KV cache for this block if using cache
+                block_kv_cache = kv_cache_dict.get(i) if kv_cache_dict else None
+
+                block_output = visual_transformer_block(
+                    visual_embed, text_embed, time_embed,
+                    visual_rope, sparse_params, attention_mask,
+                    num_cond_latents=num_cond_latents,
+                    return_kv=return_kv,
+                    kv_cache=block_kv_cache
+                )
+
+                if return_kv:
+                    visual_embed, kv_cache = block_output
+                    kv_cache_dict_ret[i] = kv_cache
+                else:
+                    visual_embed = block_output
+
         x = self.after_blocks(visual_embed, visual_shape, to_fractal, text_embed, time_embed)
+
+        if return_kv:
+            return x, kv_cache_dict_ret
         return x
 
 
