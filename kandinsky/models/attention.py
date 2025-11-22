@@ -33,8 +33,9 @@ def sdpa(q, k, v, attn_mask=None):
     # On Linux, the heuristics are usually better, so we can leave it as is or force it there too.
     import sys
     if sys.platform == "win32":
-        # Use sdp_kernel instead of sdpa_kernel for compatibility with this PyTorch version
-        ctx = torch.backends.cuda.sdp_kernel(torch.backends.cuda.SDPBackend.FLASH_ATTENTION, torch.backends.cuda.SDPBackend.EFFICIENT_ATTENTION)
+        # Use sdp_kernel with explicit keyword arguments to disable math backend
+        # Previous attempt failed because positional args were interpreted as booleans (enums are truthy)
+        ctx = torch.backends.cuda.sdp_kernel(enable_math=False, enable_flash=True, enable_mem_efficient=True)
     else:
         from contextlib import nullcontext
         ctx = nullcontext()
