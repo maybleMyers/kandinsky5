@@ -456,13 +456,13 @@ def resume_from_checkpoint(
     # Select config file based on model_config
     config_map = {
         "5s Lite (T2V)": "./configs/config_5s_sft.yaml",
-        "5s Pro 20B (T2V)": "./configs/k5_pro_t2v_5s_sft.yaml",
+        "5s Pro 20B (T2V)": "./configs/config_5s_t2v_pro_20b.yaml",
         "5s Pro 20B HD (T2V)": "./configs/k5_pro_t2v_5s_sft_hd.yaml",
-        "5s Lite (I2V)": "./configs/config_5s_sft_i2v.yaml",
-        "5s Pro 20B (I2V)": "./configs/k5_pro_i2v_5s_sft.yaml",
+        "5s Lite (I2V)": "./configs/config_5s_i2v.yaml",
+        "5s Pro 20B (I2V)": "./configs/config_5s_i2v_pro_20b.yaml",
         "5s Pro 20B HD (I2V)": "./configs/k5_pro_i2v_5s_sft_hd.yaml",
     }
-    config_file = config_map.get(model_config, "./configs/k5_pro_i2v_5s_sft.yaml")
+    config_file = config_map.get(model_config, "./configs/config_5s_i2v_pro_20b.yaml")
 
     yield [], None, "Resuming from checkpoint...", f"Loading {checkpoint_path}"
 
@@ -573,13 +573,13 @@ def decode_from_latents(
     # Select config file based on model_config
     config_map = {
         "5s Lite (T2V)": "./configs/config_5s_sft.yaml",
-        "5s Pro 20B (T2V)": "./configs/k5_pro_t2v_5s_sft.yaml",
+        "5s Pro 20B (T2V)": "./configs/config_5s_t2v_pro_20b.yaml",
         "5s Pro 20B HD (T2V)": "./configs/k5_pro_t2v_5s_sft_hd.yaml",
-        "5s Lite (I2V)": "./configs/config_5s_sft_i2v.yaml",
-        "5s Pro 20B (I2V)": "./configs/k5_pro_i2v_5s_sft.yaml",
+        "5s Lite (I2V)": "./configs/config_5s_i2v.yaml",
+        "5s Pro 20B (I2V)": "./configs/config_5s_i2v_pro_20b.yaml",
         "5s Pro 20B HD (I2V)": "./configs/k5_pro_i2v_5s_sft_hd.yaml",
     }
-    config_file = config_map.get(model_config, "./configs/k5_pro_i2v_5s_sft.yaml")
+    config_file = config_map.get(model_config, "./configs/config_5s_i2v_pro_20b.yaml")
 
     yield [], None, "Decoding from latents...", f"Loading {latents_path}"
 
