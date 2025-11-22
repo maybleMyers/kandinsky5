@@ -188,6 +188,9 @@ class Kandinsky5T2VPipeline:
         )
         torch.cuda.empty_cache()
 
+        if self.offload:
+            self.text_embedder = self.text_embedder.to(device=self.device_map["text_embedder"])
+
         # RESULTS
         if self.local_dit_rank == 0:
             if time_length == 0:

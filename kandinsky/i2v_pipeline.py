@@ -174,6 +174,9 @@ class Kandinsky5I2VPipeline:
         )
         torch.cuda.empty_cache()
 
+        if self.offload:
+            self.text_embedder = self.text_embedder.to(device=self.device_map["text_embedder"])
+
         if k > 16:
             h, w = images.shape[-2:]
             images = F.resize(images[0], (int(h / k / 16), int(w / k / 16)))
