@@ -46,6 +46,47 @@ def normalize_first_frame(latents, reference_frames=5, clump_values=False):
     return samples
 
 
+def normalize_generated_frames_to_conditioning(latents, num_cond_frames=4, transition_frames=5, clump_values=False):
+    """
+    Normalize generated frames to match the statistics of conditioning frames.
+    This is the correct direction for video continuation - generated frames should
+    match the style/appearance of the input conditioning frames.
+
+    Args:
+        latents: Full latent tensor [total_frames, H, W, C] with cond + generated
+        num_cond_frames: Number of conditioning frames at the start
+        transition_frames: Number of generated frames to normalize for smooth transition
+        clump_values: Whether to clamp normalized values to reference range
+
+    Returns:
+        Normalized latents with smooth transition from conditioning to generated
+    """
+    latents_copy = latents.clone()
+    samples = latents_copy
+
+    if samples.shape[0] <= num_cond_frames:
+        return latents  # No generated frames to normalize
+
+    # Conditioning frames are the reference (clean input video)
+    cond_frames = samples[:num_cond_frames]
+
+    # Generated frames to normalize (first few after conditioning for smooth transition)
+    num_gen_frames = min(transition_frames, samples.shape[0] - num_cond_frames)
+    gen_frames = samples[num_cond_frames:num_cond_frames + num_gen_frames]
+
+    # Normalize generated frames to match conditioning frame statistics
+    normalized_gen = adaptive_mean_std_normalization(gen_frames, cond_frames)
+
+    if clump_values:
+        min_val = cond_frames.min()
+        max_val = cond_frames.max()
+        normalized_gen = torch.clamp(normalized_gen, min_val, max_val)
+
+    samples[num_cond_frames:num_cond_frames + num_gen_frames] = normalized_gen
+
+    return samples
+
+
 def log_vram_usage(stage_name, dit=None, vae=None, text_embedder=None):
     """Log VRAM usage and model locations for debugging."""
     if not torch.cuda.is_available():
@@ -871,10 +912,15 @@ def generate_sample_v2v(
         latent_visual = result
 
     # Apply normalization to transition between conditioning and generated frames
+    # IMPORTANT: Normalize GENERATED frames to match CONDITIONING frames (not vice versa!)
+    # This ensures the generated content matches the input video's appearance
     with torch.no_grad():
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            # Normalize the generated portion
-            latent_visual = normalize_first_frame(latent_visual, reference_frames=5)
+            latent_visual = normalize_generated_frames_to_conditioning(
+                latent_visual,
+                num_cond_frames=num_cond_frames,
+                transition_frames=5
+            )
 
     # Save latents if requested
     if save_latents:

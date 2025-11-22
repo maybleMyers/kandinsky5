@@ -195,7 +195,9 @@ class DiffusionTransformer3DBlockSwap(DiffusionTransformer3D):
 
                 if return_kv:
                     visual_embed, kv_cache = block_output
-                    kv_cache_dict_ret[i] = kv_cache
+                    # Store (k_cache, v_cache, visual_rope) for proper RoPE handling
+                    k_cache, v_cache = kv_cache
+                    kv_cache_dict_ret[i] = (k_cache, v_cache, visual_rope)
                 else:
                     visual_embed = block_output
         else:
@@ -214,7 +216,9 @@ class DiffusionTransformer3DBlockSwap(DiffusionTransformer3D):
 
                 if return_kv:
                     visual_embed, kv_cache = block_output
-                    kv_cache_dict_ret[i] = kv_cache
+                    # Store (k_cache, v_cache, visual_rope) for proper RoPE handling
+                    k_cache, v_cache = kv_cache
+                    kv_cache_dict_ret[i] = (k_cache, v_cache, visual_rope)
                 else:
                     visual_embed = block_output
 

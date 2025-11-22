@@ -310,14 +310,15 @@ class MultiheadSelfAttentionDec(nn.Module):
         query, key, value = self.get_qkv(x)
         query, key = self.norm_qk(query, key)
 
-        # Apply RoPE first
-        query = apply_rotary(query, rope).type_as(query)
-        key = apply_rotary(key, rope).type_as(key)
-
-        # Cache K, V AFTER RoPE if requested
+        # Cache K, V BEFORE RoPE if requested (like LongCat)
+        # This allows uniform RoPE application during cache usage
         if return_kv:
             k_cache = key.clone()
             v_cache = value.clone()
+
+        # Apply RoPE after caching
+        query = apply_rotary(query, rope).type_as(query)
+        key = apply_rotary(key, rope).type_as(key)
 
         # Handle conditioning latents (for video continuation)
         if num_cond_latents is not None and num_cond_latents > 0:
@@ -354,21 +355,28 @@ class MultiheadSelfAttentionDec(nn.Module):
         return out
 
     def forward_with_kv_cache(self, x, rope, kv_cache, num_cond_latents, sparse_params=None):
-        """Forward pass using pre-computed KV cache for conditioning frames."""
+        """Forward pass using pre-computed KV cache for conditioning frames.
+
+        The kv_cache contains (k_cache, v_cache, cond_rope) where:
+        - k_cache, v_cache: cached K/V WITHOUT RoPE applied
+        - cond_rope: RoPE tensor for conditioning frames (positions 0, 1, 2, ...)
+        """
         query, key, value = self.get_qkv(x)
         query, key = self.norm_qk(query, key)
 
-        # Get cached K, V (already have RoPE applied with positions [0, 1, 2, ...])
-        k_cache, v_cache = kv_cache
+        # Get cached K, V and their RoPE (K/V don't have RoPE yet)
+        k_cache, v_cache, cond_rope = kv_cache
 
-        # Apply RoPE to new query and key (positions match the input, e.g., [4, 5, 6, ...])
+        # Apply RoPE to cached K with conditioning positions [0, 1, 2, 3]
+        k_cache_with_rope = apply_rotary(k_cache, cond_rope).type_as(k_cache)
+
+        # Apply RoPE to new query and key with noise positions [4, 5, 6, ...]
         query = apply_rotary(query, rope).type_as(query)
         key = apply_rotary(key, rope).type_as(key)
 
         # Concatenate cached KV with new KV
-        # Cached KV already has RoPE for positions [0, 1, 2, 3]
-        # New KV has RoPE for positions [4, 5, ..., N]
-        full_key = torch.cat([k_cache, key], dim=0)
+        # Now both have consistent RoPE applied for their respective positions
+        full_key = torch.cat([k_cache_with_rope, key], dim=0)
         full_value = torch.cat([v_cache, value], dim=0)
 
         # Always use regular attention for KV cache mode
