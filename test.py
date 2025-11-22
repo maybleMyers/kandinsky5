@@ -383,6 +383,18 @@ def parse_args():
         default=None,
         help="Path to checkpoint file to resume generation from"
     )
+    parser.add_argument(
+        "--save_latents",
+        type=str,
+        default=None,
+        help="Path to save latents before VAE decoding (e.g., latents.pt). Saves all info needed for later decoding."
+    )
+    parser.add_argument(
+        "--decode_from_file",
+        type=str,
+        default=None,
+        help="Path to load and decode previously saved latents. Skips generation and only runs VAE decoding."
+    )
 
     args = parser.parse_args()
     return args
@@ -592,8 +604,80 @@ if __name__ == "__main__":
 
     start_time = time.perf_counter()
 
+    # Handle decode from saved latents (VAE-only decoding)
+    if args.decode_from_file:
+        print(f">>> Decode mode: Loading latents from {args.decode_from_file}", flush=True)
+
+        try:
+            # Load latent checkpoint
+            ckpt = torch.load(args.decode_from_file, map_location='cpu')
+
+            latent_visual = ckpt["latents"]
+            shape = ckpt["shape"]
+            mode = ckpt.get("mode", "t2v")
+
+            print(f">>> Latent shape: {latent_visual.shape}", flush=True)
+            print(f">>> Mode: {mode}", flush=True)
+
+            bs = shape[0]
+
+            # Move VAE to device
+            vae = pipe.vae.to("cuda")
+
+            with torch.no_grad():
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    # Reshape latents: (frames, h, w, 16) -> (bs, frames, h, w, 16)
+                    images = latent_visual.reshape(
+                        bs,
+                        -1,
+                        latent_visual.shape[-3],
+                        latent_visual.shape[-2],
+                        latent_visual.shape[-1],
+                    )
+                    images = images.to(device="cuda")
+
+                    # Scale and permute: (bs, frames, h, w, 16) -> (bs, 16, frames, h, w)
+                    images = (images / vae.config.scaling_factor).permute(0, 4, 1, 2, 3)
+
+                    # Decode
+                    print(f">>> Decoding latents...", flush=True)
+                    images = vae.decode(images).sample
+
+                    # Convert to uint8
+                    images = ((images.clamp(-1.0, 1.0) + 1.0) * 127.5).to(torch.uint8)
+
+            # Save the output
+            if images is not None:
+                import torchvision
+                from torchvision.transforms import ToPILImage
+
+                if mode == "t2i":
+                    # Save as image
+                    for image in images.squeeze(2).cpu():
+                        pil_image = ToPILImage()(image)
+                        pil_image.save(args.output_filename)
+                    print(f"TIME ELAPSED: {time.perf_counter() - start_time}")
+                    print(f"Decoded image saved to {args.output_filename}")
+                else:
+                    # Save as video
+                    for video in images:
+                        torchvision.io.write_video(
+                            args.output_filename,
+                            video.float().permute(1, 2, 3, 0).cpu().numpy(),
+                            fps=24,
+                            options={"crf": "5"},
+                        )
+                    print(f"TIME ELAPSED: {time.perf_counter() - start_time}")
+                    print(f"Decoded video saved to {args.output_filename}")
+
+        except Exception as e:
+            print(f">>> ERROR during decode: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            raise
+
     # Handle resume from checkpoint
-    if args.resume_from:
+    elif args.resume_from:
         print(f">>> Resume mode: Loading checkpoint from {args.resume_from}", flush=True)
 
         try:
@@ -685,6 +769,7 @@ if __name__ == "__main__":
                  num_steps=args.sample_steps,
                  guidance_weight=args.guidance_weight,
                  scheduler_scale=args.scheduler_scale,
+                 negative_caption=args.negative_prompt,
                  expand_prompts=args.expand_prompt,
                  clip_prompt=args.clip_prompt,
                  save_path=args.output_filename,
@@ -692,7 +777,8 @@ if __name__ == "__main__":
                  preview=args.preview,
                  preview_suffix=args.preview_suffix,
                  stop_check=check_stop_signals,
-                 checkpoint_path=checkpoint_file)
+                 checkpoint_path=checkpoint_file,
+                 save_latents=args.save_latents)
     else:
         x = pipe(args.prompt,
              time_length=args.video_duration,
@@ -701,6 +787,7 @@ if __name__ == "__main__":
              num_steps=args.sample_steps,
              guidance_weight=args.guidance_weight,
              scheduler_scale=args.scheduler_scale,
+             negative_caption=args.negative_prompt,
              expand_prompts=args.expand_prompt,
              clip_prompt=args.clip_prompt,
              save_path=args.output_filename,
@@ -708,7 +795,8 @@ if __name__ == "__main__":
              preview=args.preview,
              preview_suffix=args.preview_suffix,
              stop_check=check_stop_signals,
-             checkpoint_path=checkpoint_file)
+             checkpoint_path=checkpoint_file,
+             save_latents=args.save_latents)
 
     print(f"TIME ELAPSED: {time.perf_counter() - start_time}")
 

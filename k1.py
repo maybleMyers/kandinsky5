@@ -104,6 +104,7 @@ def generate_video(
     vae_spatial_tile_width: int,
     use_prompt_expansion: bool,
     clip_prompt: str,
+    save_latents: bool,
 ) -> Generator[Tuple[List[Tuple[str, str]], Optional[str], str, str], None, None]:
     global stop_event, current_process, current_output_filename
     stop_event.clear()
@@ -248,6 +249,11 @@ def generate_video(
         # Add clip_prompt if provided
         if clip_prompt and clip_prompt.strip():
             command.extend(["--clip_prompt", clip_prompt.strip()])
+
+        # Add save_latents if enabled
+        if save_latents:
+            latents_filename = os.path.join(save_path, f"k1_{mode}_{timestamp}_{current_seed}_latents.pt")
+            command.extend(["--save_latents", latents_filename])
 
         # Print the command for debugging/transparency
         print("\n" + "="*80)
@@ -450,13 +456,13 @@ def resume_from_checkpoint(
     # Select config file based on model_config
     config_map = {
         "5s Lite (T2V)": "./configs/config_5s_sft.yaml",
-        "5s Pro 20B (T2V)": "./configs/k5_pro_t2v_5s_sft.yaml",
+        "5s Pro 20B (T2V)": "./configs/config_5s_t2v_pro_20b.yaml",
         "5s Pro 20B HD (T2V)": "./configs/k5_pro_t2v_5s_sft_hd.yaml",
-        "5s Lite (I2V)": "./configs/config_5s_sft_i2v.yaml",
-        "5s Pro 20B (I2V)": "./configs/k5_pro_i2v_5s_sft.yaml",
+        "5s Lite (I2V)": "./configs/config_5s_i2v.yaml",
+        "5s Pro 20B (I2V)": "./configs/config_5s_i2v_pro_20b.yaml",
         "5s Pro 20B HD (I2V)": "./configs/k5_pro_i2v_5s_sft_hd.yaml",
     }
-    config_file = config_map.get(model_config, "./configs/k5_pro_i2v_5s_sft.yaml")
+    config_file = config_map.get(model_config, "./configs/config_5s_i2v_pro_20b.yaml")
 
     yield [], None, "Resuming from checkpoint...", f"Loading {checkpoint_path}"
 
@@ -526,6 +532,130 @@ def resume_from_checkpoint(
                 yield [], None, f"Checkpoint saved: {new_checkpoint}", ""
             else:
                 yield [], None, "Resume stopped", ""
+
+    except Exception as e:
+        yield [], None, f"Error: {str(e)}", ""
+    finally:
+        current_process = None
+
+
+def decode_from_latents(
+    latents_path: str,
+    model_config: str,
+    save_path: str,
+    use_torch_compile: bool,
+    enable_block_swap: bool,
+    blocks_in_memory: int,
+    dtype_str: str,
+    vae_dtype_str: str,
+    enable_vae_chunking: bool,
+    vae_temporal_tile_frames: int,
+    vae_temporal_stride_frames: int,
+    vae_spatial_tile_height: int,
+    vae_spatial_tile_width: int,
+) -> Generator[Tuple[List[Tuple[str, str]], Optional[str], str, str], None, None]:
+    """Decode video/image from saved latents."""
+    global stop_event, current_process, current_output_filename
+    stop_event.clear()
+    current_process = None
+
+    if not latents_path or not os.path.exists(latents_path):
+        yield [], None, "Error: No latents file selected", ""
+        return
+
+    os.makedirs(save_path, exist_ok=True)
+
+    # Generate output filename
+    timestamp = int(time.time())
+    output_filename = os.path.join(save_path, f"k1_decoded_{timestamp}.mp4")
+    current_output_filename = output_filename
+
+    # Select config file based on model_config
+    config_map = {
+        "5s Lite (T2V)": "./configs/config_5s_sft.yaml",
+        "5s Pro 20B (T2V)": "./configs/config_5s_t2v_pro_20b.yaml",
+        "5s Pro 20B HD (T2V)": "./configs/k5_pro_t2v_5s_sft_hd.yaml",
+        "5s Lite (I2V)": "./configs/config_5s_i2v.yaml",
+        "5s Pro 20B (I2V)": "./configs/config_5s_i2v_pro_20b.yaml",
+        "5s Pro 20B HD (I2V)": "./configs/k5_pro_i2v_5s_sft_hd.yaml",
+    }
+    config_file = config_map.get(model_config, "./configs/config_5s_i2v_pro_20b.yaml")
+
+    yield [], None, "Decoding from latents...", f"Loading {latents_path}"
+
+    # Build command
+    command = [
+        "python", "test.py",
+        "--config", config_file,
+        "--output_filename", output_filename,
+        "--decode_from_file", latents_path,
+    ]
+
+    # Add dtype settings
+    if dtype_str:
+        command.extend(["--dtype", dtype_str])
+    if vae_dtype_str:
+        command.extend(["--vae_dtype", vae_dtype_str])
+
+    # Add block swap settings
+    if enable_block_swap:
+        command.append("--enable_block_swap")
+        command.extend(["--blocks_in_memory", str(int(blocks_in_memory))])
+
+    # Add compile setting
+    if not use_torch_compile:
+        command.append("--no_compile")
+
+    # Add VAE chunking settings
+    if enable_vae_chunking:
+        command.extend(["--vae_temporal_tile_frames", str(int(vae_temporal_tile_frames))])
+        if vae_temporal_stride_frames > 0:
+            command.extend(["--vae_temporal_stride_frames", str(int(vae_temporal_stride_frames))])
+        command.extend(["--vae_spatial_tile_height", str(int(vae_spatial_tile_height))])
+        command.extend(["--vae_spatial_tile_width", str(int(vae_spatial_tile_width))])
+
+    # Print command for debugging
+    print(f">>> Decode command: {' '.join(command)}", flush=True)
+
+    try:
+        current_process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            universal_newlines=True
+        )
+
+        for line in iter(current_process.stdout.readline, ''):
+            if stop_event.is_set():
+                break
+
+            line = line.strip()
+            if not line:
+                continue
+
+            # Print all output to console for debugging
+            print(line, flush=True)
+
+            progress_info = parse_progress_line(line)
+            if progress_info:
+                yield [], None, "Decoding...", progress_info
+            elif ">>>" in line or "Error" in line or "error" in line:
+                # Show important messages
+                yield [], None, "Decoding...", line
+
+        current_process.wait()
+
+        if os.path.exists(output_filename):
+            yield [(output_filename, f"Decoded video")], None, "Decode complete!", ""
+        else:
+            # Check if it's an image (T2I mode)
+            image_filename = output_filename.replace(".mp4", ".png")
+            if os.path.exists(image_filename):
+                yield [(image_filename, f"Decoded image")], None, "Decode complete!", ""
+            else:
+                yield [], None, "Decode failed - no output file", ""
 
     except Exception as e:
         yield [], None, f"Error: {str(e)}", ""
@@ -950,6 +1080,7 @@ def create_interface():
                     with gr.Column(scale=2):
                         batch_progress = gr.Textbox(label="Status", interactive=False, value="")
                         progress_text = gr.Textbox(label="Progress", interactive=False, value="")
+                        save_latents_checkbox = gr.Checkbox(label="Save Latents Before VAE Decode", value=False)
 
                 with gr.Row():
                     generate_btn = gr.Button("Generate Video", elem_classes="green-btn")
@@ -996,13 +1127,13 @@ def create_interface():
                             Configure NABLA sparse attention for memory-efficient long video generation. Recommended for 10s models.
 
                             **Important for i2v:** NABLA requires resolution divisible by 128 pixels (e.g., 512, 640, 768, 1024, 1280, 1536, 1920, 2048).
-                            Invalid resolutions will be automatically rounded down to the nearest multiple of 128.
-                            """)
+                            Invalid resolutions will error out.
+                            """),
                             attention_type = gr.Dropdown(
                                 label="Attention Type",
                                 choices=["auto", "flash", "nabla"],
                                 value="auto",
-                                info="'auto' uses config default, 'flash' for full attention, 'nabla' for sparse attention (better for 10s videos)"
+                                info="'auto' uses config default, 'flash' for full attention, 'nabla' for sparse attention"
                             )
                             with gr.Row():
                                 nabla_P = gr.Slider(
@@ -1080,7 +1211,13 @@ def create_interface():
                             placeholder="Path to _checkpoint.pt file",
                             scale=3
                         )
-                        resume_btn = gr.Button("Resume from Checkpoint", elem_classes="light-blue-btn", scale=1)                            
+                        resume_btn = gr.Button("Resume from Checkpoint", elem_classes="light-blue-btn", scale=1)
+                        latents_file = gr.Textbox(
+                            label="Latents for VAE Decode",
+                            placeholder="Path to saved latents .pt file",
+                            scale=3
+                        )
+                        decode_latents_btn = gr.Button("Decode from Saved Latents", elem_classes="light-blue-btn", scale=1)
 
                 with gr.Accordion("Model Settings & Performance", open=True):
                     with gr.Row():
@@ -1199,7 +1336,8 @@ def create_interface():
                         enable_preview, preview_steps,
                         enable_vae_chunking, vae_temporal_tile_frames, vae_temporal_stride_frames,
                         vae_spatial_tile_height, vae_spatial_tile_width,
-                        use_prompt_expansion, clip_prompt
+                        use_prompt_expansion, clip_prompt,
+                        save_latents_checkbox
                     ],
                     outputs=[output, preview_output, batch_progress, progress_text]
                 )
@@ -1225,6 +1363,19 @@ def create_interface():
                         checkpoint_file, model_config, save_path,
                         use_torch_compile, enable_block_swap, blocks_in_memory,
                         dtype_select, vae_dtype_select
+                    ],
+                    outputs=[output, preview_output, batch_progress, progress_text]
+                )
+
+                decode_latents_btn.click(
+                    fn=decode_from_latents,
+                    inputs=[
+                        latents_file, model_config, save_path,
+                        use_torch_compile, enable_block_swap, blocks_in_memory,
+                        dtype_select, vae_dtype_select,
+                        enable_vae_chunking, vae_temporal_tile_frames,
+                        vae_temporal_stride_frames, vae_spatial_tile_height,
+                        vae_spatial_tile_width
                     ],
                     outputs=[output, preview_output, batch_progress, progress_text]
                 )
