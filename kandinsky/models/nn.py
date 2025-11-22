@@ -306,16 +306,89 @@ class MultiheadSelfAttentionDec(nn.Module):
     def out_l(self, x):
         return self.out_layer(x)
 
-    def forward(self, x, rope, sparse_params=None):
+    def forward(self, x, rope, sparse_params=None, num_cond_latents=None, return_kv=False):
         query, key, value = self.get_qkv(x)
         query, key = self.norm_qk(query, key)
+
+        # Cache K, V before RoPE if requested
+        if return_kv:
+            k_cache = key.clone()
+            v_cache = value.clone()
+
         query = apply_rotary(query, rope).type_as(query)
         key = apply_rotary(key, rope).type_as(key)
 
-        if sparse_params is not None:
-            out = self.nabla(query, key, value, sparse_params=sparse_params)
+        # Handle conditioning latents (for video continuation)
+        if num_cond_latents is not None and num_cond_latents > 0:
+            # Get spatial dimensions from shape
+            seq_len = x.shape[0]  # Total sequence length (T*H*W)
+            # Assume H*W is constant, so num_cond_latents gives T_cond
+            # For simplicity, we calculate tokens per frame
+            # This needs to be passed or calculated properly
+
+            # Conditioning tokens only attend to themselves
+            q_cond = query[:num_cond_latents].contiguous()
+            k_cond = key[:num_cond_latents].contiguous()
+            v_cond = value[:num_cond_latents].contiguous()
+
+            if sparse_params is not None:
+                out_cond = self.nabla(q_cond, k_cond, v_cond, sparse_params=sparse_params)
+            else:
+                out_cond = self.attention(q_cond, k_cond, v_cond)
+
+            # Noise tokens attend to all tokens
+            q_noise = query[num_cond_latents:].contiguous()
+
+            if sparse_params is not None:
+                out_noise = self.nabla(q_noise, key, value, sparse_params=sparse_params)
+            else:
+                out_noise = self.attention(q_noise, key, value)
+
+            # Concatenate outputs
+            out = torch.cat([out_cond, out_noise], dim=0)
         else:
-            out = self.attention(query, key, value)
+            if sparse_params is not None:
+                out = self.nabla(query, key, value, sparse_params=sparse_params)
+            else:
+                out = self.attention(query, key, value)
+
+        out = self.out_l(out)
+
+        if return_kv:
+            return out, (k_cache, v_cache)
+        return out
+
+    def forward_with_kv_cache(self, x, rope, kv_cache, num_cond_latents, sparse_params=None):
+        """Forward pass using pre-computed KV cache for conditioning frames."""
+        query, key, value = self.get_qkv(x)
+        query, key = self.norm_qk(query, key)
+
+        # Get cached K, V
+        k_cache, v_cache = kv_cache
+
+        # Concatenate cached KV with new KV
+        # Cached KV is for conditioning frames, new KV is for noise frames
+        # But we need to apply RoPE to the full sequence properly
+
+        # Create padded query for RoPE (to get correct positions)
+        # The new frames come after conditioning frames
+        seq_len = x.shape[0]
+        cond_len = k_cache.shape[0]
+
+        # Apply RoPE to query (only for noise frames, but with correct position)
+        # We need extended rope that covers cond + noise positions
+        query = apply_rotary(query, rope[cond_len:cond_len+seq_len]).type_as(query)
+
+        # Apply RoPE to full key sequence (cond + noise)
+        full_key = torch.cat([k_cache, key], dim=0)
+        full_value = torch.cat([v_cache, value], dim=0)
+        full_key = apply_rotary(full_key, rope[:cond_len+seq_len]).type_as(full_key)
+
+        # Attention: query attends to full key/value
+        if sparse_params is not None:
+            out = self.nabla(query, full_key, full_value, sparse_params=sparse_params)
+        else:
+            out = self.attention(query, full_key, full_value)
 
         out = self.out_l(out)
         return out

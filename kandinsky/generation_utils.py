@@ -488,6 +488,437 @@ def generate_sample(
 
     return images
 
+
+@torch.no_grad()
+def compute_kv_cache(
+    model,
+    device,
+    cond_latents,
+    text_embeds,
+    visual_rope_pos,
+    text_rope_pos,
+    conf,
+    attention_mask=None,
+):
+    """
+    Pre-compute KV cache for conditioning frames.
+
+    Args:
+        model: DiT model
+        device: Device to use
+        cond_latents: Conditioning latents [num_cond_frames, H, W, C]
+        text_embeds: Text embeddings
+        visual_rope_pos: Visual RoPE positions
+        text_rope_pos: Text RoPE positions
+        conf: Model configuration
+        attention_mask: Attention mask
+
+    Returns:
+        KV cache dictionary {block_idx: (K, V)}
+    """
+    # Create timestep=0 for conditioning frames (they are "clean")
+    num_cond_frames = cond_latents.shape[0]
+    timestep = torch.zeros(1, device=device)
+
+    # Build model input for conditioning frames
+    if model.visual_cond:
+        visual_cond = torch.zeros_like(cond_latents)
+        visual_cond_mask = torch.ones(
+            [*cond_latents.shape[:-1], 1], dtype=cond_latents.dtype, device=cond_latents.device
+        )
+        model_input = torch.cat([cond_latents, visual_cond, visual_cond_mask], dim=-1)
+    else:
+        model_input = cond_latents
+
+    sparse_params = get_sparse_params(conf, {"visual": cond_latents}, device)
+
+    # Forward pass with return_kv=True
+    with torch._dynamo.utils.disable_cache_limit():
+        _, kv_cache_dict = model(
+            model_input,
+            text_embeds["text_embeds"],
+            text_embeds["pooled_embed"],
+            timestep * 1000,
+            visual_rope_pos,
+            text_rope_pos,
+            scale_factor=conf.metrics.scale_factor,
+            sparse_params=sparse_params,
+            attention_mask=attention_mask,
+            return_kv=True,
+        )
+
+    return kv_cache_dict
+
+
+@torch.no_grad()
+def generate_v2v(
+    model,
+    device,
+    shape,
+    num_steps,
+    text_embeds,
+    null_text_embeds,
+    visual_rope_pos,
+    text_rope_pos,
+    null_text_rope_pos,
+    guidance_weight,
+    scheduler_scale,
+    cond_latents,
+    kv_cache_dict,
+    conf,
+    progress=False,
+    seed=6554,
+    attention_mask=None,
+    null_attention_mask=None,
+    previewer=None,
+    preview_interval=None,
+    preview_suffix=None,
+    stop_check=None,
+):
+    """
+    Generate video continuation using KV cache.
+
+    Args:
+        model: DiT model
+        device: Device to use
+        shape: Shape of output (bs * duration, height, width, dim) - for noise frames only
+        num_steps: Number of denoising steps
+        text_embeds: Text embeddings
+        null_text_embeds: Null text embeddings for CFG
+        visual_rope_pos: Visual RoPE positions (for full sequence: cond + noise)
+        text_rope_pos: Text RoPE positions
+        null_text_rope_pos: Null text RoPE positions
+        guidance_weight: CFG weight
+        scheduler_scale: Scheduler scale
+        cond_latents: Conditioning latents [num_cond_frames, H, W, C]
+        kv_cache_dict: Pre-computed KV cache
+        conf: Model configuration
+        ...
+
+    Returns:
+        Generated latents (noise frames only, or full sequence)
+    """
+    num_cond_frames = cond_latents.shape[0]
+
+    g = torch.Generator(device="cuda")
+    g.manual_seed(seed)
+    # Generate noise only for new frames
+    img = torch.randn(*shape, device=device, generator=g)
+
+    # Store original noise for early-stop decode
+    original_noise = img.clone()
+
+    sparse_params = get_sparse_params(conf, {"visual": img}, device)
+    timesteps = torch.linspace(1, 0, num_steps + 1, device=device)
+    timesteps = scheduler_scale * timesteps / (1 + (scheduler_scale - 1) * timesteps)
+
+    for i, (timestep, timestep_diff) in enumerate(tqdm(list(zip(timesteps[:-1], torch.diff(timesteps))))):
+        time = timestep.unsqueeze(0)
+
+        if model.visual_cond:
+            visual_cond = torch.zeros_like(img)
+            visual_cond_mask = torch.zeros(
+                [*img.shape[:-1], 1], dtype=img.dtype, device=img.device
+            )
+            model_input = torch.cat([img, visual_cond, visual_cond_mask], dim=-1)
+        else:
+            model_input = img
+
+        # Forward pass with KV cache
+        with torch._dynamo.utils.disable_cache_limit():
+            pred_velocity = model(
+                model_input,
+                text_embeds["text_embeds"],
+                text_embeds["pooled_embed"],
+                time * 1000,
+                visual_rope_pos,
+                text_rope_pos,
+                scale_factor=conf.metrics.scale_factor,
+                sparse_params=sparse_params,
+                attention_mask=attention_mask,
+                num_cond_latents=num_cond_frames,
+                kv_cache_dict=kv_cache_dict,
+            )
+
+            # CFG
+            if abs(guidance_weight - 1.0) > 1e-6:
+                uncond_pred_velocity = model(
+                    model_input,
+                    null_text_embeds["text_embeds"],
+                    null_text_embeds["pooled_embed"],
+                    time * 1000,
+                    visual_rope_pos,
+                    null_text_rope_pos,
+                    scale_factor=conf.metrics.scale_factor,
+                    sparse_params=sparse_params,
+                    attention_mask=null_attention_mask,
+                    num_cond_latents=num_cond_frames,
+                    kv_cache_dict=kv_cache_dict,
+                )
+                pred_velocity = uncond_pred_velocity + guidance_weight * (
+                    pred_velocity - uncond_pred_velocity
+                )
+
+        img = img + timestep_diff * pred_velocity
+
+        # Check for early stop request
+        if stop_check is not None:
+            action = stop_check()
+            if action in ("decode", "save"):
+                print(f"\n>>> Early stop requested at step {i + 1}/{num_steps} - action: {action}", flush=True)
+                return {
+                    "action": action,
+                    "latents": img,
+                    "step": i + 1,
+                    "total_steps": num_steps,
+                    "original_noise": original_noise,
+                    "timesteps": timesteps
+                }
+
+        if previewer is not None and preview_interval and (i + 1) % preview_interval == 0 and (i + 1) < num_steps:
+            import sys
+            print(f"\n>>> PREVIEW TRIGGER at step {i + 1}/{num_steps} (interval={preview_interval})", flush=True)
+            sys.stdout.flush()
+            try:
+                preview_latent = img.permute(3, 0, 1, 2).unsqueeze(0)
+                previewer.preview(preview_latent.squeeze(0), i, preview_suffix=preview_suffix)
+            except Exception as e:
+                print(f">>> ERROR during preview generation at step {i + 1}: {e}", flush=True)
+
+    # Concatenate conditioning frames with generated frames
+    full_latents = torch.cat([cond_latents, img], dim=0)
+    return full_latents
+
+
+def generate_sample_v2v(
+    shape,
+    caption,
+    dit,
+    vae,
+    conf,
+    text_embedder,
+    cond_latents,
+    num_steps=50,
+    guidance_weight=5.0,
+    scheduler_scale=1,
+    negative_caption="",
+    clip_prompt=None,
+    seed=6554,
+    device="cuda",
+    vae_device="cuda",
+    progress=True,
+    offload=False,
+    force_offload=False,
+    previewer=None,
+    preview_interval=None,
+    preview_suffix=None,
+    stop_check=None,
+    checkpoint_path=None,
+    save_latents=None,
+):
+    """
+    Generate video continuation from conditioning latents using KV cache.
+
+    Args:
+        shape: Output shape (bs, duration, height, width, dim) - duration is for NEW frames only
+        caption: Text prompt
+        dit: DiT model
+        vae: VAE model
+        conf: Configuration
+        text_embedder: Text embedder
+        cond_latents: Conditioning latents [num_cond_frames, H, W, C]
+        ...
+
+    Returns:
+        Generated video tensor
+    """
+    text_embedder.embedder.mode = "i2v"
+
+    bs, duration, height, width, dim = shape
+    num_cond_frames = cond_latents.shape[0]
+
+    if duration == 1:
+        type_of_content = "image"
+    else:
+        type_of_content = "video"
+
+    with torch.no_grad():
+        clip_texts = [clip_prompt] if clip_prompt else None
+        bs_text_embed, text_cu_seqlens, attention_mask = text_embedder.encode(
+            [caption], type_of_content=type_of_content, clip_texts=clip_texts
+        )
+        bs_null_text_embed, null_text_cu_seqlens, null_attention_mask = text_embedder.encode(
+            [negative_caption], type_of_content=type_of_content
+        )
+
+    # Clean up text embedder
+    if offload or force_offload:
+        text_embedder = text_embedder.to('cpu')
+    del text_embedder.embedder.model
+    del text_embedder.clip_embedder.model
+    del text_embedder
+    torch.cuda.empty_cache()
+    import gc
+    gc.collect()
+
+    for key in bs_text_embed:
+        bs_text_embed[key] = bs_text_embed[key].to(device=device)
+        bs_null_text_embed[key] = bs_null_text_embed[key].to(device=device)
+    text_cu_seqlens = text_cu_seqlens.to(device=device)[-1].item()
+    null_text_cu_seqlens = null_text_cu_seqlens.to(device=device)[-1].item()
+    attention_mask = attention_mask.to(device=device)
+    null_attention_mask = null_attention_mask.to(device=device)
+
+    # Visual RoPE positions for FULL sequence (cond + noise)
+    total_frames = num_cond_frames + duration
+    visual_rope_pos = [
+        torch.arange(total_frames),
+        torch.arange(height // conf.model.dit_params.patch_size[1]),
+        torch.arange(width // conf.model.dit_params.patch_size[2]),
+    ]
+    text_rope_pos = torch.arange(text_cu_seqlens)
+    null_text_rope_pos = torch.arange(null_text_cu_seqlens)
+
+    log_vram_usage("BEFORE DiT INFERENCE (V2V)", dit=dit, vae=vae, text_embedder=None)
+
+    if offload or force_offload:
+        dit.to(device, non_blocking=True)
+
+    with torch.no_grad():
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            # Compute KV cache for conditioning frames
+            print(f">>> Computing KV cache for {num_cond_frames} conditioning frames...", flush=True)
+            kv_cache_dict = compute_kv_cache(
+                dit,
+                device,
+                cond_latents.to(device=device, dtype=torch.bfloat16),
+                bs_text_embed,
+                visual_rope_pos,
+                text_rope_pos,
+                conf,
+                attention_mask=attention_mask,
+            )
+            print(f">>> KV cache computed for {len(kv_cache_dict)} blocks", flush=True)
+
+            # Generate continuation
+            result = generate_v2v(
+                dit,
+                device,
+                (bs * duration, height, width, dim),
+                num_steps,
+                bs_text_embed,
+                bs_null_text_embed,
+                visual_rope_pos,
+                text_rope_pos,
+                null_text_rope_pos,
+                guidance_weight,
+                scheduler_scale,
+                cond_latents.to(device=device, dtype=torch.bfloat16),
+                kv_cache_dict,
+                conf,
+                seed=seed,
+                progress=progress,
+                attention_mask=attention_mask,
+                null_attention_mask=null_attention_mask,
+                previewer=previewer,
+                preview_interval=preview_interval,
+                preview_suffix=preview_suffix,
+                stop_check=stop_check,
+            )
+
+    # Handle early stop results
+    if isinstance(result, dict) and result.get("action"):
+        action = result["action"]
+        latent_visual = result["latents"]
+        step = result["step"]
+        total_steps = result["total_steps"]
+        original_noise = result.get("original_noise")
+        timesteps = result.get("timesteps")
+
+        if action == "save" and checkpoint_path:
+            checkpoint = {
+                "latents": latent_visual.cpu(),
+                "step": step,
+                "total_steps": total_steps,
+                "seed": seed,
+                "text_embeds": {k: v.cpu() for k, v in bs_text_embed.items()},
+                "null_text_embeds": {k: v.cpu() for k, v in bs_null_text_embed.items()},
+                "visual_rope_pos": [v.cpu() for v in visual_rope_pos],
+                "text_rope_pos": text_rope_pos.cpu() if hasattr(text_rope_pos, 'cpu') else text_rope_pos,
+                "null_text_rope_pos": null_text_rope_pos.cpu() if hasattr(null_text_rope_pos, 'cpu') else null_text_rope_pos,
+                "cond_latents": cond_latents.cpu(),
+                "shape": shape,
+                "guidance_weight": guidance_weight,
+                "scheduler_scale": scheduler_scale,
+                "mode": "v2v",
+            }
+            torch.save(checkpoint, checkpoint_path)
+            print(f">>> Checkpoint saved to {checkpoint_path} at step {step}/{total_steps}", flush=True)
+            return None
+
+        print(f">>> Decoding video from step {step}/{total_steps}", flush=True)
+
+        if original_noise is not None and timesteps is not None:
+            noise_remaining = timesteps[step]
+            latent_visual = latent_visual - (original_noise * noise_remaining)
+            print(f">>> Subtracted {noise_remaining.item():.4f} of original noise", flush=True)
+    else:
+        latent_visual = result
+
+    # Apply normalization to transition between conditioning and generated frames
+    with torch.no_grad():
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            # Normalize the generated portion
+            latent_visual = normalize_first_frame(latent_visual, reference_frames=5)
+
+    # Save latents if requested
+    if save_latents:
+        latent_checkpoint = {
+            "latents": latent_visual.cpu(),
+            "shape": (bs, num_cond_frames + duration, height, width, dim),
+            "mode": "v2v",
+            "vae_scaling_factor": vae.config.scaling_factor,
+            "latents_dtype": str(latent_visual.dtype),
+        }
+        torch.save(latent_checkpoint, save_latents)
+        print(f">>> Latents saved to {save_latents}", flush=True)
+
+    # Offload DiT before VAE decode
+    if hasattr(dit, 'offload_all_blocks'):
+        dit.offload_all_blocks()
+
+    if offload or force_offload:
+        dit = dit.to('cpu', non_blocking=True)
+    torch.cuda.empty_cache()
+
+    log_vram_usage("AFTER DiT OFFLOAD, BEFORE VAE DECODE (V2V)", dit=dit, vae=vae, text_embedder=None)
+
+    if offload or force_offload:
+        vae = vae.to(vae_device, non_blocking=True)
+
+    with torch.no_grad():
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            images = latent_visual.reshape(
+                bs,
+                -1,
+                latent_visual.shape[-3],
+                latent_visual.shape[-2],
+                latent_visual.shape[-1],
+            )
+            images = images.to(device=vae_device)
+            images = (images / vae.config.scaling_factor).permute(0, 4, 1, 2, 3)
+            images = vae.decode(images).sample
+            images = ((images.clamp(-1.0, 1.0) + 1.0) * 127.5).to(torch.uint8)
+
+    log_vram_usage("AFTER VAE DECODE, BEFORE OFFLOAD (V2V)", dit=dit, vae=vae, text_embedder=None)
+
+    if offload or force_offload:
+        vae = vae.to('cpu', non_blocking=True)
+    torch.cuda.empty_cache()
+
+    return images
+
+
 def generate_sample_i2v(
     shape,
     caption,

@@ -84,13 +84,29 @@ class TransformerDecoderBlock(nn.Module):
             dtype=dtype
         )
 
-    def forward(self, visual_embed, text_embed, time_embed, rope, sparse_params, attention_mask=None):
+    def forward(self, visual_embed, text_embed, time_embed, rope, sparse_params, attention_mask=None,
+                num_cond_latents=None, return_kv=False, kv_cache=None):
         self_attn_params, cross_attn_params, ff_params = torch.chunk(
             self.visual_modulation(time_embed), 3, dim=-1
         )
         shift, scale, gate = torch.chunk(self_attn_params, 3, dim=-1)
         visual_out = apply_scale_shift_norm(self.self_attention_norm, visual_embed, scale, shift)
-        visual_out = self.self_attention(visual_out, rope, sparse_params)
+
+        # Handle KV cache for video continuation
+        if kv_cache is not None:
+            visual_out = self.self_attention.forward_with_kv_cache(
+                visual_out, rope, kv_cache, num_cond_latents, sparse_params
+            )
+        else:
+            attn_output = self.self_attention(
+                visual_out, rope, sparse_params, num_cond_latents, return_kv
+            )
+            if return_kv:
+                visual_out, kv_cache_out = attn_output
+            else:
+                visual_out = attn_output
+                kv_cache_out = None
+
         visual_embed = apply_gate_sum(visual_embed, visual_out, gate)
 
         shift, scale, gate = torch.chunk(cross_attn_params, 3, dim=-1)
@@ -102,6 +118,9 @@ class TransformerDecoderBlock(nn.Module):
         visual_out = apply_scale_shift_norm(self.feed_forward_norm, visual_embed, scale, shift)
         visual_out = self.feed_forward(visual_out)
         visual_embed = apply_gate_sum(visual_embed, visual_out, gate)
+
+        if return_kv:
+            return visual_embed, kv_cache_out
         return visual_embed
 
 
@@ -202,7 +221,10 @@ class DiffusionTransformer3D(nn.Module):
         text_rope_pos,
         scale_factor=(1.0, 1.0, 1.0),
         sparse_params=None,
-        attention_mask=None
+        attention_mask=None,
+        num_cond_latents=None,
+        return_kv=False,
+        kv_cache_dict=None
     ):
         text_embed, time_embed, text_rope, visual_embed = self.before_text_transformer_blocks(
             text_embed, time, pooled_text_embed, x, text_rope_pos)
@@ -213,11 +235,30 @@ class DiffusionTransformer3D(nn.Module):
         visual_embed, visual_shape, to_fractal, visual_rope = self.before_visual_transformer_blocks(
             visual_embed, visual_rope_pos, scale_factor, sparse_params)
 
-        for visual_transformer_block in self.visual_transformer_blocks:
-            visual_embed = visual_transformer_block(visual_embed, text_embed, time_embed,
-                                                    visual_rope, sparse_params, attention_mask)
-        
+        # Process visual transformer blocks with KV cache support
+        kv_cache_dict_ret = {}
+        for i, visual_transformer_block in enumerate(self.visual_transformer_blocks):
+            # Get KV cache for this block if using cache
+            block_kv_cache = kv_cache_dict.get(i) if kv_cache_dict else None
+
+            block_output = visual_transformer_block(
+                visual_embed, text_embed, time_embed,
+                visual_rope, sparse_params, attention_mask,
+                num_cond_latents=num_cond_latents,
+                return_kv=return_kv,
+                kv_cache=block_kv_cache
+            )
+
+            if return_kv:
+                visual_embed, kv_cache = block_output
+                kv_cache_dict_ret[i] = kv_cache
+            else:
+                visual_embed = block_output
+
         x = self.after_blocks(visual_embed, visual_shape, to_fractal, text_embed, time_embed)
+
+        if return_kv:
+            return x, kv_cache_dict_ret
         return x
 
 

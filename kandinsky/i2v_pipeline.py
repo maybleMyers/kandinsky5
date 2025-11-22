@@ -8,13 +8,110 @@ import torchvision.transforms.functional as F
 from torchvision.transforms import ToPILImage
 from PIL import Image
 
-from .generation_utils import generate_sample_i2v
+from .generation_utils import generate_sample_i2v, generate_sample_v2v
 
 torch._dynamo.config.suppress_errors = True
 torch._dynamo.config.verbose = True
 
 MAX_AREA = 2048*2048
 MAX_DIMENSION = 2048  # Maximum pixels per dimension to fit within RoPE max_pos=128
+
+
+def extract_last_frames_from_video(video_path, num_frames, target_fps=24):
+    """
+    Extract the last N frames from a video file.
+
+    Args:
+        video_path: Path to the video file
+        num_frames: Number of frames to extract from the end
+        target_fps: Target FPS for frame extraction (default 24)
+
+    Returns:
+        List of PIL Images (last N frames)
+    """
+    import av
+    import numpy as np
+
+    container = av.open(video_path)
+    video_stream = container.streams.video[0]
+
+    # Get video properties
+    video_fps = float(video_stream.average_rate)
+    total_frames = video_stream.frames
+
+    # Calculate frame indices to extract
+    # Downsample to target_fps if video fps is higher
+    if video_fps > target_fps:
+        frame_skip = int(video_fps / target_fps)
+    else:
+        frame_skip = 1
+
+    # Decode all frames and keep last N
+    frames = []
+    for frame in container.decode(video=0):
+        if len(frames) >= num_frames * frame_skip:
+            frames.pop(0)
+        frames.append(frame)
+
+    container.close()
+
+    # Apply frame skip to get target fps
+    frames = frames[::frame_skip][-num_frames:]
+
+    # Convert to PIL Images
+    pil_frames = []
+    for frame in frames:
+        img = frame.to_image()
+        pil_frames.append(img.convert('RGB'))
+
+    return pil_frames
+
+
+def get_conditioning_frames_from_video(video_path, num_frames, vae, device, alignment=16):
+    """
+    Load video and encode last N frames to latent space for video continuation.
+
+    Args:
+        video_path: Path to the video file
+        num_frames: Number of conditioning frames to extract
+        vae: VAE model
+        device: Device to use
+        alignment: Pixel alignment for resizing
+
+    Returns:
+        Tuple of (latents, scale_factor)
+        latents: Tensor of shape [num_frames, H, W, C]
+    """
+    # Extract frames from video
+    pil_frames = extract_last_frames_from_video(video_path, num_frames)
+
+    if len(pil_frames) < num_frames:
+        raise ValueError(f"Video has only {len(pil_frames)} frames, need {num_frames}")
+
+    # Convert frames to tensors and encode
+    latents_list = []
+    scale_factor = None
+
+    for i, pil_image in enumerate(pil_frames):
+        # Convert to tensor
+        image = F.pil_to_tensor(pil_image).unsqueeze(0)
+        image, k = resize_image(image, max_area=MAX_AREA, alignment=alignment)
+        image = image / 127.5 - 1.
+
+        if scale_factor is None:
+            scale_factor = k
+
+        with torch.no_grad():
+            vae_dtype = next(vae.parameters()).dtype
+            image = image.to(device=device, dtype=vae_dtype).transpose(0, 1).unsqueeze(0)
+            lat_image = vae.encode(image, opt_tiling=False).latent_dist.sample().squeeze(0).permute(1, 2, 3, 0)
+            lat_image = lat_image * vae.config.scaling_factor
+            latents_list.append(lat_image)
+
+    # Stack latents: [num_frames, H, W, C]
+    latents = torch.cat(latents_list, dim=0)
+
+    return latents, scale_factor
 
 def log_vram_usage(stage_name, dit=None, vae=None, text_embedder=None):
     """Log VRAM usage and model locations for debugging."""
