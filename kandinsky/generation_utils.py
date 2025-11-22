@@ -611,7 +611,6 @@ def generate_v2v(
     guidance_weight,
     scheduler_scale,
     cond_latents,
-    kv_cache_dict,
     conf,
     progress=False,
     seed=6554,
@@ -623,33 +622,32 @@ def generate_v2v(
     stop_check=None,
 ):
     """
-    Generate video continuation using KV cache.
+    Generate video continuation using visual conditioning (like I2V but with multiple frames).
 
     Args:
         model: DiT model
         device: Device to use
-        shape: Shape of output (bs * duration, height, width, dim) - for noise frames only
+        shape: Shape of FULL output (bs * total_frames, height, width, dim)
         num_steps: Number of denoising steps
         text_embeds: Text embeddings
         null_text_embeds: Null text embeddings for CFG
-        visual_rope_pos: Visual RoPE positions (for full sequence: cond + noise)
+        visual_rope_pos: Visual RoPE positions for full sequence
         text_rope_pos: Text RoPE positions
         null_text_rope_pos: Null text RoPE positions
         guidance_weight: CFG weight
         scheduler_scale: Scheduler scale
         cond_latents: Conditioning latents [num_cond_frames, H, W, C]
-        kv_cache_dict: Pre-computed KV cache
         conf: Model configuration
         ...
 
     Returns:
-        Generated latents (noise frames only, or full sequence)
+        Generated latents for full sequence
     """
     num_cond_frames = cond_latents.shape[0]
 
     g = torch.Generator(device="cuda")
     g.manual_seed(seed)
-    # Generate noise only for new frames
+    # Generate noise for FULL sequence (cond + new frames)
     img = torch.randn(*shape, device=device, generator=g)
 
     # Store original noise for early-stop decode
@@ -667,11 +665,17 @@ def generate_v2v(
             visual_cond_mask = torch.zeros(
                 [*img.shape[:-1], 1], dtype=img.dtype, device=img.device
             )
+            # CRITICAL: Inject conditioning frames at each step (like I2V)
+            # This preserves the conditioning frames throughout denoising
+            cond_latents_device = cond_latents.to(device=img.device, dtype=img.dtype)
+            img[:num_cond_frames] = cond_latents_device
+            visual_cond_mask[:num_cond_frames] = 1
+
             model_input = torch.cat([img, visual_cond, visual_cond_mask], dim=-1)
         else:
             model_input = img
 
-        # Forward pass with KV cache
+        # Standard forward pass (no KV cache needed)
         with torch._dynamo.utils.disable_cache_limit():
             pred_velocity = model(
                 model_input,
@@ -683,8 +687,6 @@ def generate_v2v(
                 scale_factor=conf.metrics.scale_factor,
                 sparse_params=sparse_params,
                 attention_mask=attention_mask,
-                num_cond_latents=num_cond_frames,
-                kv_cache_dict=kv_cache_dict,
             )
 
             # CFG
@@ -699,8 +701,6 @@ def generate_v2v(
                     scale_factor=conf.metrics.scale_factor,
                     sparse_params=sparse_params,
                     attention_mask=null_attention_mask,
-                    num_cond_latents=num_cond_frames,
-                    kv_cache_dict=kv_cache_dict,
                 )
                 pred_velocity = uncond_pred_velocity + guidance_weight * (
                     pred_velocity - uncond_pred_velocity
@@ -732,9 +732,9 @@ def generate_v2v(
             except Exception as e:
                 print(f">>> ERROR during preview generation at step {i + 1}: {e}", flush=True)
 
-    # Concatenate conditioning frames with generated frames
-    full_latents = torch.cat([cond_latents, img], dim=0)
-    return full_latents
+    # Ensure conditioning frames are exactly preserved in final output
+    img[:num_cond_frames] = cond_latents.to(device=img.device, dtype=img.dtype)
+    return img
 
 
 def generate_sample_v2v(
@@ -816,10 +816,10 @@ def generate_sample_v2v(
     attention_mask = attention_mask.to(device=device)
     null_attention_mask = null_attention_mask.to(device=device)
 
-    # Visual RoPE positions for NOISE frames only (positions start after conditioning)
+    # Visual RoPE positions for FULL sequence (cond + new frames)
     total_frames = num_cond_frames + duration
     visual_rope_pos = [
-        torch.arange(num_cond_frames, total_frames),  # [4, 5, 6, ..., 34] for 4 cond + 31 noise
+        torch.arange(total_frames),  # [0, 1, 2, 3, 4, 5, ..., 34] for full sequence
         torch.arange(height // conf.model.dit_params.patch_size[1]),
         torch.arange(width // conf.model.dit_params.patch_size[2]),
     ]
@@ -833,24 +833,12 @@ def generate_sample_v2v(
 
     with torch.no_grad():
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            # Compute KV cache for conditioning frames
-            print(f">>> Computing KV cache for {num_cond_frames} conditioning frames...", flush=True)
-            kv_cache_dict = compute_kv_cache(
-                dit,
-                device,
-                cond_latents.to(device=device, dtype=torch.bfloat16),
-                bs_text_embed,
-                text_rope_pos,
-                conf,
-                attention_mask=attention_mask,
-            )
-            print(f">>> KV cache computed for {len(kv_cache_dict)} blocks", flush=True)
-
-            # Generate continuation
+            # Generate video with visual conditioning (like I2V but with multiple frames)
+            print(f">>> Generating video continuation with {num_cond_frames} conditioning frames...", flush=True)
             result = generate_v2v(
                 dit,
                 device,
-                (bs * duration, height, width, dim),
+                (bs * total_frames, height, width, dim),  # Full sequence shape
                 num_steps,
                 bs_text_embed,
                 bs_null_text_embed,
@@ -860,7 +848,6 @@ def generate_sample_v2v(
                 guidance_weight,
                 scheduler_scale,
                 cond_latents.to(device=device, dtype=torch.bfloat16),
-                kv_cache_dict,
                 conf,
                 seed=seed,
                 progress=progress,
@@ -911,16 +898,9 @@ def generate_sample_v2v(
     else:
         latent_visual = result
 
-    # Apply normalization to transition between conditioning and generated frames
-    # IMPORTANT: Normalize GENERATED frames to match CONDITIONING frames (not vice versa!)
-    # This ensures the generated content matches the input video's appearance
-    with torch.no_grad():
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            latent_visual = normalize_generated_frames_to_conditioning(
-                latent_visual,
-                num_cond_frames=num_cond_frames,
-                transition_frames=5
-            )
+    # Note: No normalization needed - conditioning frames are preserved during denoising
+    # The visual conditioning mechanism (setting img[:num_cond] = cond_latents)
+    # ensures clean transition from conditioning to generated frames
 
     # Save latents if requested
     if save_latents:

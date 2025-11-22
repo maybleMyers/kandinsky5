@@ -810,7 +810,7 @@ if __name__ == "__main__":
             print(f">>> New frames to generate: {num_new_frames}")
             print(f">>> Output shape: {shape}")
 
-            # Generate continuation using KV cache
+            # Generate continuation using visual conditioning (I2V approach)
             x = generate_sample_v2v(
                 shape,
                 args.prompt,
