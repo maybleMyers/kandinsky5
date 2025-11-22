@@ -495,7 +495,6 @@ def compute_kv_cache(
     device,
     cond_latents,
     text_embeds,
-    visual_rope_pos,
     text_rope_pos,
     conf,
     attention_mask=None,
@@ -508,7 +507,6 @@ def compute_kv_cache(
         device: Device to use
         cond_latents: Conditioning latents [num_cond_frames, H, W, C]
         text_embeds: Text embeddings
-        visual_rope_pos: Visual RoPE positions
         text_rope_pos: Text RoPE positions
         conf: Model configuration
         attention_mask: Attention mask
@@ -518,6 +516,7 @@ def compute_kv_cache(
     """
     # Create timestep=0 for conditioning frames (they are "clean")
     num_cond_frames = cond_latents.shape[0]
+    height, width = cond_latents.shape[1:3]
     timestep = torch.zeros(1, device=device)
 
     # Build model input for conditioning frames
@@ -530,6 +529,13 @@ def compute_kv_cache(
     else:
         model_input = cond_latents
 
+    # Visual RoPE positions for conditioning frames ONLY
+    visual_rope_pos_cond = [
+        torch.arange(num_cond_frames),
+        torch.arange(height // conf.model.dit_params.patch_size[1]),
+        torch.arange(width // conf.model.dit_params.patch_size[2]),
+    ]
+
     sparse_params = get_sparse_params(conf, {"visual": cond_latents}, device)
 
     # Forward pass with return_kv=True
@@ -539,7 +545,7 @@ def compute_kv_cache(
             text_embeds["text_embeds"],
             text_embeds["pooled_embed"],
             timestep * 1000,
-            visual_rope_pos,
+            visual_rope_pos_cond,
             text_rope_pos,
             scale_factor=conf.metrics.scale_factor,
             sparse_params=sparse_params,
@@ -793,7 +799,6 @@ def generate_sample_v2v(
                 device,
                 cond_latents.to(device=device, dtype=torch.bfloat16),
                 bs_text_embed,
-                visual_rope_pos,
                 text_rope_pos,
                 conf,
                 attention_mask=attention_mask,
