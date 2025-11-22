@@ -1,6 +1,9 @@
+import os
+
 # Global flag to control torch.compile() usage
 # Set this to False before importing model modules to disable compilation
-USE_TORCH_COMPILE = True
+# Check environment variable first (default to True if not set)
+USE_TORCH_COMPILE = os.environ.get("KANDINSKY_NO_COMPILE", "0") != "1"
 
 def maybe_compile(fn=None, **compile_kwargs):
     """

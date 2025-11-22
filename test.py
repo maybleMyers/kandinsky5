@@ -1,3 +1,64 @@
+import argparse
+import time
+import warnings
+import logging
+import os
+import tempfile
+import sys
+
+# --- EARLY CONFIGURATION START ---
+# 1. Mock triton on Windows if cl.exe is missing to prevent bitsandbytes/diffusers crash
+if sys.platform == "win32":
+    import shutil
+    if shutil.which("cl.exe") is None:
+        from unittest.mock import MagicMock
+        import types
+        
+        # Create a mock module for triton
+        triton_mock = MagicMock()
+        triton_mock.__path__ = [] # Essential to make it behave like a package
+        sys.modules["triton"] = triton_mock
+        
+        # Create a mock module for triton.language
+        triton_language_mock = MagicMock()
+        sys.modules["triton.language"] = triton_language_mock
+        triton_mock.language = triton_language_mock
+        
+        print("WARNING: Triton mocked to bypass missing cl.exe (C++ compiler).")
+
+# 2. Early parse --no_compile to set environment variable BEFORE importing kandinsky
+def _early_parse_no_compile():
+    for i, arg in enumerate(sys.argv):
+        if arg == '--no_compile':
+            return True
+    return False
+
+_no_compile = _early_parse_no_compile()
+if _no_compile:
+    os.environ["KANDINSKY_NO_COMPILE"] = "1"
+    print("torch.compile() disabled via environment variable for faster startup")
+# --- EARLY CONFIGURATION END ---
+
+import torch
+from PIL import Image
+
+# Now it is safe to import kandinsky modules
+import kandinsky.models.compile_config as compile_config
+# Double check that the flag was set correctly
+if _no_compile and compile_config.USE_TORCH_COMPILE:
+    print("WARNING: compile_config.USE_TORCH_COMPILE is still True despite --no_compile!")
+    compile_config.USE_TORCH_COMPILE = False # Force it just in case
+
+from kandinsky import get_T2V_pipeline, get_I2V_pipeline, get_I2V_pipeline_with_block_swap, get_T2V_pipeline_with_block_swap, get_T2I_pipeline
+from kandinsky.generation_utils import generate_sample_from_checkpoint, generate_sample_i2v_from_checkpoint
+
+try:
+    from scripts.latentpreviewer import LatentPreviewer
+except ImportError:
+    LatentPreviewer = None
+
+
+def disable_warnings():
     warnings.filterwarnings("ignore")
     logging.getLogger("torch").setLevel(logging.ERROR)
     torch._logging.set_logs(
