@@ -45,6 +45,8 @@ Changlog:
   11/17/2025  
     Add preview support. Add int8 support to drastically lower ram/vram reqs.  
 
+## Screenshot of working settings for 24GB VRAM 10s t2v video
+![GUI Screenshot](assets/screenshot.png)
 
 ### Authors
 <B>Project Leader:</B> Denis Dimitrov</br>
@@ -88,7 +90,7 @@ Changlog:
 
 We gratefully acknowledge the open-source projects and research that made Kandinsky 5.0 possible:
 
-- [INT8 Suport](https://github.com/lodestone-rock/RamTorch) — for int8 drop in support and triton kernel.
+- [INT8 Suport](https://github.com/lodestone-rock/RamTorch) — Lodestone's ramtorch for int8 drop in support and triton kernel.
 - [PyTorch](https://pytorch.org/) — for model training and inference.  
 - [FlashAttention 3](https://github.com/Dao-AILab/flash-attention) — for efficient attention and faster inference.  
 - [Qwen2.5-VL](https://github.com/QwenLM/Qwen3-VL) — for providing high-quality text embeddings.  
