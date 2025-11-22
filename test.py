@@ -838,15 +838,66 @@ if __name__ == "__main__":
                 save_latents=args.save_latents,
             )
 
-            # Save the output video
+            # Concatenate input video with newly generated frames
             if x is not None:
                 import torchvision
+                import av
+                import numpy as np
+
+                # Load original input video frames at 24 fps
+                print(f">>> Loading input video for concatenation: {args.input_video}")
+                container = av.open(args.input_video)
+                video_stream = container.streams.video[0]
+                video_fps = float(video_stream.average_rate)
+
+                # Calculate frame skip for 24 fps target
+                if video_fps > 24:
+                    frame_skip = int(video_fps / 24)
+                else:
+                    frame_skip = 1
+
+                input_frames = []
+                frame_count = 0
+                for frame in container.decode(video=0):
+                    if frame_count % frame_skip == 0:
+                        img = frame.to_ndarray(format='rgb24')
+                        input_frames.append(img)
+                    frame_count += 1
+                container.close()
+
+                # Convert to tensor [num_frames, H, W, C]
+                input_video_tensor = torch.from_numpy(np.stack(input_frames)).float()
+
+                # Get only the NEW generated frames (exclude conditioning frames)
+                # x shape: [1, C, total_frames, H, W] -> [total_frames, H, W, C]
+                generated_video = x[0].float().permute(1, 2, 3, 0).cpu()
+                new_frames = generated_video[args.num_cond_frames:]  # Exclude conditioning frames
+
+                # Resize input frames to match generated resolution if needed
+                gen_h, gen_w = new_frames.shape[1:3]
+                if input_video_tensor.shape[1] != gen_h or input_video_tensor.shape[2] != gen_w:
+                    print(f">>> Resizing input video from {input_video_tensor.shape[1]}x{input_video_tensor.shape[2]} to {gen_h}x{gen_w}")
+                    input_video_tensor = torch.nn.functional.interpolate(
+                        input_video_tensor.permute(0, 3, 1, 2),  # [N, C, H, W]
+                        size=(gen_h, gen_w),
+                        mode='bilinear',
+                        align_corners=False
+                    ).permute(0, 2, 3, 1)  # [N, H, W, C]
+
+                # Concatenate: input video + new generated frames
+                final_video = torch.cat([input_video_tensor, new_frames], dim=0)
+
+                print(f">>> Input video frames: {input_video_tensor.shape[0]}")
+                print(f">>> New generated frames: {new_frames.shape[0]}")
+                print(f">>> Final video frames: {final_video.shape[0]}")
+
                 torchvision.io.write_video(
                     args.output_filename,
-                    x[0].float().permute(1, 2, 3, 0).cpu().numpy(),
+                    final_video.numpy(),
                     fps=24,
                     options={"crf": "5"},
                 )
+                print(f">>> Saved concatenated video to {args.output_filename}")
         else:
             # Standard Image-to-Video mode
             image_to_use = args.image
