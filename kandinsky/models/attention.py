@@ -27,16 +27,28 @@ def sdpa(q, k, v, attn_mask=None):
     query = q.transpose(1, 2).contiguous()
     key = k.transpose(1, 2).contiguous()
     value = v.transpose(1, 2).contiguous()
-    out = (
-        F.scaled_dot_product_attention(
-            query,
-            key,
-            value,
-            attn_mask=attn_mask
+    
+    # On Windows, SDPA often falls back to the memory-intensive "math" path for large sequences,
+    # causing massive OOMs (e.g., 236GB). We force efficient kernels here to prevent this.
+    # On Linux, the heuristics are usually better, so we can leave it as is or force it there too.
+    import sys
+    if sys.platform == "win32":
+        ctx = torch.backends.cuda.sdpa_kernel(torch.backends.cuda.SDPBackend.FLASH_ATTENTION, torch.backends.cuda.SDPBackend.EFFICIENT_ATTENTION)
+    else:
+        from contextlib import nullcontext
+        ctx = nullcontext()
+
+    with ctx:
+        out = (
+            F.scaled_dot_product_attention(
+                query,
+                key,
+                value,
+                attn_mask=attn_mask
+            )
+            .transpose(1, 2)
+            .contiguous()
         )
-        .transpose(1, 2)
-        .contiguous()
-    )
     return out
 
 @maybe_compile(mode="max-autotune-no-cudagraphs", dynamic=True)
