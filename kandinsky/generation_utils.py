@@ -775,10 +775,10 @@ def generate_sample_v2v(
     attention_mask = attention_mask.to(device=device)
     null_attention_mask = null_attention_mask.to(device=device)
 
-    # Visual RoPE positions for FULL sequence (cond + noise)
+    # Visual RoPE positions for NOISE frames only (positions start after conditioning)
     total_frames = num_cond_frames + duration
     visual_rope_pos = [
-        torch.arange(total_frames),
+        torch.arange(num_cond_frames, total_frames),  # [4, 5, 6, ..., 34] for 4 cond + 31 noise
         torch.arange(height // conf.model.dit_params.patch_size[1]),
         torch.arange(width // conf.model.dit_params.patch_size[2]),
     ]

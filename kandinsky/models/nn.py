@@ -310,22 +310,17 @@ class MultiheadSelfAttentionDec(nn.Module):
         query, key, value = self.get_qkv(x)
         query, key = self.norm_qk(query, key)
 
-        # Cache K, V before RoPE if requested
+        # Apply RoPE first
+        query = apply_rotary(query, rope).type_as(query)
+        key = apply_rotary(key, rope).type_as(key)
+
+        # Cache K, V AFTER RoPE if requested
         if return_kv:
             k_cache = key.clone()
             v_cache = value.clone()
 
-        query = apply_rotary(query, rope).type_as(query)
-        key = apply_rotary(key, rope).type_as(key)
-
         # Handle conditioning latents (for video continuation)
         if num_cond_latents is not None and num_cond_latents > 0:
-            # Get spatial dimensions from shape
-            seq_len = x.shape[0]  # Total sequence length (T*H*W)
-            # Assume H*W is constant, so num_cond_latents gives T_cond
-            # For simplicity, we calculate tokens per frame
-            # This needs to be passed or calculated properly
-
             # Conditioning tokens only attend to themselves
             q_cond = query[:num_cond_latents].contiguous()
             k_cond = key[:num_cond_latents].contiguous()
@@ -363,26 +358,18 @@ class MultiheadSelfAttentionDec(nn.Module):
         query, key, value = self.get_qkv(x)
         query, key = self.norm_qk(query, key)
 
-        # Get cached K, V
+        # Get cached K, V (already have RoPE applied with positions [0, 1, 2, ...])
         k_cache, v_cache = kv_cache
 
+        # Apply RoPE to new query and key (positions match the input, e.g., [4, 5, 6, ...])
+        query = apply_rotary(query, rope).type_as(query)
+        key = apply_rotary(key, rope).type_as(key)
+
         # Concatenate cached KV with new KV
-        # Cached KV is for conditioning frames, new KV is for noise frames
-        # But we need to apply RoPE to the full sequence properly
-
-        # Create padded query for RoPE (to get correct positions)
-        # The new frames come after conditioning frames
-        seq_len = x.shape[0]
-        cond_len = k_cache.shape[0]
-
-        # Apply RoPE to query (only for noise frames, but with correct position)
-        # We need extended rope that covers cond + noise positions
-        query = apply_rotary(query, rope[cond_len:cond_len+seq_len]).type_as(query)
-
-        # Apply RoPE to full key sequence (cond + noise)
+        # Cached KV already has RoPE for positions [0, 1, 2, 3]
+        # New KV has RoPE for positions [4, 5, ..., N]
         full_key = torch.cat([k_cache, key], dim=0)
         full_value = torch.cat([v_cache, value], dim=0)
-        full_key = apply_rotary(full_key, rope[:cond_len+seq_len]).type_as(full_key)
 
         # Attention: query attends to full key/value
         if sparse_params is not None:
