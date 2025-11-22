@@ -799,10 +799,14 @@ if __name__ == "__main__":
                 torch.cuda.empty_cache()
 
             height, width = cond_latents.shape[1:3]
-            num_new_frames = 1 if args.video_duration == 0 else args.video_duration * 24 // 4 + 1
+            # Calculate new frames: total frames - conditioning frames
+            # This ensures total output matches model's trained frame count
+            total_frames = 1 if args.video_duration == 0 else args.video_duration * 24 // 4 + 1
+            num_new_frames = total_frames - args.num_cond_frames
             shape = (1, num_new_frames, height, width, 16)
 
             print(f">>> Conditioning latents shape: {cond_latents.shape}")
+            print(f">>> Total frames (model expects): {total_frames}")
             print(f">>> New frames to generate: {num_new_frames}")
             print(f">>> Output shape: {shape}")
 
