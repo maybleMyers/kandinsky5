@@ -845,8 +845,8 @@ if __name__ == "__main__":
                 import numpy as np
 
                 # Load original input video frames at 24 fps
-                print(f">>> Loading input video for concatenation: {args.input_video}")
-                container = av.open(args.input_video)
+                print(f">>> Loading input video for concatenation: {args.video}")
+                container = av.open(args.video)
                 video_stream = container.streams.video[0]
                 video_fps = float(video_stream.average_rate)
 
