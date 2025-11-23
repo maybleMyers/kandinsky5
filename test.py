@@ -359,6 +359,26 @@ def parse_args():
         help="Unique suffix for preview files to avoid conflicts in concurrent runs."
     )
 
+    # APG (Adaptive Projected Guidance) for video continuation
+    parser.add_argument(
+        "--use_apg",
+        action='store_true',
+        default=False,
+        help="Enable Adaptive Projected Guidance to reduce color drift in video continuation"
+    )
+    parser.add_argument(
+        "--apg_momentum",
+        type=float,
+        default=-0.75,
+        help="Momentum for APG running average (default: -0.75)"
+    )
+    parser.add_argument(
+        "--apg_norm_threshold",
+        type=float,
+        default=55.0,
+        help="Norm threshold for APG guidance clipping (default: 55.0)"
+    )
+
     # VAE temporal chunking configuration
     parser.add_argument(
         "--vae_temporal_tile_frames",
@@ -836,6 +856,9 @@ if __name__ == "__main__":
                 stop_check=check_stop_signals,
                 checkpoint_path=checkpoint_file,
                 save_latents=args.save_latents,
+                use_apg=args.use_apg,
+                apg_momentum=args.apg_momentum,
+                apg_norm_threshold=args.apg_norm_threshold,
             )
 
             # Concatenate input video with newly generated frames

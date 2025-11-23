@@ -7,6 +7,60 @@ from tqdm import tqdm
 from .models.utils import fast_sta_nabla
 
 
+# APG (Adaptive Projected Guidance) helpers for reducing color drift in long video generation
+# Reference: https://arxiv.org/abs/2410.02416
+
+class MomentumBuffer:
+    """Momentum buffer for APG to smooth guidance updates."""
+    def __init__(self, momentum: float):
+        self.momentum = momentum
+        self.running_average = 0
+
+    def update(self, update_value: torch.Tensor):
+        new_average = self.momentum * self.running_average
+        self.running_average = update_value + new_average
+
+
+def project(v0: torch.Tensor, v1: torch.Tensor):
+    """Project v0 onto v1 and get orthogonal component."""
+    dtype = v0.dtype
+    v0, v1 = v0.double(), v1.double()
+    v1 = torch.nn.functional.normalize(v1, dim=[-1, -2, -3, -4])
+    v0_parallel = (v0 * v1).sum(dim=[-1, -2, -3, -4], keepdim=True) * v1
+    v0_orthogonal = v0 - v0_parallel
+    return v0_parallel.to(dtype), v0_orthogonal.to(dtype)
+
+
+def adaptive_projected_guidance(
+    diff: torch.Tensor,
+    pred_cond: torch.Tensor,
+    momentum_buffer: MomentumBuffer = None,
+    norm_threshold: float = 55,
+):
+    """
+    Apply Adaptive Projected Guidance to reduce color drift.
+
+    Args:
+        diff: Difference between conditional and unconditional predictions
+        pred_cond: Conditional prediction
+        momentum_buffer: Optional momentum buffer for smoothing
+        norm_threshold: Threshold for norm clipping (0 to disable)
+
+    Returns:
+        Adjusted guidance direction (orthogonal component)
+    """
+    if momentum_buffer is not None:
+        momentum_buffer.update(diff)
+        diff = momentum_buffer.running_average
+    if norm_threshold > 0:
+        ones = torch.ones_like(diff)
+        diff_norm = diff.norm(p=2, dim=[-1, -2, -3, -4], keepdim=True)
+        scale_factor = torch.minimum(ones, norm_threshold / diff_norm)
+        diff = diff * scale_factor
+    diff_parallel, diff_orthogonal = project(diff, pred_cond)
+    return diff_orthogonal
+
+
 def adaptive_mean_std_normalization(source, reference):
     source_mean = source.mean(dim=(1,2,3),keepdim=True)
     source_std = source.std(dim=(1,2,3),keepdim=True)
@@ -620,6 +674,9 @@ def generate_v2v(
     preview_interval=None,
     preview_suffix=None,
     stop_check=None,
+    use_apg=False,
+    apg_momentum=-0.75,
+    apg_norm_threshold=55.0,
 ):
     """
     Generate video continuation using visual conditioning (like I2V but with multiple frames).
@@ -653,9 +710,15 @@ def generate_v2v(
     # Store original noise for early-stop decode
     original_noise = img.clone()
 
+    # Store noise for conditioning frames - will be used to add appropriate noise at each step
+    cond_noise = img[:num_cond_frames].clone()
+
     sparse_params = get_sparse_params(conf, {"visual": img}, device)
     timesteps = torch.linspace(1, 0, num_steps + 1, device=device)
     timesteps = scheduler_scale * timesteps / (1 + (scheduler_scale - 1) * timesteps)
+
+    # Initialize APG momentum buffer if enabled
+    momentum_buffer = MomentumBuffer(apg_momentum) if use_apg else None
 
     for i, (timestep, timestep_diff) in enumerate(tqdm(list(zip(timesteps[:-1], torch.diff(timesteps))))):
         time = timestep.unsqueeze(0)
@@ -665,10 +728,12 @@ def generate_v2v(
             visual_cond_mask = torch.zeros(
                 [*img.shape[:-1], 1], dtype=img.dtype, device=img.device
             )
-            # CRITICAL: Inject conditioning frames at each step (like I2V)
-            # This preserves the conditioning frames throughout denoising
+            # CRITICAL: Inject conditioning frames with appropriate noise for current timestep
+            # This maintains consistency between conditioning and generated latent noise levels
             cond_latents_device = cond_latents.to(device=img.device, dtype=img.dtype)
-            img[:num_cond_frames] = cond_latents_device
+            # Add noise scaled by current timestep to conditioning frames
+            noisy_cond = cond_latents_device + timestep * cond_noise.to(device=img.device, dtype=img.dtype)
+            img[:num_cond_frames] = noisy_cond
             visual_cond_mask[:num_cond_frames] = 1
 
             model_input = torch.cat([img, visual_cond, visual_cond_mask], dim=-1)
@@ -702,9 +767,27 @@ def generate_v2v(
                     sparse_params=sparse_params,
                     attention_mask=null_attention_mask,
                 )
-                pred_velocity = uncond_pred_velocity + guidance_weight * (
-                    pred_velocity - uncond_pred_velocity
-                )
+
+                if use_apg:
+                    # Adaptive Projected Guidance to reduce color drift
+                    diff = pred_velocity - uncond_pred_velocity
+                    # Reshape for APG: [frames*H*W, C] -> [1, C, frames, H, W]
+                    h, w = img.shape[1], img.shape[2]
+                    num_frames = img.shape[0]
+                    c = diff.shape[-1]
+                    diff_reshaped = diff.reshape(num_frames, h, w, c).permute(3, 0, 1, 2).unsqueeze(0)
+                    pred_reshaped = pred_velocity.reshape(num_frames, h, w, c).permute(3, 0, 1, 2).unsqueeze(0)
+
+                    apg_result = adaptive_projected_guidance(
+                        diff_reshaped, pred_reshaped, momentum_buffer, apg_norm_threshold
+                    )
+                    # Reshape back: [1, C, frames, H, W] -> [frames*H*W, C]
+                    apg_result = apg_result.squeeze(0).permute(1, 2, 3, 0).reshape(-1, c)
+                    pred_velocity = uncond_pred_velocity + guidance_weight * apg_result
+                else:
+                    pred_velocity = uncond_pred_velocity + guidance_weight * (
+                        pred_velocity - uncond_pred_velocity
+                    )
 
         img = img + timestep_diff * pred_velocity
 
@@ -762,6 +845,9 @@ def generate_sample_v2v(
     stop_check=None,
     checkpoint_path=None,
     save_latents=None,
+    use_apg=False,
+    apg_momentum=-0.75,
+    apg_norm_threshold=55.0,
 ):
     """
     Generate video continuation from conditioning latents using KV cache.
@@ -857,6 +943,9 @@ def generate_sample_v2v(
                 preview_interval=preview_interval,
                 preview_suffix=preview_suffix,
                 stop_check=stop_check,
+                use_apg=use_apg,
+                apg_momentum=apg_momentum,
+                apg_norm_threshold=apg_norm_threshold,
             )
 
     # Handle early stop results
