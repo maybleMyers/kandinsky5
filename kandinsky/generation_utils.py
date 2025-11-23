@@ -771,18 +771,15 @@ def generate_v2v(
                 if use_apg:
                     # Adaptive Projected Guidance to reduce color drift
                     diff = pred_velocity - uncond_pred_velocity
-                    # Reshape for APG: [frames*H*W, C] -> [1, C, frames, H, W]
-                    h, w = img.shape[1], img.shape[2]
-                    num_frames = img.shape[0]
-                    c = diff.shape[-1]
-                    diff_reshaped = diff.reshape(num_frames, h, w, c).permute(3, 0, 1, 2).unsqueeze(0)
-                    pred_reshaped = pred_velocity.reshape(num_frames, h, w, c).permute(3, 0, 1, 2).unsqueeze(0)
+                    # Permute for APG: [frames, H, W, C] -> [1, C, frames, H, W]
+                    diff_reshaped = diff.permute(3, 0, 1, 2).unsqueeze(0)
+                    pred_reshaped = pred_velocity.permute(3, 0, 1, 2).unsqueeze(0)
 
                     apg_result = adaptive_projected_guidance(
                         diff_reshaped, pred_reshaped, momentum_buffer, apg_norm_threshold
                     )
-                    # Reshape back: [1, C, frames, H, W] -> [frames*H*W, C]
-                    apg_result = apg_result.squeeze(0).permute(1, 2, 3, 0).reshape(-1, c)
+                    # Permute back: [1, C, frames, H, W] -> [frames, H, W, C]
+                    apg_result = apg_result.squeeze(0).permute(1, 2, 3, 0)
                     pred_velocity = uncond_pred_velocity + guidance_weight * apg_result
                 else:
                     pred_velocity = uncond_pred_velocity + guidance_weight * (
