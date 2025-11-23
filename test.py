@@ -871,7 +871,13 @@ if __name__ == "__main__":
                 # Get only the NEW generated frames (exclude conditioning frames)
                 # x shape: [1, C, total_frames, H, W] -> [total_frames, H, W, C]
                 generated_video = x[0].float().permute(1, 2, 3, 0).cpu()
-                new_frames = generated_video[args.num_cond_frames:]  # Exclude conditioning frames
+
+                # Convert latent conditioning frames to video frames
+                # VAE has ~4x temporal compression: video_frames = 1 + (latent_frames - 1) * 4
+                num_cond_video_frames = 1 + (args.num_cond_frames - 1) * 4
+                new_frames = generated_video[num_cond_video_frames:]  # Exclude conditioning frames
+
+                print(f">>> Conditioning: {args.num_cond_frames} latent frames = {num_cond_video_frames} video frames")
 
                 # Resize input frames to match generated resolution if needed
                 gen_h, gen_w = new_frames.shape[1:3]
