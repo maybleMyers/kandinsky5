@@ -6,7 +6,6 @@ from tqdm import tqdm
 
 from .models.utils import fast_sta_nabla
 
-
 # APG (Adaptive Projected Guidance) helpers for reducing color drift in long video generation
 # Reference: https://arxiv.org/abs/2410.02416
 
@@ -728,10 +727,12 @@ def generate_v2v(
             visual_cond_mask = torch.zeros(
                 [*img.shape[:-1], 1], dtype=img.dtype, device=img.device
             )
-            # CRITICAL: Inject conditioning frames (clean) to guide the generation
-            # Using clean frames because the model expects strong signal in the conditioning area (based on I2V behavior)
             cond_latents_device = cond_latents.to(device=img.device, dtype=img.dtype)
-            img[:num_cond_frames] = cond_latents_device
+            cond_noise_device = cond_noise.to(device=img.device, dtype=img.dtype)
+            
+            noisy_cond = (1 - timestep) * cond_latents_device + timestep * cond_noise_device
+            
+            img[:num_cond_frames] = noisy_cond
             visual_cond_mask[:num_cond_frames] = 1
 
             model_input = torch.cat([img, visual_cond, visual_cond_mask], dim=-1)
