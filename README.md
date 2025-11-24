@@ -97,6 +97,5 @@ We gratefully acknowledge the open-source projects and research that made Kandin
 - [CLIP](https://github.com/openai/CLIP) — for robust text–image alignment.  
 - [HunyuanVideo](https://huggingface.co/tencent/HunyuanVideo) — for video latent encoding and decoding.  
 - [MagCache](https://github.com/Zehong-Ma/MagCache) — for accelerated inference.
-- [ComfyUI](https://github.com/comfyanonymous/ComfyUI) — for integration into node-based workflows.  
 
 We deeply appreciate the contributions of these communities and researchers to the open-source ecosystem.

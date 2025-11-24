@@ -24,7 +24,8 @@ if _no_compile:
     print("torch.compile() disabled for faster startup")
 
 from kandinsky import get_T2V_pipeline, get_I2V_pipeline, get_I2V_pipeline_with_block_swap, get_T2V_pipeline_with_block_swap, get_T2I_pipeline
-from kandinsky.generation_utils import generate_sample_from_checkpoint, generate_sample_i2v_from_checkpoint
+from kandinsky.generation_utils import generate_sample_from_checkpoint, generate_sample_i2v_from_checkpoint, generate_sample_v2v
+from kandinsky.i2v_pipeline import get_conditioning_frames_from_video
 
 try:
     from scripts.latentpreviewer import LatentPreviewer
@@ -126,7 +127,19 @@ def parse_args():
         "--image",
         type=str,
         default="./assets/test_image.jpg",
-        help="The prompt to generate video"
+        help="The input image for image-to-video generation"
+    )
+    parser.add_argument(
+        "--video",
+        type=str,
+        default=None,
+        help="Input video for video continuation (overrides --image)"
+    )
+    parser.add_argument(
+        "--num_cond_frames",
+        type=int,
+        default=4,
+        help="Number of last frames to use as conditioning for video continuation"
     )
     parser.add_argument(
         "--negative_prompt",
@@ -344,6 +357,26 @@ def parse_args():
         type=str,
         default=None,
         help="Unique suffix for preview files to avoid conflicts in concurrent runs."
+    )
+
+    # APG (Adaptive Projected Guidance) for video continuation
+    parser.add_argument(
+        "--use_apg",
+        action='store_true',
+        default=False,
+        help="Enable Adaptive Projected Guidance to reduce color drift in video continuation"
+    )
+    parser.add_argument(
+        "--apg_momentum",
+        type=float,
+        default=-0.75,
+        help="Momentum for APG running average (default: -0.75)"
+    )
+    parser.add_argument(
+        "--apg_norm_threshold",
+        type=float,
+        default=55.0,
+        help="Norm threshold for APG guidance clipping (default: 55.0)"
     )
 
     # VAE temporal chunking configuration
@@ -757,28 +790,167 @@ if __name__ == "__main__":
                  save_path=args.output_filename,
                  seed=args.seed)
     elif is_i2v:
-        image_to_use = args.image
-        if args.width and args.height:
-            alignment = 128 if args.attention_type == "nabla" else 32
-            print(f"Resizing input image to {args.width}x{args.height} for i2v mode (alignment: {alignment})")
-            image_to_use = resize_image_to_resolution(args.image, args.width, args.height, alignment)
+        # Check if video continuation mode
+        if args.video is not None:
+            # Video-to-Video continuation mode
+            print(f">>> VIDEO CONTINUATION MODE")
+            print(f">>> Input video: {args.video}")
+            print(f">>> Conditioning frames: {args.num_cond_frames}")
 
-        x = pipe(args.prompt,
-                 image=image_to_use,
-                 time_length=args.video_duration,
-                 num_steps=args.sample_steps,
-                 guidance_weight=args.guidance_weight,
-                 scheduler_scale=args.scheduler_scale,
-                 negative_caption=args.negative_prompt,
-                 expand_prompts=args.expand_prompt,
-                 clip_prompt=args.clip_prompt,
-                 save_path=args.output_filename,
-                 seed=args.seed,
-                 preview=args.preview,
-                 preview_suffix=args.preview_suffix,
-                 stop_check=check_stop_signals,
-                 checkpoint_path=checkpoint_file,
-                 save_latents=args.save_latents)
+            alignment = 128 if args.attention_type == "nabla" else 32
+
+            # Load VAE for encoding conditioning frames
+            force_offload = hasattr(pipe.dit, 'enable_block_swap') and pipe.dit.enable_block_swap
+            if pipe.offload or force_offload:
+                pipe.vae = pipe.vae.to(pipe.device_map["vae"], non_blocking=True)
+
+            # Extract and encode conditioning frames from video
+            cond_latents, scale_factor = get_conditioning_frames_from_video(
+                args.video,
+                args.num_cond_frames,
+                pipe.vae,
+                pipe.device_map["vae"],
+                alignment=alignment
+            )
+
+            # Offload VAE after encoding
+            if pipe.offload or force_offload:
+                pipe.vae = pipe.vae.to("cpu", non_blocking=True)
+                torch.cuda.empty_cache()
+
+            height, width = cond_latents.shape[1:3]
+            # Calculate new frames: total frames - conditioning frames
+            # This ensures total output matches model's trained frame count
+            total_frames = 1 if args.video_duration == 0 else args.video_duration * 24 // 4 + 1
+            num_new_frames = total_frames - args.num_cond_frames
+            shape = (1, num_new_frames, height, width, 16)
+
+            print(f">>> Conditioning latents shape: {cond_latents.shape}")
+            print(f">>> Total frames (model expects): {total_frames}")
+            print(f">>> New frames to generate: {num_new_frames}")
+            print(f">>> Output shape: {shape}")
+
+            # Generate continuation using visual conditioning (I2V approach)
+            x = generate_sample_v2v(
+                shape,
+                args.prompt,
+                pipe.dit,
+                pipe.vae,
+                pipe.conf,
+                text_embedder=pipe.text_embedder,
+                cond_latents=cond_latents,
+                num_steps=args.sample_steps if args.sample_steps else pipe.num_steps,
+                guidance_weight=args.guidance_weight if args.guidance_weight else pipe.guidance_weight,
+                scheduler_scale=args.scheduler_scale,
+                negative_caption=args.negative_prompt,
+                clip_prompt=args.clip_prompt,
+                seed=args.seed,
+                device=pipe.device_map["dit"],
+                vae_device=pipe.device_map["vae"],
+                progress=True,
+                offload=pipe.offload,
+                force_offload=force_offload,
+                previewer=None,
+                preview_interval=args.preview,
+                preview_suffix=args.preview_suffix,
+                stop_check=check_stop_signals,
+                checkpoint_path=checkpoint_file,
+                save_latents=args.save_latents,
+                use_apg=args.use_apg,
+                apg_momentum=args.apg_momentum,
+                apg_norm_threshold=args.apg_norm_threshold,
+            )
+
+            # Concatenate input video with newly generated frames
+            if x is not None:
+                import torchvision
+                import av
+                import numpy as np
+
+                # Load original input video frames at 24 fps
+                print(f">>> Loading input video for concatenation: {args.video}")
+                container = av.open(args.video)
+                video_stream = container.streams.video[0]
+                video_fps = float(video_stream.average_rate)
+
+                # Calculate frame skip for 24 fps target
+                if video_fps > 24:
+                    frame_skip = int(video_fps / 24)
+                else:
+                    frame_skip = 1
+
+                input_frames = []
+                frame_count = 0
+                for frame in container.decode(video=0):
+                    if frame_count % frame_skip == 0:
+                        img = frame.to_ndarray(format='rgb24')
+                        input_frames.append(img)
+                    frame_count += 1
+                container.close()
+
+                # Convert to tensor [num_frames, H, W, C]
+                input_video_tensor = torch.from_numpy(np.stack(input_frames)).float()
+
+                # Get only the NEW generated frames (exclude conditioning frames)
+                # x shape: [1, C, total_frames, H, W] -> [total_frames, H, W, C]
+                generated_video = x[0].float().permute(1, 2, 3, 0).cpu()
+
+                # Convert latent conditioning frames to video frames
+                # VAE has ~4x temporal compression: video_frames = 1 + (latent_frames - 1) * 4
+                num_cond_video_frames = 1 + (args.num_cond_frames - 1) * 4
+                new_frames = generated_video[num_cond_video_frames:]  # Exclude conditioning frames
+
+                print(f">>> Conditioning: {args.num_cond_frames} latent frames = {num_cond_video_frames} video frames")
+
+                # Resize input frames to match generated resolution if needed
+                gen_h, gen_w = new_frames.shape[1:3]
+                if input_video_tensor.shape[1] != gen_h or input_video_tensor.shape[2] != gen_w:
+                    print(f">>> Resizing input video from {input_video_tensor.shape[1]}x{input_video_tensor.shape[2]} to {gen_h}x{gen_w}")
+                    input_video_tensor = torch.nn.functional.interpolate(
+                        input_video_tensor.permute(0, 3, 1, 2),  # [N, C, H, W]
+                        size=(gen_h, gen_w),
+                        mode='bilinear',
+                        align_corners=False
+                    ).permute(0, 2, 3, 1)  # [N, H, W, C]
+
+                # Concatenate: input video + new generated frames
+                final_video = torch.cat([input_video_tensor, new_frames], dim=0)
+
+                print(f">>> Input video frames: {input_video_tensor.shape[0]}")
+                print(f">>> New generated frames: {new_frames.shape[0]}")
+                print(f">>> Final video frames: {final_video.shape[0]}")
+
+                torchvision.io.write_video(
+                    args.output_filename,
+                    final_video.numpy(),
+                    fps=24,
+                    options={"crf": "5"},
+                )
+                print(f">>> Saved concatenated video to {args.output_filename}")
+        else:
+            # Standard Image-to-Video mode
+            image_to_use = args.image
+            if args.width and args.height:
+                alignment = 128 if args.attention_type == "nabla" else 32
+                print(f"Resizing input image to {args.width}x{args.height} for i2v mode (alignment: {alignment})")
+                image_to_use = resize_image_to_resolution(args.image, args.width, args.height, alignment)
+
+            x = pipe(args.prompt,
+                     image=image_to_use,
+                     time_length=args.video_duration,
+                     num_steps=args.sample_steps,
+                     guidance_weight=args.guidance_weight,
+                     scheduler_scale=args.scheduler_scale,
+                     negative_caption=args.negative_prompt,
+                     expand_prompts=args.expand_prompt,
+                     clip_prompt=args.clip_prompt,
+                     save_path=args.output_filename,
+                     seed=args.seed,
+                     preview=args.preview,
+                     preview_suffix=args.preview_suffix,
+                     stop_check=check_stop_signals,
+                     checkpoint_path=checkpoint_file,
+                     save_latents=args.save_latents)
     else:
         x = pipe(args.prompt,
              time_length=args.video_duration,

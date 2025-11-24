@@ -306,16 +306,82 @@ class MultiheadSelfAttentionDec(nn.Module):
     def out_l(self, x):
         return self.out_layer(x)
 
-    def forward(self, x, rope, sparse_params=None):
+    def forward(self, x, rope, sparse_params=None, num_cond_latents=None, return_kv=False):
         query, key, value = self.get_qkv(x)
         query, key = self.norm_qk(query, key)
+
+        # Cache K, V BEFORE RoPE if requested (like LongCat)
+        # This allows uniform RoPE application during cache usage
+        if return_kv:
+            k_cache = key.clone()
+            v_cache = value.clone()
+
+        # Apply RoPE after caching
         query = apply_rotary(query, rope).type_as(query)
         key = apply_rotary(key, rope).type_as(key)
 
-        if sparse_params is not None:
-            out = self.nabla(query, key, value, sparse_params=sparse_params)
+        # Handle conditioning latents (for video continuation)
+        if num_cond_latents is not None and num_cond_latents > 0:
+            # Conditioning tokens only attend to themselves
+            q_cond = query[:num_cond_latents].contiguous()
+            k_cond = key[:num_cond_latents].contiguous()
+            v_cond = value[:num_cond_latents].contiguous()
+
+            if sparse_params is not None:
+                out_cond = self.nabla(q_cond, k_cond, v_cond, sparse_params=sparse_params)
+            else:
+                out_cond = self.attention(q_cond, k_cond, v_cond)
+
+            # Noise tokens attend to all tokens
+            q_noise = query[num_cond_latents:].contiguous()
+
+            if sparse_params is not None:
+                out_noise = self.nabla(q_noise, key, value, sparse_params=sparse_params)
+            else:
+                out_noise = self.attention(q_noise, key, value)
+
+            # Concatenate outputs
+            out = torch.cat([out_cond, out_noise], dim=0)
         else:
-            out = self.attention(query, key, value)
+            if sparse_params is not None:
+                out = self.nabla(query, key, value, sparse_params=sparse_params)
+            else:
+                out = self.attention(query, key, value)
+
+        out = self.out_l(out)
+
+        if return_kv:
+            return out, (k_cache, v_cache)
+        return out
+
+    def forward_with_kv_cache(self, x, rope, kv_cache, num_cond_latents, sparse_params=None):
+        """Forward pass using pre-computed KV cache for conditioning frames.
+
+        The kv_cache contains (k_cache, v_cache, cond_rope) where:
+        - k_cache, v_cache: cached K/V WITHOUT RoPE applied
+        - cond_rope: RoPE tensor for conditioning frames (positions 0, 1, 2, ...)
+        """
+        query, key, value = self.get_qkv(x)
+        query, key = self.norm_qk(query, key)
+
+        # Get cached K, V and their RoPE (K/V don't have RoPE yet)
+        k_cache, v_cache, cond_rope = kv_cache
+
+        # Apply RoPE to cached K with conditioning positions [0, 1, 2, 3]
+        k_cache_with_rope = apply_rotary(k_cache, cond_rope).type_as(k_cache)
+
+        # Apply RoPE to new query and key with noise positions [4, 5, 6, ...]
+        query = apply_rotary(query, rope).type_as(query)
+        key = apply_rotary(key, rope).type_as(key)
+
+        # Concatenate cached KV with new KV
+        # Now both have consistent RoPE applied for their respective positions
+        full_key = torch.cat([k_cache_with_rope, key], dim=0)
+        full_value = torch.cat([v_cache, value], dim=0)
+
+        # Always use regular attention for KV cache mode
+        # NABLA sparse patterns don't work with concatenated sequences
+        out = self.attention(query, full_key, full_value)
 
         out = self.out_l(out)
         return out

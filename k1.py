@@ -380,6 +380,333 @@ def generate_video(
     current_process = None
     yield all_generated_videos, None, "All generations complete!", ""
 
+def generate_v2v_video(
+    prompt: str,
+    negative_prompt: str,
+    input_video: str,
+    num_cond_frames: int,
+    model_config: str,
+    dit_checkpoint_path: str,
+    attention_engine: str,
+    attention_type: str,
+    nabla_P: float,
+    nabla_wT: int,
+    nabla_wW: int,
+    nabla_wH: int,
+    width: int,
+    height: int,
+    video_duration: int,
+    sample_steps: int,
+    guidance_weight: float,
+    scheduler_scale: float,
+    seed: int,
+    use_mixed_weights: bool,
+    use_int8: bool,
+    use_torch_compile: bool,
+    use_magcache: bool,
+    enable_block_swap: bool,
+    blocks_in_memory: int,
+    dtype_str: str,
+    text_encoder_dtype_str: str,
+    vae_dtype_str: str,
+    computation_dtype_str: str,
+    save_path: str,
+    batch_size: int,
+    enable_preview: bool,
+    preview_steps: int,
+    enable_vae_chunking: bool,
+    vae_temporal_tile_frames: int,
+    vae_temporal_stride_frames: int,
+    vae_spatial_tile_height: int,
+    vae_spatial_tile_width: int,
+    use_prompt_expansion: bool,
+    clip_prompt: str,
+    save_latents: bool,
+    use_apg: bool,
+    apg_momentum: float,
+    apg_norm_threshold: float,
+) -> Generator[Tuple[List[Tuple[str, str]], Optional[str], str, str], None, None]:
+    """Generate video from video input (video continuation/v2v mode)."""
+    global stop_event, current_process, current_output_filename
+    stop_event.clear()
+    current_process = None
+    current_output_filename = None
+
+    os.makedirs(save_path, exist_ok=True)
+    all_generated_videos = []
+
+    for i in range(int(batch_size)):
+        if stop_event.is_set():
+            current_process = None
+            yield all_generated_videos, None, "Generation stopped by user.", ""
+            return
+
+        current_seed = seed
+        if seed == -1:
+            current_seed = random.randint(0, 2**32 - 1)
+        elif int(batch_size) > 1:
+            current_seed = seed + i
+
+        status_text = f"Processing {i+1}/{batch_size} (Seed: {current_seed})"
+        yield all_generated_videos.copy(), None, status_text, "Starting generation..."
+
+        timestamp = int(time.time())
+        run_id = f"{timestamp}_{random.randint(1000, 9999)}"
+        unique_preview_suffix = f"k1_{run_id}"
+        output_filename = os.path.join(save_path, f"k1_v2v_{timestamp}_{current_seed}.mp4")
+        current_output_filename = output_filename
+
+        # V2V supports all configs for experimentation
+        config_map = {
+            "5s Lite (T2V)": "./configs/config_5s_sft.yaml",
+            "10s Lite (T2V)": "./configs/config_10s_sft.yaml",
+            "5s Pro 20B (T2V)": "./configs/config_5s_t2v_pro_20b.yaml",
+            "5s Pro 20B HD (T2V)": "./configs/k5_pro_t2v_5s_sft_hd.yaml",
+            "10s Pro 20B (T2V)": "./configs/config_10s_t2v_pro_20b.yaml",
+            "10s Pro 20B HD (T2V)": "./configs/k5_pro_t2v_10s_sft_hd.yaml",
+            "5s Pro 20B (I2V)": "./configs/config_5s_i2v_pro_20b.yaml",
+            "5s Pro 20B HD (I2V)": "./configs/k5_pro_i2v_5s_sft_hd.yaml",
+            "5s Lite (I2V)": "./configs/config_5s_i2v.yaml",
+        }
+
+        config_file = config_map.get(model_config, "./configs/config_5s_i2v_pro_20b.yaml")
+
+        command = [
+            sys.executable, "test.py",
+            "--config", config_file,
+            "--prompt", str(prompt),
+            "--video_duration", str(video_duration),
+            "--sample_steps", str(sample_steps),
+            "--seed", str(current_seed),
+            "--output_filename", output_filename,
+            "--dtype", dtype_str,
+        ]
+
+        # Add attention engine if specified
+        if attention_engine and attention_engine != "auto":
+            command.extend(["--attention_engine", attention_engine])
+
+        # Add DiT checkpoint path if specified
+        if dit_checkpoint_path and dit_checkpoint_path.strip():
+            command.extend(["--checkpoint_path", dit_checkpoint_path.strip()])
+
+        # Add attention type and NABLA parameters if specified
+        if attention_type and attention_type != "auto":
+            command.extend(["--attention_type", attention_type])
+            if attention_type == "nabla":
+                # NABLA requires 128-pixel alignment
+                width = (int(width) // 128) * 128
+                height = (int(height) // 128) * 128
+                width = max(128, width)
+                height = max(128, height)
+
+                command.extend(["--nabla_P", str(nabla_P)])
+                command.extend(["--nabla_wT", str(int(nabla_wT))])
+                command.extend(["--nabla_wW", str(int(nabla_wW))])
+                command.extend(["--nabla_wH", str(int(nabla_wH))])
+                command.append("--nabla_add_sta")
+
+        if text_encoder_dtype_str:
+            command.extend(["--text_encoder_dtype", text_encoder_dtype_str])
+        if vae_dtype_str:
+            command.extend(["--vae_dtype", vae_dtype_str])
+        if computation_dtype_str:
+            command.extend(["--computation_dtype", computation_dtype_str])
+
+        if use_mixed_weights:
+            command.append("--use_mixed_weights")
+        if use_int8:
+            command.append("--use_int8")
+        if not use_torch_compile:
+            command.append("--no_compile")
+        if use_magcache:
+            command.append("--magcache")
+
+        if negative_prompt:
+            command.extend(["--negative_prompt", str(negative_prompt)])
+
+        if guidance_weight is not None:
+            command.extend(["--guidance_weight", str(guidance_weight)])
+
+        if scheduler_scale is not None:
+            command.extend(["--scheduler_scale", str(scheduler_scale)])
+
+        # V2V specific: video input and conditioning frames
+        if not input_video:
+            current_process = None
+            yield all_generated_videos, None, "Error: Input video required for v2v mode.", ""
+            return
+        command.extend(["--video", str(input_video)])
+        command.extend(["--num_cond_frames", str(int(num_cond_frames))])
+        command.extend(["--width", str(int(width))])
+        command.extend(["--height", str(int(height))])
+
+        # APG parameters
+        if use_apg:
+            command.append("--use_apg")
+            command.extend(["--apg_momentum", str(apg_momentum)])
+            command.extend(["--apg_norm_threshold", str(apg_norm_threshold)])
+
+        if enable_block_swap:
+            command.append("--enable_block_swap")
+            command.extend(["--blocks_in_memory", str(int(blocks_in_memory))])
+
+        if enable_preview and preview_steps > 0:
+            command.extend(["--preview", str(preview_steps)])
+            command.extend(["--preview_suffix", unique_preview_suffix])
+
+        # Add VAE chunking parameters if enabled
+        if enable_vae_chunking:
+            if vae_temporal_tile_frames and vae_temporal_tile_frames > 0:
+                command.extend(["--vae_temporal_tile_frames", str(int(vae_temporal_tile_frames))])
+            if vae_temporal_stride_frames and vae_temporal_stride_frames > 0:
+                command.extend(["--vae_temporal_stride_frames", str(int(vae_temporal_stride_frames))])
+            if vae_spatial_tile_height and vae_spatial_tile_height > 0:
+                command.extend(["--vae_spatial_tile_height", str(int(vae_spatial_tile_height))])
+            if vae_spatial_tile_width and vae_spatial_tile_width > 0:
+                command.extend(["--vae_spatial_tile_width", str(int(vae_spatial_tile_width))])
+
+        # Add expand_prompt parameter
+        command.extend(["--expand_prompt", "1" if use_prompt_expansion else "0"])
+
+        # Add clip_prompt if provided
+        if clip_prompt and clip_prompt.strip():
+            command.extend(["--clip_prompt", clip_prompt.strip()])
+
+        # Add save_latents if enabled
+        if save_latents:
+            latents_filename = os.path.join(save_path, f"k1_v2v_{timestamp}_{current_seed}_latents.pt")
+            command.extend(["--save_latents", latents_filename])
+
+        # Print the command for debugging/transparency
+        print("\n" + "="*80)
+        print(f"LAUNCHING V2V COMMAND (Batch {i+1}/{batch_size}):")
+        print(" ".join(command))
+        print("="*80 + "\n")
+
+        try:
+            start_time = time.perf_counter()
+
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1
+            )
+
+            current_process = process
+
+            current_preview_yield_path = None
+            last_preview_mtime = 0
+            preview_base_dir = os.path.join(save_path, "previews")
+            preview_mp4_path = os.path.join(preview_base_dir, f"latent_preview_{unique_preview_suffix}.mp4")
+
+            last_progress = ""
+            while True:
+                if stop_event.is_set():
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                    current_process = None
+                    yield all_generated_videos, None, "Generation stopped by user.", ""
+                    return
+
+                line = process.stdout.readline()
+                if line:
+                    print(line.strip())
+
+                    parsed_progress = parse_progress_line(line)
+                    if parsed_progress:
+                        last_progress = parsed_progress
+
+                if enable_preview:
+                    if os.path.exists(preview_mp4_path):
+                        current_mtime = os.path.getmtime(preview_mp4_path)
+                        if current_mtime > last_preview_mtime:
+                            current_preview_yield_path = preview_mp4_path
+                            last_preview_mtime = current_mtime
+
+                yield all_generated_videos.copy(), current_preview_yield_path, status_text, last_progress
+
+                if process.poll() is not None:
+                    break
+
+            # Clear current process when done
+            current_process = None
+            return_code = process.returncode
+
+            elapsed = time.perf_counter() - start_time
+
+            if return_code == 0 and os.path.exists(output_filename):
+                # Save metadata to video
+                params_for_meta = {
+                    "model_type": "Kandinsky 5.0",
+                    "mode": "v2v",
+                    "prompt": prompt,
+                    "negative_prompt": negative_prompt,
+                    "video_path": os.path.basename(input_video) if input_video else None,
+                    "num_cond_frames": int(num_cond_frames),
+                    "width": int(width),
+                    "height": int(height),
+                    "video_duration": video_duration,
+                    "sample_steps": sample_steps,
+                    "guidance_weight": guidance_weight,
+                    "scheduler_scale": scheduler_scale,
+                    "seed": current_seed,
+                    "use_mixed_weights": use_mixed_weights,
+                    "use_int8": use_int8,
+                    "use_torch_compile": use_torch_compile,
+                    "use_magcache": use_magcache,
+                    "enable_block_swap": enable_block_swap,
+                    "blocks_in_memory": int(blocks_in_memory) if enable_block_swap else None,
+                    "dtype": dtype_str,
+                    "text_encoder_dtype": text_encoder_dtype_str if text_encoder_dtype_str else None,
+                    "vae_dtype": vae_dtype_str if vae_dtype_str else None,
+                    "computation_dtype": computation_dtype_str if computation_dtype_str else None,
+                    "config_file": config_file,
+                    "model_config": model_config,
+                    "dit_checkpoint_path": dit_checkpoint_path if dit_checkpoint_path and dit_checkpoint_path.strip() else None,
+                    "attention_engine": attention_engine,
+                    "attention_type": attention_type if attention_type != "auto" else None,
+                    "nabla_P": nabla_P if attention_type == "nabla" else None,
+                    "nabla_wT": int(nabla_wT) if attention_type == "nabla" else None,
+                    "nabla_wW": int(nabla_wW) if attention_type == "nabla" else None,
+                    "nabla_wH": int(nabla_wH) if attention_type == "nabla" else None,
+                    "enable_vae_chunking": enable_vae_chunking,
+                    "vae_temporal_tile_frames": int(vae_temporal_tile_frames) if enable_vae_chunking and vae_temporal_tile_frames else None,
+                    "vae_temporal_stride_frames": int(vae_temporal_stride_frames) if enable_vae_chunking and vae_temporal_stride_frames else None,
+                    "vae_spatial_tile_height": int(vae_spatial_tile_height) if enable_vae_chunking and vae_spatial_tile_height else None,
+                    "vae_spatial_tile_width": int(vae_spatial_tile_width) if enable_vae_chunking and vae_spatial_tile_width else None,
+                    "use_apg": use_apg,
+                    "apg_momentum": apg_momentum if use_apg else None,
+                    "apg_norm_threshold": apg_norm_threshold if use_apg else None,
+                }
+                try:
+                    add_metadata_to_video(output_filename, params_for_meta)
+                    print(f"Added metadata to {output_filename}")
+                except Exception as meta_err:
+                    print(f"Warning: Failed to add metadata to {output_filename}: {meta_err}")
+
+                all_generated_videos.append((output_filename, f"Seed: {current_seed}"))
+                progress_msg = f"Completed {i+1}/{batch_size} in {elapsed:.1f}s"
+                yield all_generated_videos.copy(), None, status_text, progress_msg
+            else:
+                error_msg = f"Error: Generation failed with return code {return_code}"
+                current_process = None
+                yield all_generated_videos, None, error_msg, ""
+                return
+
+        except Exception as e:
+            current_process = None
+            yield all_generated_videos, None, f"Error during generation: {str(e)}", ""
+            return
+
+    current_process = None
+    yield all_generated_videos, None, "All generations complete!", ""
+
 def stop_generation():
     global stop_event, current_process
     stop_event.set()
@@ -948,6 +1275,25 @@ def update_image_dimensions(image_path):
         print(f"Error reading image dimensions: {e}")
         return "", gr.update(), gr.update()
 
+def update_video_dimensions(video_path):
+    """Update original dimensions when video is uploaded"""
+    if video_path is None:
+        return "", gr.update(), gr.update()
+    try:
+        info = get_video_info(video_path)
+        if info:
+            w, h = info['width'], info['height']
+            original_dims_str = f"{w}x{h}"
+            # Snap to nearest multiple of 64
+            new_w = round(w / 64) * 64
+            new_h = round(h / 64) * 64
+            new_w = max(64, new_w)
+            new_h = max(64, new_h)
+            return original_dims_str, gr.update(value=new_w), gr.update(value=new_h)
+    except Exception as e:
+        print(f"Error reading video dimensions: {e}")
+    return "", gr.update(), gr.update()
+
 def create_interface():
     with gr.Blocks(
         theme=themes.Default(
@@ -1205,7 +1551,7 @@ def create_interface():
                                 interactive=False, elem_id="k1_preview_video"
                             )
                         stop_decode_btn = gr.Button("Stop & Decode", elem_classes="light-blue-btn", visible=False)
-                        stop_save_btn = gr.Button("Stop & Save Latents", elem_classes="light-blue-btn")
+                        stop_save_btn = gr.Button("Stop & Save inference ckpoint", elem_classes="light-blue-btn")
                         checkpoint_file = gr.Textbox(
                             label="Checkpoint File (for resume)",
                             placeholder="Path to _checkpoint.pt file",
@@ -1380,6 +1726,377 @@ def create_interface():
                     outputs=[output, preview_output, batch_progress, progress_text]
                 )
 
+            with gr.Tab("Video to Video", id="v2v"):
+                with gr.Row():
+                    with gr.Column(scale=4):
+                        v2v_prompt = gr.Textbox(
+                            scale=3,
+                            label="Enter your prompt",
+                            value="A cute tabby cat is eating a bowl of wasabi in a restaurant in Guangzhou. The cat is very good at using chopsticks and proceeds to eat the entire bowl of wasabi quickly with his chopsticks. The cat is wearing a white shirt with red accents and the cute tabby cat's shirt has the text 'spice kitten' on it. There is a large red sign in the background with '芥末' on it in white letters. A small red panda is drinking a beer beside the cat. The red panda is holding a large glass of dark beer and drinking it quickly. The panda tilts his head back and downs the entire glass of beer in one large gulp.",
+                            lines=5
+                        )
+                        v2v_clip_prompt = gr.Textbox(
+                            label="CLIP Prompt (Optional max 77 tokens)",
+                            placeholder="Leave empty to use processed main prompt for CLIP. Enter custom text to use a separate prompt for global conditioning.",
+                            lines=2,
+                        )
+                        v2v_negative_prompt = gr.Textbox(
+                            scale=3,
+                            label="Negative Prompt",
+                            value="Static, 2D cartoon, cartoon, 2d animation, paintings, images, worst quality, low quality, ugly, deformed, walking backwards",
+                            lines=3,
+                        )
+                    with gr.Column(scale=1):
+                        v2v_batch_size = gr.Number(label="Batch Count", value=1, minimum=1, step=1)
+                        v2v_token_count_display = gr.Textbox(
+                            label="Prompt Token Count",
+                            value="0",
+                            interactive=False,
+                            scale=1
+                        )
+                        v2v_use_prompt_expansion = gr.Checkbox(
+                            label="Use Prompt Expansion",
+                            value=True,
+                            info="Expand prompt using Qwen 2.5 VL"
+                        )
+                        v2v_clip_token_count = gr.Textbox(
+                            label="CLIP prompt Tokens",
+                            value="0",
+                            interactive=False
+                        )
+                    with gr.Column(scale=2):
+                        v2v_batch_progress = gr.Textbox(label="Status", interactive=False, value="")
+                        v2v_progress_text = gr.Textbox(label="Progress", interactive=False, value="")
+                        v2v_save_latents_checkbox = gr.Checkbox(label="Save Latents Before VAE Decode", value=False)
+
+                with gr.Row():
+                    v2v_generate_btn = gr.Button("Generate Video", elem_classes="green-btn")
+                    v2v_stop_btn = gr.Button("Stop Generation", variant="stop")
+
+                with gr.Row():
+                    with gr.Column():
+                        v2v_input_video = gr.Video(label="Input Video (for continuation)", interactive=True)
+
+                        gr.Markdown("### V2V Parameters")
+                        v2v_num_cond_frames = gr.Slider(
+                            minimum=1, maximum=10, step=1, value=4,
+                            label="Conditioning Frames",
+                            info="Number of last frames from input video to use as conditioning"
+                        )
+
+                        v2v_mode = gr.Dropdown(
+                            label="Mode",
+                            choices=["i2v", "t2v"],
+                            value="i2v",
+                            interactive=True,
+                            info="Select generation mode: i2v (image-to-video) or t2v (text-to-video). T2V models can also work for video continuation."
+                        )
+
+                        v2v_model_config = gr.Dropdown(
+                            label="Model Configuration",
+                            choices=[
+                                "5s Lite (T2V)",
+                                "10s Lite (T2V)",
+                                "5s Pro 20B (T2V)",
+                                "5s Pro 20B HD (T2V)",
+                                "10s Pro 20B (T2V)",
+                                "10s Pro 20B HD (T2V)",
+                                "5s Pro 20B (I2V)",
+                                "5s Pro 20B HD (I2V)",
+                                "5s Lite (I2V)"
+                            ],
+                            value="5s Pro 20B (I2V)",
+                            info="Select model configuration. Pro models require more VRAM but offer better quality."
+                        )
+
+                        v2v_attention_engine = gr.Dropdown(
+                            label="Attention Engine",
+                            choices=["auto", "flash_attention_2", "flash_attention_3", "sdpa", "sage"],
+                            value="auto",
+                            info="Select attention implementation. 'auto' uses config default. Flash attention is faster for Lite models. SDPA works well for Pro models."
+                        )
+
+                        with gr.Accordion("APG (Adaptive Projected Guidance)", open=False):
+                            gr.Markdown("""
+                            APG screws up the contiuation. NOT FINISHED YET. can make some different outputs though.
+                            """)
+                            v2v_use_apg = gr.Checkbox(
+                                label="Enable APG",
+                                value=False,
+                                info="Reduce color drift using Adaptive Projected Guidance"
+                            )
+                            with gr.Row():
+                                v2v_apg_momentum = gr.Slider(
+                                    minimum=-1.0, maximum=0.0, value=-0.75, step=0.05,
+                                    label="APG Momentum",
+                                    info="Momentum for running average (default: -0.75)"
+                                )
+                                v2v_apg_norm_threshold = gr.Slider(
+                                    minimum=0, maximum=100, value=55.0, step=1.0,
+                                    label="APG Norm Threshold",
+                                    info="Threshold for guidance clipping (default: 55.0)"
+                                )
+
+                        with gr.Accordion("NABLA Sparse Attention Settings", open=False):
+                            gr.Markdown("""
+                            Configure NABLA sparse attention for memory-efficient long video generation. Recommended for 10s models.
+
+                            **Important for i2v:** NABLA requires resolution divisible by 128 pixels (e.g., 512, 640, 768, 1024, 1280, 1536, 1920, 2048).
+                            Invalid resolutions will error out.
+                            """),
+                            v2v_attention_type = gr.Dropdown(
+                                label="Attention Type",
+                                choices=["auto", "flash", "nabla"],
+                                value="auto",
+                                info="'auto' uses config default, 'flash' for full attention, 'nabla' for sparse attention"
+                            )
+                            with gr.Row():
+                                v2v_nabla_P = gr.Slider(
+                                    minimum=0.5, maximum=1.0, value=0.9, step=0.05,
+                                    label="NABLA P (Probability Threshold)",
+                                    info="Top-k probability threshold. Higher = more tokens kept (0.9 recommended)"
+                                )
+                            with gr.Row():
+                                v2v_nabla_wT = gr.Slider(
+                                    minimum=3, maximum=21, value=11, step=2,
+                                    label="NABLA wT (Temporal Window)",
+                                    info="Temporal window size. Use 11 for 10s, 7 for 5s"
+                                )
+                                v2v_nabla_wW = gr.Slider(
+                                    minimum=1, maximum=7, value=3, step=2,
+                                    label="NABLA wW (Width Window)",
+                                    info="Width window size (default: 3)"
+                                )
+                                v2v_nabla_wH = gr.Slider(
+                                    minimum=1, maximum=7, value=3, step=2,
+                                    label="NABLA wH (Height Window)",
+                                    info="Height window size (default: 3)"
+                                )
+
+                        v2v_dit_checkpoint_path = gr.Textbox(
+                            label="DiT Checkpoint Path (optional)",
+                            value="",
+                            placeholder="./weights/model/kandinsky5pro_t2v_sft_10s.safetensors",
+                            info="Override DiT model checkpoint path. Leave empty to use config default. Provide path to your .safetensors file."
+                        )
+
+                        # Hidden state to store original video dimensions
+                        v2v_original_dims = gr.State(value="")
+
+                        gr.Markdown("### Resolution Settings")
+                        v2v_scale_slider = gr.Slider(
+                            minimum=1, maximum=200, value=100, step=1,
+                            label="Scale % (adjusts resolution while maintaining aspect ratio)",
+                            info="Scale the input video dimensions."
+                        )
+                        with gr.Row():
+                            v2v_width = gr.Number(label="Width", value=768, step=64, interactive=True,
+                                            info="Must be divisible by 64")
+                            v2v_calc_height_btn = gr.Button("→", size="sm")
+                            v2v_calc_width_btn = gr.Button("←", size="sm")
+                            v2v_height = gr.Number(label="Height", value=512, step=64, interactive=True,
+                                            info="Must be divisible by 64")
+
+                        v2v_video_duration = gr.Slider(minimum=1, maximum=30, step=1, label="Video Duration (seconds)", value=5)
+                        v2v_sample_steps = gr.Slider(minimum=1, maximum=100, step=1, label="Sampling Steps", value=50)
+                        v2v_guidance_weight = gr.Slider(minimum=1.0, maximum=20.0, step=0.1, label="Guidance Weight", value=5.0)
+                        v2v_scheduler_scale = gr.Slider(minimum=0.0, maximum=20.0, step=0.1, label="Scheduler Scale", value=5.0)
+                        with gr.Row():
+                            v2v_seed = gr.Number(label="Seed (-1 for random)", value=-1)
+                            v2v_random_seed_btn = gr.Button("🎲")
+
+                    with gr.Column():
+                        v2v_output = gr.Gallery(
+                            label="Generated Videos (Click to select)",
+                            columns=[2], rows=[2], object_fit="contain", height="auto",
+                            show_label=True, elem_id="gallery_v2v", allow_preview=True, preview=True
+                        )
+                        with gr.Accordion("Latent Preview (During Generation)", open=True):
+                            v2v_enable_preview = gr.Checkbox(label="Enable Latent Preview", value=True)
+                            v2v_preview_steps = gr.Slider(minimum=1, maximum=50, step=1, value=5,
+                                                    label="Preview Every N Steps")
+                            v2v_preview_output = gr.Video(
+                                label="Latest Preview", height=300,
+                                interactive=False, elem_id="v2v_preview_video"
+                            )
+                        v2v_stop_decode_btn = gr.Button("Stop & Decode", elem_classes="light-blue-btn", visible=False)
+                        v2v_stop_save_btn = gr.Button("Stop & Save inference ckpoint", elem_classes="light-blue-btn")
+                        v2v_checkpoint_file = gr.Textbox(
+                            label="Checkpoint File (for resume)",
+                            placeholder="Path to _checkpoint.pt file",
+                            scale=3
+                        )
+                        v2v_resume_btn = gr.Button("Resume from Checkpoint", elem_classes="light-blue-btn", scale=1)
+                        v2v_latents_file = gr.Textbox(
+                            label="Latents for VAE Decode",
+                            placeholder="Path to saved latents .pt file",
+                            scale=3
+                        )
+                        v2v_decode_latents_btn = gr.Button("Decode from Saved Latents", elem_classes="light-blue-btn", scale=1)
+
+                with gr.Accordion("Model Settings & Performance", open=True):
+                    with gr.Row():
+                        v2v_use_mixed_weights = gr.Checkbox(label="Use Mixed Weights", value=False, info="Preserve fp32 for critical layers (norms, embeddings)")
+                        v2v_use_int8 = gr.Checkbox(label="Use int8 matmul", value=False, info="enable int8 quantization")
+                        v2v_use_torch_compile = gr.Checkbox(label="Use torch.compile", value=False, info="Slower startup (2-5 min) but faster inference")
+                        v2v_use_magcache = gr.Checkbox(label="Use MagCache", value=False, info="Skip redundant computations (50-step models only)")
+                    with gr.Row():
+                        v2v_enable_block_swap = gr.Checkbox(label="Enable Block Swap", value=True, info="Required for 24GB GPUs")
+                        v2v_blocks_in_memory = gr.Slider(minimum=1, maximum=60, step=1, label="Blocks in Memory", value=2, info="Number of transformer blocks to keep in GPU memory")
+                    with gr.Row():
+                        v2v_dtype_select = gr.Radio(choices=["bfloat16", "float16", "float32", "fp8_scaled"], label="Default Data Type", value="bfloat16", info="Used for all components if specific dtypes not set. fp8_scaled provides ~50% memory savings.")
+                    with gr.Accordion("Advanced: Component-Specific Data Types", open=False):
+                        gr.Markdown("Override dtypes for individual components. Leave empty to use default dtype.")
+                        with gr.Row():
+                            v2v_text_encoder_dtype_select = gr.Dropdown(choices=["", "bfloat16", "float16", "float32", "fp8_scaled"], label="Text Encoder dtype", value="", info="Empty = use default")
+                            v2v_vae_dtype_select = gr.Dropdown(choices=["", "bfloat16", "float16", "float32", "fp8_scaled"], label="VAE dtype", value="", info="Empty = use default")
+                            v2v_computation_dtype_select = gr.Dropdown(choices=["", "bfloat16", "float16", "float32", "fp8_scaled"], label="Computation dtype", value="", info="Empty = use default. fp8_scaled for transformer only.")
+
+                    with gr.Accordion("Advanced: VAE Memory Optimization (Chunking)", open=False):
+                        gr.Markdown("""
+                        **Configure VAE temporal/spatial chunking to reduce memory usage during decode.**
+
+                        Enable this if you get OOM (Out of Memory) errors during VAE decode. Smaller chunk sizes use less memory but take longer to decode.
+
+                        - **Temporal Tile Frames**: Chunk size in frames (default: 16). Try 12 for moderate reduction, 8 for aggressive.
+                        - **Temporal Stride**: Overlap between chunks (default: auto = tile_frames - 4)
+                        - **Spatial Tile Height/Width**: Spatial chunk dimensions (default: 256)
+
+                        Leave disabled to use default settings (recommended unless you experience OOM).
+                        """)
+                        v2v_enable_vae_chunking = gr.Checkbox(
+                            label="Enable VAE Chunking",
+                            value=False,
+                            info="Enable custom VAE chunk sizes to reduce memory usage"
+                        )
+                        with gr.Row():
+                            v2v_vae_temporal_tile_frames = gr.Slider(
+                                minimum=4, maximum=32, value=12, step=4,
+                                label="Temporal Tile Frames",
+                                info="Chunk size in pixel-space frames (must be divisible by 4)"
+                            )
+                            v2v_vae_temporal_stride_frames = gr.Slider(
+                                minimum=0, maximum=28, value=0, step=4,
+                                label="Temporal Stride Frames (0 = auto)",
+                                info="Overlap between chunks. 0 = auto-calculate as tile_frames - 4"
+                            )
+                        with gr.Row():
+                            v2v_vae_spatial_tile_height = gr.Slider(
+                                minimum=128, maximum=512, value=256, step=64,
+                                label="Spatial Tile Height",
+                                info="Spatial chunk height (reduce if high resolution causes OOM)"
+                            )
+                            v2v_vae_spatial_tile_width = gr.Slider(
+                                minimum=128, maximum=512, value=256, step=64,
+                                label="Spatial Tile Width",
+                                info="Spatial chunk width (reduce if high resolution causes OOM)"
+                            )
+
+                    v2v_save_path = gr.Textbox(label="Save Path", value="outputs")
+
+                v2v_random_seed_btn.click(
+                    fn=lambda: (-1),
+                    outputs=[v2v_seed]
+                )
+
+                # Token count update - real-time as user types
+                v2v_prompt.change(
+                    fn=lambda text: str(count_tokens(text)),
+                    inputs=[v2v_prompt],
+                    outputs=[v2v_token_count_display]
+                )
+
+                # CLIP token count update
+                v2v_clip_prompt.change(
+                    fn=lambda text: str(count_tokens(text)) if text else "0",
+                    inputs=[v2v_clip_prompt],
+                    outputs=[v2v_clip_token_count]
+                )
+
+                # Resolution control event handlers - use video dimensions
+                v2v_input_video.change(
+                    fn=update_video_dimensions,
+                    inputs=[v2v_input_video],
+                    outputs=[v2v_original_dims, v2v_width, v2v_height]
+                )
+
+                v2v_scale_slider.change(
+                    fn=update_resolution_from_scale,
+                    inputs=[v2v_scale_slider, v2v_original_dims],
+                    outputs=[v2v_width, v2v_height]
+                )
+
+                v2v_calc_width_btn.click(
+                    fn=calculate_width_from_height,
+                    inputs=[v2v_height, v2v_original_dims],
+                    outputs=[v2v_width]
+                )
+
+                v2v_calc_height_btn.click(
+                    fn=calculate_height_from_width,
+                    inputs=[v2v_width, v2v_original_dims],
+                    outputs=[v2v_height]
+                )
+
+                v2v_generate_btn.click(
+                    fn=generate_v2v_video,
+                    inputs=[
+                        v2v_prompt, v2v_negative_prompt, v2v_input_video, v2v_num_cond_frames,
+                        v2v_model_config, v2v_dit_checkpoint_path, v2v_attention_engine,
+                        v2v_attention_type, v2v_nabla_P, v2v_nabla_wT, v2v_nabla_wW, v2v_nabla_wH,
+                        v2v_width, v2v_height, v2v_video_duration, v2v_sample_steps,
+                        v2v_guidance_weight, v2v_scheduler_scale, v2v_seed,
+                        v2v_use_mixed_weights, v2v_use_int8, v2v_use_torch_compile, v2v_use_magcache,
+                        v2v_enable_block_swap, v2v_blocks_in_memory, v2v_dtype_select,
+                        v2v_text_encoder_dtype_select, v2v_vae_dtype_select, v2v_computation_dtype_select,
+                        v2v_save_path, v2v_batch_size,
+                        v2v_enable_preview, v2v_preview_steps,
+                        v2v_enable_vae_chunking, v2v_vae_temporal_tile_frames, v2v_vae_temporal_stride_frames,
+                        v2v_vae_spatial_tile_height, v2v_vae_spatial_tile_width,
+                        v2v_use_prompt_expansion, v2v_clip_prompt,
+                        v2v_save_latents_checkbox,
+                        v2v_use_apg, v2v_apg_momentum, v2v_apg_norm_threshold
+                    ],
+                    outputs=[v2v_output, v2v_preview_output, v2v_batch_progress, v2v_progress_text]
+                )
+
+                v2v_stop_btn.click(
+                    fn=stop_generation,
+                    outputs=[v2v_batch_progress]
+                )
+
+                v2v_stop_decode_btn.click(
+                    fn=stop_and_decode,
+                    outputs=[v2v_batch_progress]
+                )
+
+                v2v_stop_save_btn.click(
+                    fn=stop_and_save,
+                    outputs=[v2v_batch_progress]
+                )
+
+                v2v_resume_btn.click(
+                    fn=resume_from_checkpoint,
+                    inputs=[
+                        v2v_checkpoint_file, v2v_model_config, v2v_save_path,
+                        v2v_use_torch_compile, v2v_enable_block_swap, v2v_blocks_in_memory,
+                        v2v_dtype_select, v2v_vae_dtype_select
+                    ],
+                    outputs=[v2v_output, v2v_preview_output, v2v_batch_progress, v2v_progress_text]
+                )
+
+                v2v_decode_latents_btn.click(
+                    fn=decode_from_latents,
+                    inputs=[
+                        v2v_latents_file, v2v_model_config, v2v_save_path,
+                        v2v_use_torch_compile, v2v_enable_block_swap, v2v_blocks_in_memory,
+                        v2v_dtype_select, v2v_vae_dtype_select,
+                        v2v_enable_vae_chunking, v2v_vae_temporal_tile_frames,
+                        v2v_vae_temporal_stride_frames, v2v_vae_spatial_tile_height,
+                        v2v_vae_spatial_tile_width
+                    ],
+                    outputs=[v2v_output, v2v_preview_output, v2v_batch_progress, v2v_progress_text]
+                )
             # Video Info Tab
             with gr.Tab("Video Info"):
                 with gr.Row():
