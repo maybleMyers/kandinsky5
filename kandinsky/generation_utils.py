@@ -802,7 +802,7 @@ def generate_v2v(
             print(f"\n>>> PREVIEW TRIGGER at step {i + 1}/{num_steps} (interval={preview_interval})", flush=True)
             sys.stdout.flush()
             try:
-                preview_latent = img.permute(3, 0, 1, 2).unsqueeze(0)
+                preview_latent = img[num_cond_frames:].permute(3, 0, 1, 2).unsqueeze(0)
                 previewer.preview(preview_latent.squeeze(0), i, preview_suffix=preview_suffix)
             except Exception as e:
                 print(f">>> ERROR during preview generation at step {i + 1}: {e}", flush=True)
