@@ -830,6 +830,48 @@ if __name__ == "__main__":
             print(f">>> New frames to generate: {num_new_frames}")
             print(f">>> Output shape: {shape}")
 
+            # Create previewer for V2V mode
+            previewer = None
+            num_steps = args.sample_steps if args.sample_steps else pipe.num_steps
+            if LatentPreviewer is not None and args.preview is not None and args.preview > 0:
+                print(f"\n>>> V2V: Initializing previewer with preview={args.preview}")
+                try:
+                    g_temp = torch.Generator(device=pipe.device_map["dit"])
+                    g_temp.manual_seed(args.seed)
+                    initial_latent = torch.randn(shape[0] * shape[1], shape[2], shape[3], shape[4], device=pipe.device_map["dit"], generator=g_temp)
+                    initial_latent = initial_latent.permute(3, 0, 1, 2)
+
+                    timesteps = torch.linspace(1, 0, num_steps + 1, device=pipe.device_map["dit"])
+                    timesteps = args.scheduler_scale * timesteps / (1 + (args.scheduler_scale - 1) * timesteps)
+                    timesteps = timesteps[:-1] * 1000
+
+                    class Args:
+                        def __init__(self, save_path, fps):
+                            self.save_path = save_path
+                            self.fps = fps
+
+                    args_obj = Args(
+                        save_path=os.path.dirname(args.output_filename) if args.output_filename else './',
+                        fps=24
+                    )
+
+                    previewer = LatentPreviewer(
+                        args=args_obj,
+                        original_latents=initial_latent,
+                        timesteps=timesteps,
+                        device=pipe.device_map["dit"],
+                        dtype=torch.bfloat16,
+                        model_type="hunyuan"
+                    )
+                    print(f">>> V2V: Previewer initialized successfully, will generate preview every {args.preview} steps")
+                except Exception as e:
+                    print(f">>> V2V: Failed to initialize previewer: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    previewer = None
+            else:
+                print(f">>> V2V: Preview disabled (preview={args.preview})")
+
             # Generate continuation using visual conditioning (I2V approach)
             x = generate_sample_v2v(
                 shape,
@@ -839,7 +881,7 @@ if __name__ == "__main__":
                 pipe.conf,
                 text_embedder=pipe.text_embedder,
                 cond_latents=cond_latents,
-                num_steps=args.sample_steps if args.sample_steps else pipe.num_steps,
+                num_steps=num_steps,
                 guidance_weight=args.guidance_weight if args.guidance_weight else pipe.guidance_weight,
                 scheduler_scale=args.scheduler_scale,
                 negative_caption=args.negative_prompt,
@@ -850,7 +892,7 @@ if __name__ == "__main__":
                 progress=True,
                 offload=pipe.offload,
                 force_offload=force_offload,
-                previewer=None,
+                previewer=previewer,
                 preview_interval=args.preview,
                 preview_suffix=args.preview_suffix,
                 stop_check=check_stop_signals,
