@@ -1184,6 +1184,60 @@ def send_to_generation(video_path, metadata):
         get_num("vae_spatial_tile_width")      # vae_spatial_tile_width
     )
 
+def send_to_v2v(video_path, metadata):
+    """Send video and metadata to V2V tab for continuation."""
+    if not video_path:
+        return [gr.update()] * 36
+
+    # Parse Metadata
+    meta = metadata if isinstance(metadata, dict) else {}
+
+    def get(k, default=gr.update()):
+        return meta.get(k, default)
+
+    def get_num(k, default=gr.update()):
+        val = meta.get(k)
+        return val if val is not None else default
+
+    # Return values to populate V2V tab fields and switch tab
+    return (
+        gr.Tabs(selected="v2v"),        # Switch to V2V tab
+        video_path,                     # v2v_input_video (pass the video directly)
+        get("prompt"),                  # v2v_prompt
+        get("negative_prompt"),         # v2v_negative_prompt
+        get("model_config"),            # v2v_model_config
+        get("attention_engine"),        # v2v_attention_engine
+        get("attention_type"),          # v2v_attention_type
+        get("dit_checkpoint_path"),     # v2v_dit_checkpoint_path
+        get_num("nabla_P"),             # v2v_nabla_P
+        get_num("nabla_wT"),            # v2v_nabla_wT
+        get_num("nabla_wW"),            # v2v_nabla_wW
+        get_num("nabla_wH"),            # v2v_nabla_wH
+        get_num("width"),               # v2v_width
+        get_num("height"),              # v2v_height
+        get_num("video_duration"),      # v2v_video_duration
+        get_num("sample_steps"),        # v2v_sample_steps
+        get_num("guidance_weight"),     # v2v_guidance_weight
+        get_num("scheduler_scale"),     # v2v_scheduler_scale
+        get_num("seed"),                # v2v_seed
+        get("use_mixed_weights"),       # v2v_use_mixed_weights
+        get("use_int8"),                # v2v_use_int8
+        get("use_torch_compile"),       # v2v_use_torch_compile
+        get("use_magcache"),            # v2v_use_magcache
+        get("enable_block_swap"),       # v2v_enable_block_swap
+        get_num("blocks_in_memory"),    # v2v_blocks_in_memory
+        get("dtype"),                   # v2v_dtype_select
+        get("text_encoder_dtype"),      # v2v_text_encoder_dtype_select
+        get("vae_dtype"),               # v2v_vae_dtype_select
+        get("computation_dtype"),       # v2v_computation_dtype_select
+        get("enable_vae_chunking"),     # v2v_enable_vae_chunking
+        get_num("vae_temporal_tile_frames"),   # v2v_vae_temporal_tile_frames
+        get_num("vae_temporal_stride_frames"), # v2v_vae_temporal_stride_frames
+        get_num("vae_spatial_tile_height"),    # v2v_vae_spatial_tile_height
+        get_num("vae_spatial_tile_width"),     # v2v_vae_spatial_tile_width
+        get_num("num_cond_frames", 4),  # v2v_num_cond_frames (default 4 if not in metadata)
+    )
+
 def calculate_width_from_height(height, original_dims):
     """Calculate width based on height maintaining aspect ratio (divisible by 64)"""
     if not original_dims or height is None:
@@ -2106,7 +2160,9 @@ def create_interface():
                 with gr.Row():
                     video_info_status = gr.Textbox(label="Status", interactive=False)
 
-                send_to_gen_btn = gr.Button("Send to Generation 🚀", elem_classes="green-btn")
+                with gr.Row():
+                    send_to_gen_btn = gr.Button("Send to Generation 🚀", elem_classes="green-btn")
+                    send_to_v2v_btn = gr.Button("Send to V2V 🔄", elem_classes="green-btn")
 
                 video_input.upload(
                     fn=extract_video_details,
@@ -2153,6 +2209,48 @@ def create_interface():
                         vae_temporal_stride_frames, # 33
                         vae_spatial_tile_height,    # 34
                         vae_spatial_tile_width      # 35
+                    ]
+                )
+
+                send_to_v2v_btn.click(
+                    fn=send_to_v2v,
+                    inputs=[video_input, metadata_output],
+                    outputs=[
+                        tabs,                           # 1. Switch Tab
+                        v2v_input_video,                # 2
+                        v2v_prompt,                     # 3
+                        v2v_negative_prompt,            # 4
+                        v2v_model_config,               # 5
+                        v2v_attention_engine,           # 6
+                        v2v_attention_type,             # 7
+                        v2v_dit_checkpoint_path,        # 8
+                        v2v_nabla_P,                    # 9
+                        v2v_nabla_wT,                   # 10
+                        v2v_nabla_wW,                   # 11
+                        v2v_nabla_wH,                   # 12
+                        v2v_width,                      # 13
+                        v2v_height,                     # 14
+                        v2v_video_duration,             # 15
+                        v2v_sample_steps,               # 16
+                        v2v_guidance_weight,            # 17
+                        v2v_scheduler_scale,            # 18
+                        v2v_seed,                       # 19
+                        v2v_use_mixed_weights,          # 20
+                        v2v_use_int8,                   # 21
+                        v2v_use_torch_compile,          # 22
+                        v2v_use_magcache,               # 23
+                        v2v_enable_block_swap,          # 24
+                        v2v_blocks_in_memory,           # 25
+                        v2v_dtype_select,               # 26
+                        v2v_text_encoder_dtype_select,  # 27
+                        v2v_vae_dtype_select,           # 28
+                        v2v_computation_dtype_select,   # 29
+                        v2v_enable_vae_chunking,        # 30
+                        v2v_vae_temporal_tile_frames,   # 31
+                        v2v_vae_temporal_stride_frames, # 32
+                        v2v_vae_spatial_tile_height,    # 33
+                        v2v_vae_spatial_tile_width,     # 34
+                        v2v_num_cond_frames             # 35
                     ]
                 )
 
