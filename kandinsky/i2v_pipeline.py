@@ -291,9 +291,8 @@ def get_conditioning_frames_from_two_images(start_image_path, end_image_path, va
         end_latent = vae.encode(end_image_enc, opt_tiling=False).latent_dist.sample().squeeze(0).permute(1, 2, 3, 0)
         end_latent = end_latent * vae.config.scaling_factor
 
-    # Add batch dimension: shape [1, H, W, C]
-    start_latent = start_latent.unsqueeze(0)
-    end_latent = end_latent.unsqueeze(0)
+    # Latents are already in correct shape [1, H, W, C] where 1 is the temporal dimension (single frame)
+    # No need to add extra dimension
 
     return start_latent, end_latent, scale_factor
 
