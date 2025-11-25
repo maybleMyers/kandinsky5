@@ -16,6 +16,78 @@ torch._dynamo.config.verbose = True
 MAX_AREA = 2048*2048
 MAX_DIMENSION = 2048  # Maximum pixels per dimension to fit within RoPE max_pos=128
 
+def get_conditioning_latents_from_two_images(start_image, end_image, vae, device, alignment=16):
+    """
+    Encode two images to latent space for image-to-image-video generation.
+    Mirrors get_conditioning_frames_from_two_videos() but for single images.
+    
+    Args:
+        start_image: Path to starting image or PIL Image
+        end_image: Path to ending image or PIL Image  
+        vae: VAE model
+        device: Device to use
+        alignment: Pixel alignment for resizing (16 standard, 128 for NABLA)
+    
+    Returns:
+        Tuple of (start_latent, end_latent, scale_factor)
+        start_latent: Tensor of shape [1, H, W, C] - single frame latent
+        end_latent: Tensor of shape [1, H, W, C] - single frame latent
+        scale_factor: Scale factor applied during resizing
+    """
+    from PIL import Image
+    
+    # Load start image
+    if isinstance(start_image, str):
+        start_pil = Image.open(start_image).convert('RGB')
+    elif isinstance(start_image, Image.Image):
+        start_pil = start_image
+    else:
+        raise ValueError(f"Unknown start_image type: {type(start_image)}")
+    
+    # Load end image
+    if isinstance(end_image, str):
+        end_pil = Image.open(end_image).convert('RGB')
+    elif isinstance(end_image, Image.Image):
+        end_pil = end_image
+    else:
+        raise ValueError(f"Unknown end_image type: {type(end_image)}")
+    
+    # Process start image - determines target dimensions
+    start_tensor = F.pil_to_tensor(start_pil).unsqueeze(0)
+    start_tensor, scale_factor = resize_image(start_tensor, max_area=MAX_AREA, alignment=alignment)
+    target_h, target_w = start_tensor.shape[2], start_tensor.shape[3]
+    
+    # Process end image - resize to match start image dimensions
+    end_tensor = F.pil_to_tensor(end_pil).unsqueeze(0)
+    import torch.nn.functional as F_torch
+    end_tensor = F_torch.interpolate(
+        end_tensor.float(), 
+        size=(target_h, target_w), 
+        mode='bilinear', 
+        align_corners=False
+    )
+    
+    # Normalize to [-1, 1]
+    start_tensor = start_tensor / 127.5 - 1.
+    end_tensor = end_tensor / 127.5 - 1.
+    
+    # Encode through VAE
+    with torch.no_grad():
+        vae_dtype = next(vae.parameters()).dtype
+        
+        # Encode start image
+        # Input shape: [1, C, H, W] -> transpose to [C, 1, H, W] -> unsqueeze to [1, C, 1, H, W]
+        start_input = start_tensor.to(device=device, dtype=vae_dtype).transpose(0, 1).unsqueeze(0)
+        start_latent = vae.encode(start_input, opt_tiling=False).latent_dist.sample()
+        start_latent = start_latent.squeeze(0).permute(1, 2, 3, 0) * vae.config.scaling_factor
+        # Output shape: [1, H_latent, W_latent, C_latent]
+        
+        # Encode end image
+        end_input = end_tensor.to(device=device, dtype=vae_dtype).transpose(0, 1).unsqueeze(0)
+        end_latent = vae.encode(end_input, opt_tiling=False).latent_dist.sample()
+        end_latent = end_latent.squeeze(0).permute(1, 2, 3, 0) * vae.config.scaling_factor
+    
+    return start_latent, end_latent, scale_factor
 
 def extract_last_frames_from_video(video_path, num_frames, target_fps=24):
     """
