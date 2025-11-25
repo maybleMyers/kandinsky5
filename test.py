@@ -25,7 +25,7 @@ if _no_compile:
 
 from kandinsky import get_T2V_pipeline, get_I2V_pipeline, get_I2V_pipeline_with_block_swap, get_T2V_pipeline_with_block_swap, get_T2I_pipeline
 from kandinsky.generation_utils import generate_sample_from_checkpoint, generate_sample_i2v_from_checkpoint, generate_sample_v2v, generate_sample_v2v_join
-from kandinsky.i2v_pipeline import get_conditioning_frames_from_video, get_conditioning_frames_from_two_videos
+from kandinsky.i2v_pipeline import get_conditioning_frames_from_video, get_conditioning_frames_from_two_videos, get_conditioning_frames_with_end_image
 
 try:
     from scripts.latentpreviewer import LatentPreviewer
