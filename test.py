@@ -1222,12 +1222,15 @@ if __name__ == "__main__":
                 pipe.vae = pipe.vae.to("cpu", non_blocking=True)
                 torch.cuda.empty_cache()
 
-            height, width = start_latent.shape[1:3]
+            # Extract dimensions from latent shape [num_frames, height, width, channels]
+            height = start_latent.shape[1]
+            width = start_latent.shape[2]
             total_frames = 1 if args.video_duration == 0 else args.video_duration * 24 // 4 + 1
             shape = (1, total_frames, height, width, 16)
 
             print(f">>> Start latent shape: {start_latent.shape}")
             print(f">>> End latent shape: {end_latent.shape}")
+            print(f">>> Height: {height}, Width: {width}")
             print(f">>> Total frames: {total_frames}")
             print(f">>> Output shape: {shape}")
 
