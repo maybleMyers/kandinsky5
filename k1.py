@@ -384,6 +384,7 @@ def generate_v2v_video(
     prompt: str,
     negative_prompt: str,
     input_video: str,
+    input_video2: str,
     num_cond_frames: int,
     model_config: str,
     dit_checkpoint_path: str,
@@ -447,13 +448,16 @@ def generate_v2v_video(
         elif int(batch_size) > 1:
             current_seed = seed + i
 
-        status_text = f"Processing {i+1}/{batch_size} (Seed: {current_seed})"
-        yield all_generated_videos.copy(), None, status_text, "Starting generation..."
+        # Determine mode based on whether second video is provided
+        mode_name = "Video Joining" if input_video2 else "Video Continuation"
+        status_text = f"Processing {i+1}/{batch_size} - {mode_name} (Seed: {current_seed})"
+        yield all_generated_videos.copy(), None, status_text, f"Starting {mode_name.lower()}..."
 
         timestamp = int(time.time())
         run_id = f"{timestamp}_{random.randint(1000, 9999)}"
         unique_preview_suffix = f"k1_{run_id}"
-        output_filename = os.path.join(save_path, f"k1_v2v_{timestamp}_{current_seed}.mp4")
+        mode_prefix = "join" if input_video2 else "v2v"
+        output_filename = os.path.join(save_path, f"k1_{mode_prefix}_{timestamp}_{current_seed}.mp4")
         current_output_filename = output_filename
 
         # V2V supports all configs for experimentation
@@ -537,6 +541,11 @@ def generate_v2v_video(
             yield all_generated_videos, None, "Error: Input video required for v2v mode.", ""
             return
         command.extend(["--video", str(input_video)])
+
+        # Add second video if provided (joining mode)
+        if input_video2:
+            command.extend(["--video2", str(input_video2)])
+
         command.extend(["--num_cond_frames", str(int(num_cond_frames))])
         command.extend(["--width", str(int(width))])
         command.extend(["--height", str(int(height))])
@@ -580,7 +589,8 @@ def generate_v2v_video(
 
         # Print the command for debugging/transparency
         print("\n" + "="*80)
-        print(f"LAUNCHING V2V COMMAND (Batch {i+1}/{batch_size}):")
+        mode_label = "VIDEO JOINING" if input_video2 else "V2V"
+        print(f"LAUNCHING {mode_label} COMMAND (Batch {i+1}/{batch_size}):")
         print(" ".join(command))
         print("="*80 + "\n")
 
@@ -1831,11 +1841,19 @@ def create_interface():
                     with gr.Column():
                         v2v_input_video = gr.Video(label="Input Video (for continuation)", interactive=True)
 
+                        v2v_input_video2 = gr.Video(label="Ending Video (optional - for joining mode)", interactive=True)
+
+                        gr.Markdown("""
+                        **Joining Mode (Work in Progress):** Provide both videos to create a transition:
+                        - Last N frames from the first video → Generated transition → First N frames from the second video
+                        - Leave the ending video empty for standard video continuation mode
+                        """)
+
                         gr.Markdown("### V2V Parameters")
                         v2v_num_cond_frames = gr.Slider(
                             minimum=1, maximum=10, step=1, value=4,
                             label="Conditioning Frames",
-                            info="Number of last frames from input video to use as conditioning"
+                            info="Number of last frames from input video (or from each video in join mode)"
                         )
 
                         v2v_mode = gr.Dropdown(
@@ -2074,6 +2092,13 @@ def create_interface():
                     outputs=[v2v_original_dims, v2v_width, v2v_height]
                 )
 
+                # Also update dimensions when second video is uploaded (uses first video's dimensions)
+                v2v_input_video2.change(
+                    fn=lambda video2: None,  # No-op, dimensions come from first video
+                    inputs=[v2v_input_video2],
+                    outputs=[]
+                )
+
                 v2v_scale_slider.change(
                     fn=update_resolution_from_scale,
                     inputs=[v2v_scale_slider, v2v_original_dims],
@@ -2095,7 +2120,7 @@ def create_interface():
                 v2v_generate_btn.click(
                     fn=generate_v2v_video,
                     inputs=[
-                        v2v_prompt, v2v_negative_prompt, v2v_input_video, v2v_num_cond_frames,
+                        v2v_prompt, v2v_negative_prompt, v2v_input_video, v2v_input_video2, v2v_num_cond_frames,
                         v2v_model_config, v2v_dit_checkpoint_path, v2v_attention_engine,
                         v2v_attention_type, v2v_nabla_P, v2v_nabla_wT, v2v_nabla_wW, v2v_nabla_wH,
                         v2v_width, v2v_height, v2v_video_duration, v2v_sample_steps,

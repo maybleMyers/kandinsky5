@@ -24,8 +24,8 @@ if _no_compile:
     print("torch.compile() disabled for faster startup")
 
 from kandinsky import get_T2V_pipeline, get_I2V_pipeline, get_I2V_pipeline_with_block_swap, get_T2V_pipeline_with_block_swap, get_T2I_pipeline
-from kandinsky.generation_utils import generate_sample_from_checkpoint, generate_sample_i2v_from_checkpoint, generate_sample_v2v
-from kandinsky.i2v_pipeline import get_conditioning_frames_from_video
+from kandinsky.generation_utils import generate_sample_from_checkpoint, generate_sample_i2v_from_checkpoint, generate_sample_v2v, generate_sample_v2v_join
+from kandinsky.i2v_pipeline import get_conditioning_frames_from_video, get_conditioning_frames_from_two_videos
 
 try:
     from scripts.latentpreviewer import LatentPreviewer
@@ -136,10 +136,16 @@ def parse_args():
         help="Input video for video continuation (overrides --image)"
     )
     parser.add_argument(
+        "--video2",
+        type=str,
+        default=None,
+        help="Second input video for video joining mode. When provided with --video, creates a transition between the two videos."
+    )
+    parser.add_argument(
         "--num_cond_frames",
         type=int,
         default=4,
-        help="Number of last frames to use as conditioning for video continuation"
+        help="Number of last frames to use as conditioning for video continuation (or frames from each video in join mode)"
     )
     parser.add_argument(
         "--negative_prompt",
@@ -790,8 +796,222 @@ if __name__ == "__main__":
                  save_path=args.output_filename,
                  seed=args.seed)
     elif is_i2v:
-        # Check if video continuation mode
-        if args.video is not None:
+        # Check if video joining or continuation mode
+        if args.video is not None and args.video2 is not None:
+            # Video-to-Video JOINING mode - create transition between two videos
+            print(f">>> VIDEO JOINING MODE")
+            print(f">>> First video: {args.video}")
+            print(f">>> Second video: {args.video2}")
+            print(f">>> Conditioning frames from each video: {args.num_cond_frames}")
+
+            alignment = 128 if args.attention_type == "nabla" else 32
+
+            # Load VAE for encoding conditioning frames
+            force_offload = hasattr(pipe.dit, 'enable_block_swap') and pipe.dit.enable_block_swap
+            if pipe.offload or force_offload:
+                pipe.vae = pipe.vae.to(pipe.device_map["vae"], non_blocking=True)
+
+            # Extract and encode conditioning frames from BOTH videos
+            start_cond_latents, end_cond_latents, scale_factor = get_conditioning_frames_from_two_videos(
+                args.video,
+                args.video2,
+                args.num_cond_frames,
+                pipe.vae,
+                pipe.device_map["vae"],
+                alignment=alignment
+            )
+
+            # Offload VAE after encoding
+            if pipe.offload or force_offload:
+                pipe.vae = pipe.vae.to("cpu", non_blocking=True)
+                torch.cuda.empty_cache()
+
+            height, width = start_cond_latents.shape[1:3]
+            # Total frames includes: start_cond + middle + end_cond
+            # Calculate total frames based on desired video duration
+            total_frames = 1 if args.video_duration == 0 else args.video_duration * 24 // 4 + 1
+            shape = (1, total_frames, height, width, 16)
+
+            print(f">>> Start conditioning latents shape: {start_cond_latents.shape}")
+            print(f">>> End conditioning latents shape: {end_cond_latents.shape}")
+            print(f">>> Total frames (model expects): {total_frames}")
+            print(f">>> Output shape: {shape}")
+
+            # Create previewer for V2V JOIN mode
+            previewer = None
+            num_steps = args.sample_steps if args.sample_steps else pipe.num_steps
+            if LatentPreviewer is not None and args.preview is not None and args.preview > 0:
+                print(f"\n>>> V2V JOIN: Initializing previewer with preview={args.preview}")
+                try:
+                    g_temp = torch.Generator(device=pipe.device_map["dit"])
+                    g_temp.manual_seed(args.seed)
+                    # Only preview middle section
+                    middle_frames = total_frames - 2 * args.num_cond_frames
+                    initial_latent = torch.randn(shape[0] * middle_frames, shape[2], shape[3], shape[4], device=pipe.device_map["dit"], generator=g_temp)
+                    initial_latent = initial_latent.permute(3, 0, 1, 2)
+
+                    timesteps = torch.linspace(1, 0, num_steps + 1, device=pipe.device_map["dit"])
+                    timesteps = args.scheduler_scale * timesteps / (1 + (args.scheduler_scale - 1) * timesteps)
+                    timesteps = timesteps[:-1] * 1000
+
+                    class Args:
+                        def __init__(self, save_path, fps):
+                            self.save_path = save_path
+                            self.fps = fps
+
+                    args_obj = Args(
+                        save_path=os.path.dirname(args.output_filename) if args.output_filename else './',
+                        fps=24
+                    )
+
+                    previewer = LatentPreviewer(
+                        args=args_obj,
+                        original_latents=initial_latent,
+                        timesteps=timesteps,
+                        device=pipe.device_map["dit"],
+                        dtype=torch.bfloat16,
+                        model_type="hunyuan"
+                    )
+                    print(f">>> V2V JOIN: Previewer initialized successfully, will generate preview every {args.preview} steps")
+                except Exception as e:
+                    print(f">>> V2V JOIN: Failed to initialize previewer: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    previewer = None
+            else:
+                print(f">>> V2V JOIN: Preview disabled (preview={args.preview})")
+
+            # Generate transition using dual conditioning
+            x = generate_sample_v2v_join(
+                shape,
+                args.prompt,
+                pipe.dit,
+                pipe.vae,
+                pipe.conf,
+                text_embedder=pipe.text_embedder,
+                start_cond_latents=start_cond_latents,
+                end_cond_latents=end_cond_latents,
+                num_steps=num_steps,
+                guidance_weight=args.guidance_weight if args.guidance_weight else pipe.guidance_weight,
+                scheduler_scale=args.scheduler_scale,
+                negative_caption=args.negative_prompt,
+                clip_prompt=args.clip_prompt,
+                seed=args.seed,
+                device=pipe.device_map["dit"],
+                vae_device=pipe.device_map["vae"],
+                progress=True,
+                offload=pipe.offload,
+                force_offload=force_offload,
+                previewer=previewer,
+                preview_interval=args.preview,
+                preview_suffix=args.preview_suffix,
+                stop_check=check_stop_signals,
+                checkpoint_path=checkpoint_file,
+                save_latents=args.save_latents,
+                use_apg=args.use_apg,
+                apg_momentum=args.apg_momentum,
+                apg_norm_threshold=args.apg_norm_threshold,
+            )
+
+            # Concatenate: video1 + generated middle + video2
+            if x is not None:
+                import torchvision
+                import av
+                import numpy as np
+
+                # Load BOTH input videos at 24 fps
+                print(f">>> Loading first video for concatenation: {args.video}")
+                container1 = av.open(args.video)
+                video_stream1 = container1.streams.video[0]
+                video_fps1 = float(video_stream1.average_rate)
+
+                # Calculate frame skip for 24 fps target
+                if video_fps1 > 24:
+                    frame_skip1 = int(video_fps1 / 24)
+                else:
+                    frame_skip1 = 1
+
+                input_frames1 = []
+                frame_count = 0
+                for frame in container1.decode(video=0):
+                    if frame_count % frame_skip1 == 0:
+                        img = frame.to_ndarray(format='rgb24')
+                        input_frames1.append(img)
+                    frame_count += 1
+                container1.close()
+
+                print(f">>> Loading second video for concatenation: {args.video2}")
+                container2 = av.open(args.video2)
+                video_stream2 = container2.streams.video[0]
+                video_fps2 = float(video_stream2.average_rate)
+
+                if video_fps2 > 24:
+                    frame_skip2 = int(video_fps2 / 24)
+                else:
+                    frame_skip2 = 1
+
+                input_frames2 = []
+                frame_count = 0
+                for frame in container2.decode(video=0):
+                    if frame_count % frame_skip2 == 0:
+                        img = frame.to_ndarray(format='rgb24')
+                        input_frames2.append(img)
+                    frame_count += 1
+                container2.close()
+
+                # Convert to tensors
+                input_video1_tensor = torch.from_numpy(np.stack(input_frames1)).float()
+                input_video2_tensor = torch.from_numpy(np.stack(input_frames2)).float()
+
+                # Get the generated video (includes start, middle, end)
+                # x shape: [1, C, total_frames, H, W] -> [total_frames, H, W, C]
+                generated_video = x[0].float().permute(1, 2, 3, 0).cpu()
+
+                # Extract only the MIDDLE section (exclude conditioning frames)
+                # VAE has ~4x temporal compression: video_frames = 1 + (latent_frames - 1) * 4
+                num_cond_video_frames = 1 + (args.num_cond_frames - 1) * 4
+                middle_frames = generated_video[num_cond_video_frames:-num_cond_video_frames]
+
+                print(f">>> Conditioning: {args.num_cond_frames} latent frames = {num_cond_video_frames} video frames each side")
+                print(f">>> Generated middle frames: {middle_frames.shape[0]}")
+
+                # Resize videos to match generated resolution if needed
+                gen_h, gen_w = middle_frames.shape[1:3]
+                if input_video1_tensor.shape[1] != gen_h or input_video1_tensor.shape[2] != gen_w:
+                    print(f">>> Resizing first video from {input_video1_tensor.shape[1]}x{input_video1_tensor.shape[2]} to {gen_h}x{gen_w}")
+                    input_video1_tensor = torch.nn.functional.interpolate(
+                        input_video1_tensor.permute(0, 3, 1, 2),
+                        size=(gen_h, gen_w),
+                        mode='bilinear',
+                        align_corners=False
+                    ).permute(0, 2, 3, 1)
+
+                if input_video2_tensor.shape[1] != gen_h or input_video2_tensor.shape[2] != gen_w:
+                    print(f">>> Resizing second video from {input_video2_tensor.shape[1]}x{input_video2_tensor.shape[2]} to {gen_h}x{gen_w}")
+                    input_video2_tensor = torch.nn.functional.interpolate(
+                        input_video2_tensor.permute(0, 3, 1, 2),
+                        size=(gen_h, gen_w),
+                        mode='bilinear',
+                        align_corners=False
+                    ).permute(0, 2, 3, 1)
+
+                # Concatenate: full video1 + middle + full video2
+                final_video = torch.cat([input_video1_tensor, middle_frames, input_video2_tensor], dim=0)
+
+                print(f">>> First video frames: {input_video1_tensor.shape[0]}")
+                print(f">>> Middle generated frames: {middle_frames.shape[0]}")
+                print(f">>> Second video frames: {input_video2_tensor.shape[0]}")
+                print(f">>> Final joined video frames: {final_video.shape[0]}")
+
+                torchvision.io.write_video(
+                    args.output_filename,
+                    final_video.numpy(),
+                    fps=24,
+                    options={"crf": "5"},
+                )
+                print(f">>> Saved joined video to {args.output_filename}")
+
+        elif args.video is not None:
             # Video-to-Video continuation mode
             print(f">>> VIDEO CONTINUATION MODE")
             print(f">>> Input video: {args.video}")
