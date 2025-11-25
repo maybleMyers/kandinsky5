@@ -232,6 +232,72 @@ def get_conditioning_frames_from_two_videos(video1_path, video2_path, num_frames
     return start_latents, end_latents, scale_factor
 
 
+def get_conditioning_frames_from_two_images(start_image_path, end_image_path, vae, device, alignment=16):
+    """
+    Load two images and encode them to latent space for dual image-to-video conditioning:
+    - Start image (first frame conditioning)
+    - End image (last frame conditioning)
+
+    Args:
+        start_image_path: Path to the starting image file (or PIL Image)
+        end_image_path: Path to the ending image file (or PIL Image)
+        vae: VAE model
+        device: Device to use
+        alignment: Pixel alignment for resizing
+
+    Returns:
+        Tuple of (start_latent, end_latent, scale_factor)
+        start_latent: Tensor of shape [1, H, W, C] from start image
+        end_latent: Tensor of shape [1, H, W, C] from end image
+    """
+    # Load start image
+    if isinstance(start_image_path, str):
+        pil_image_start = Image.open(start_image_path).convert('RGB')
+    elif isinstance(start_image_path, Image.Image):
+        pil_image_start = start_image_path
+    else:
+        raise ValueError(f"unknown image type for start_image: {type(start_image_path)}")
+
+    # Load end image
+    if isinstance(end_image_path, str):
+        pil_image_end = Image.open(end_image_path).convert('RGB')
+    elif isinstance(end_image_path, Image.Image):
+        pil_image_end = end_image_path
+    else:
+        raise ValueError(f"unknown image type for end_image: {type(end_image_path)}")
+
+    # Determine target size from start image
+    start_image = F.pil_to_tensor(pil_image_start).unsqueeze(0)
+    start_image, scale_factor = resize_image(start_image, max_area=MAX_AREA, alignment=alignment)
+    target_h, target_w = start_image.shape[2], start_image.shape[3]
+    start_image = start_image / 127.5 - 1.
+
+    # Encode start image to latent space
+    with torch.no_grad():
+        vae_dtype = next(vae.parameters()).dtype
+        start_image_enc = start_image.to(device=device, dtype=vae_dtype).transpose(0, 1).unsqueeze(0)
+        start_latent = vae.encode(start_image_enc, opt_tiling=False).latent_dist.sample().squeeze(0).permute(1, 2, 3, 0)
+        start_latent = start_latent * vae.config.scaling_factor
+
+    # Process end image - resize to match start image dimensions
+    end_image = F.pil_to_tensor(pil_image_end).unsqueeze(0)
+    import torch.nn.functional as F_torch
+    end_image = F_torch.interpolate(end_image, size=(target_h, target_w), mode='bilinear', align_corners=False)
+    end_image = end_image / 127.5 - 1.
+
+    # Encode end image to latent space
+    with torch.no_grad():
+        end_image_enc = end_image.to(device=device, dtype=vae_dtype).transpose(0, 1).unsqueeze(0)
+        end_latent = vae.encode(end_image_enc, opt_tiling=False).latent_dist.sample().squeeze(0).permute(1, 2, 3, 0)
+        end_latent = end_latent * vae.config.scaling_factor
+
+    # Add batch dimension: shape [1, H, W, C]
+    start_latent = start_latent.unsqueeze(0)
+    end_latent = end_latent.unsqueeze(0)
+
+    return start_latent, end_latent, scale_factor
+
+
 def log_vram_usage(stage_name, dit=None, vae=None, text_embedder=None):
     """Log VRAM usage and model locations for debugging."""
     if not torch.cuda.is_available():

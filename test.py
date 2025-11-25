@@ -24,8 +24,8 @@ if _no_compile:
     print("torch.compile() disabled for faster startup")
 
 from kandinsky import get_T2V_pipeline, get_I2V_pipeline, get_I2V_pipeline_with_block_swap, get_T2V_pipeline_with_block_swap, get_T2I_pipeline
-from kandinsky.generation_utils import generate_sample_from_checkpoint, generate_sample_i2v_from_checkpoint, generate_sample_v2v, generate_sample_v2v_join
-from kandinsky.i2v_pipeline import get_conditioning_frames_from_video, get_conditioning_frames_from_two_videos
+from kandinsky.generation_utils import generate_sample_from_checkpoint, generate_sample_i2v_from_checkpoint, generate_sample_v2v, generate_sample_v2v_join, generate_sample_i2v_dual
+from kandinsky.i2v_pipeline import get_conditioning_frames_from_video, get_conditioning_frames_from_two_videos, get_conditioning_frames_from_two_images
 
 try:
     from scripts.latentpreviewer import LatentPreviewer
@@ -128,6 +128,12 @@ def parse_args():
         type=str,
         default="./assets/test_image.jpg",
         help="The input image for image-to-video generation"
+    )
+    parser.add_argument(
+        "--end_image",
+        type=str,
+        default=None,
+        help="The ending image for image-to-video generation. When provided with --image, conditions both the start and end frames."
     )
     parser.add_argument(
         "--video",
@@ -1189,6 +1195,129 @@ if __name__ == "__main__":
                     options={"crf": "5"},
                 )
                 print(f">>> Saved concatenated video to {args.output_filename}")
+        elif args.end_image is not None:
+            # I2V with dual image conditioning (start and end images)
+            print(f">>> I2V DUAL IMAGE MODE")
+            print(f">>> Start image: {args.image}")
+            print(f">>> End image: {args.end_image}")
+
+            alignment = 128 if args.attention_type == "nabla" else 32
+
+            # Load VAE for encoding conditioning images
+            force_offload = hasattr(pipe.dit, 'enable_block_swap') and pipe.dit.enable_block_swap
+            if pipe.offload or force_offload:
+                pipe.vae = pipe.vae.to(pipe.device_map["vae"], non_blocking=True)
+
+            # Extract and encode both images
+            start_latent, end_latent, scale_factor = get_conditioning_frames_from_two_images(
+                args.image,
+                args.end_image,
+                pipe.vae,
+                pipe.device_map["vae"],
+                alignment=alignment
+            )
+
+            # Offload VAE after encoding
+            if pipe.offload or force_offload:
+                pipe.vae = pipe.vae.to("cpu", non_blocking=True)
+                torch.cuda.empty_cache()
+
+            height, width = start_latent.shape[1:3]
+            total_frames = 1 if args.video_duration == 0 else args.video_duration * 24 // 4 + 1
+            shape = (1, total_frames, height, width, 16)
+
+            print(f">>> Start latent shape: {start_latent.shape}")
+            print(f">>> End latent shape: {end_latent.shape}")
+            print(f">>> Total frames: {total_frames}")
+            print(f">>> Output shape: {shape}")
+
+            # Create previewer for I2V DUAL mode
+            previewer = None
+            num_steps = args.sample_steps if args.sample_steps else pipe.num_steps
+            if LatentPreviewer is not None and args.preview is not None and args.preview > 0:
+                print(f"\n>>> I2V DUAL: Initializing previewer with preview={args.preview}")
+                try:
+                    g_temp = torch.Generator(device=pipe.device_map["dit"])
+                    g_temp.manual_seed(args.seed)
+                    initial_latent = torch.randn(shape[0] * shape[1], shape[2], shape[3], shape[4], device=pipe.device_map["dit"], generator=g_temp)
+                    initial_latent = initial_latent.permute(3, 0, 1, 2)
+
+                    timesteps = torch.linspace(1, 0, num_steps + 1, device=pipe.device_map["dit"])
+                    timesteps = args.scheduler_scale * timesteps / (1 + (args.scheduler_scale - 1) * timesteps)
+                    timesteps = timesteps[:-1] * 1000
+
+                    class Args:
+                        def __init__(self, save_path, fps):
+                            self.save_path = save_path
+                            self.fps = fps
+
+                    args_obj = Args(
+                        save_path=os.path.dirname(args.output_filename) if args.output_filename else './',
+                        fps=24
+                    )
+
+                    previewer = LatentPreviewer(
+                        args=args_obj,
+                        original_latents=initial_latent,
+                        timesteps=timesteps,
+                        device=pipe.device_map["dit"],
+                        dtype=torch.bfloat16,
+                        model_type="hunyuan"
+                    )
+                    print(f">>> I2V DUAL: Previewer initialized successfully, will generate preview every {args.preview} steps")
+                except Exception as e:
+                    print(f">>> I2V DUAL: Failed to initialize previewer: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    previewer = None
+            else:
+                print(f">>> I2V DUAL: Preview disabled (preview={args.preview})")
+
+            # Generate with dual image conditioning
+            x = generate_sample_i2v_dual(
+                shape,
+                args.prompt,
+                pipe.dit,
+                pipe.vae,
+                pipe.conf,
+                text_embedder=pipe.text_embedder,
+                start_image_latent=start_latent,
+                end_image_latent=end_latent,
+                num_steps=num_steps,
+                guidance_weight=args.guidance_weight if args.guidance_weight else pipe.guidance_weight,
+                scheduler_scale=args.scheduler_scale,
+                negative_caption=args.negative_prompt,
+                clip_prompt=args.clip_prompt,
+                seed=args.seed,
+                device=pipe.device_map["dit"],
+                vae_device=pipe.device_map["vae"],
+                progress=True,
+                offload=pipe.offload,
+                force_offload=force_offload,
+                previewer=previewer,
+                preview_interval=args.preview,
+                preview_suffix=args.preview_suffix,
+                stop_check=check_stop_signals,
+                checkpoint_path=checkpoint_file,
+                save_latents=args.save_latents,
+                use_apg=args.use_apg,
+                apg_momentum=args.apg_momentum,
+                apg_norm_threshold=args.apg_norm_threshold,
+            )
+
+            # Save the generated video (full video, no concatenation needed)
+            if x is not None:
+                import torchvision
+                # x shape: [1, C, num_frames, H, W] -> [num_frames, H, W, C]
+                video_frames = x[0].float().permute(1, 2, 3, 0).cpu()
+                print(f">>> Generated video frames: {video_frames.shape[0]}")
+                torchvision.io.write_video(
+                    args.output_filename,
+                    video_frames.numpy(),
+                    fps=24,
+                    options={"crf": "5"},
+                )
+                print(f">>> Saved dual image i2v video to {args.output_filename}")
         else:
             # Standard Image-to-Video mode
             image_to_use = args.image

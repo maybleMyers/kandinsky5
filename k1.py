@@ -67,6 +67,7 @@ def generate_video(
     prompt: str,
     negative_prompt: str,
     input_image: str,
+    end_image: str,
     mode: str,
     model_config: str,
     dit_checkpoint_path: str,
@@ -217,6 +218,8 @@ def generate_video(
                 yield all_generated_videos, "Error: Input image required for i2v mode.", ""
                 return
             command.extend(["--image", str(input_image)])
+            if end_image:
+                command.extend(["--end_image", str(end_image)])
             # Pass width and height for i2v mode to resize the input image
             command.extend(["--width", str(int(width))])
             command.extend(["--height", str(int(height))])
@@ -1121,7 +1124,7 @@ def extract_video_details(video_path: str) -> Tuple[dict, str]:
 def send_to_generation(video_path, metadata):
     """Extract first frame and map metadata to generation inputs using subprocess."""
     if not video_path:
-        return [gr.update()] * 35
+        return [gr.update()] * 36
 
     # 1. Extract First Frame as PIL Image using subprocess
     input_img_pil = None
@@ -1161,6 +1164,7 @@ def send_to_generation(video_path, metadata):
         get("prompt"),                  # prompt
         get("negative_prompt"),         # negative_prompt
         input_img_pil,                  # input_image (First Frame)
+        None,                           # end_image (not populated from video)
         "i2v",                          # mode (Force to i2v)
         get("model_config"),            # model_config
         get("attention_engine"),        # attention_engine
@@ -1500,6 +1504,9 @@ def create_interface():
                     with gr.Column():
                         input_image = gr.Image(label="Input Image (for i2v mode)", type="filepath")
 
+                        with gr.Accordion("End Image (Optional)", open=False):
+                            end_image = gr.Image(label="End Image (for i2v mode)", type="filepath")
+
                         gr.Markdown("### Generation Parameters")
                         mode = gr.Dropdown(
                             label="Mode",
@@ -1736,7 +1743,7 @@ def create_interface():
                 generate_btn.click(
                     fn=generate_video,
                     inputs=[
-                        prompt, negative_prompt, input_image, mode, model_config, dit_checkpoint_path, attention_engine,
+                        prompt, negative_prompt, input_image, end_image, mode, model_config, dit_checkpoint_path, attention_engine,
                         attention_type, nabla_P, nabla_wT, nabla_wW, nabla_wH,
                         width, height, video_duration, sample_steps,
                         guidance_weight, scheduler_scale, seed,
@@ -2203,7 +2210,8 @@ def create_interface():
                         prompt,                     # 2
                         negative_prompt,            # 3
                         input_image,                # 4
-                        mode,                       # 5
+                        end_image,                  # 5
+                        mode,                       # 6
                         model_config,               # 6
                         attention_engine,           # 7
                         attention_type,             # 8

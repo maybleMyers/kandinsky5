@@ -48,7 +48,7 @@ Changlog:
 ## Screenshot of working settings for 24GB VRAM 10s t2v video
 ![GUI Screenshot](assets/screenshot.png)
 
-### Authors
+### Model Authors
 <B>Project Leader:</B> Denis Dimitrov</br>
 
 <B>Team Leads:</B> Vladimir Arkhipkin, Vladimir Korviakov, Nikolai Gerasimenko, Denis Parkhomenko</br>
