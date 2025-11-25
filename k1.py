@@ -1844,7 +1844,7 @@ def create_interface():
                         v2v_input_video2 = gr.Video(label="Ending Video (optional - for joining mode)", interactive=True)
 
                         gr.Markdown("""
-                        **Joining Mode:** Provide both videos to create a seamless transition:
+                        **Joining Mode (Work in Progress):** Provide both videos to create a transition:
                         - Last N frames from the first video → Generated transition → First N frames from the second video
                         - Leave the ending video empty for standard video continuation mode
                         """)
