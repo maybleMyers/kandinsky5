@@ -8,7 +8,7 @@ import torchvision.transforms.functional as F
 from torchvision.transforms import ToPILImage
 from PIL import Image
 
-from .generation_utils import generate_sample_i2v, generate_sample_v2v
+from .generation_utils import generate_sample_i2v
 
 torch._dynamo.config.suppress_errors = True
 torch._dynamo.config.verbose = True
@@ -16,6 +16,73 @@ torch._dynamo.config.verbose = True
 MAX_AREA = 2048*2048
 MAX_DIMENSION = 2048  # Maximum pixels per dimension to fit within RoPE max_pos=128
 
+def get_conditioning_frames_with_end_image(start_input, end_image_path, num_frames, vae, device, alignment=16, is_start_video=True):
+    """
+    Load start input (video or image) and end image, then encode for video joining.
+    """
+    import torch.nn.functional as F_torch
+    
+    # 1. Prepare Start Frames
+    if is_start_video:
+        pil_frames_start = extract_last_frames_from_video(start_input, num_frames)
+        if len(pil_frames_start) < num_frames:
+             raise ValueError(f"Video has only {len(pil_frames_start)} frames, need {num_frames}")
+    else:
+        # Start input is an image
+        if isinstance(start_input, str):
+            img = Image.open(start_input).convert('RGB')
+        else:
+            img = start_input
+        # Repeat the start image num_frames times
+        pil_frames_start = [img for _ in range(num_frames)]
+
+    # 2. Prepare End Frames (from Image)
+    if isinstance(end_image_path, str):
+        end_img = Image.open(end_image_path).convert('RGB')
+    else:
+        end_img = end_image_path
+    # Repeat the end image num_frames times
+    pil_frames_end = [end_img for _ in range(num_frames)]
+
+    # Determine target size from first frame of start input
+    first_image = F.pil_to_tensor(pil_frames_start[0]).unsqueeze(0)
+    first_image, scale_factor = resize_image(first_image, max_area=MAX_AREA, alignment=alignment)
+    target_h, target_w = first_image.shape[2], first_image.shape[3]
+
+    # Encode start frames
+    start_latents_list = []
+    for i, pil_image in enumerate(pil_frames_start):
+        image = F.pil_to_tensor(pil_image).unsqueeze(0)
+        image, _ = resize_image(image, max_area=MAX_AREA, alignment=alignment)
+        image = image / 127.5 - 1.
+
+        with torch.no_grad():
+            vae_dtype = next(vae.parameters()).dtype
+            image = image.to(device=device, dtype=vae_dtype).transpose(0, 1).unsqueeze(0)
+            lat_image = vae.encode(image, opt_tiling=False).latent_dist.sample().squeeze(0).permute(1, 2, 3, 0)
+            lat_image = lat_image * vae.config.scaling_factor
+            start_latents_list.append(lat_image)
+
+    # Encode end frames - resize to match start dimensions
+    end_latents_list = []
+    for i, pil_image in enumerate(pil_frames_end):
+        image = F.pil_to_tensor(pil_image).unsqueeze(0)
+        # Resize to match start dimensions
+        image = F_torch.interpolate(image, size=(target_h, target_w), mode='bilinear', align_corners=False)
+        image = image / 127.5 - 1.
+
+        with torch.no_grad():
+            vae_dtype = next(vae.parameters()).dtype
+            image = image.to(device=device, dtype=vae_dtype).transpose(0, 1).unsqueeze(0)
+            lat_image = vae.encode(image, opt_tiling=False).latent_dist.sample().squeeze(0).permute(1, 2, 3, 0)
+            lat_image = lat_image * vae.config.scaling_factor
+            end_latents_list.append(lat_image)
+
+    # Stack latents: [num_frames, H, W, C]
+    start_latents = torch.cat(start_latents_list, dim=0)
+    end_latents = torch.cat(end_latents_list, dim=0)
+
+    return start_latents, end_latents, scale_factor
 
 def extract_last_frames_from_video(video_path, num_frames, target_fps=24):
     """
@@ -420,6 +487,7 @@ class Kandinsky5I2VPipeline:
         checkpoint_path=None,
         save_latents=None,
     ):
+        from .generation_utils import generate_sample_i2v
         num_steps = self.num_steps if num_steps is None else num_steps
         guidance_weight = self.guidance_weight if guidance_weight is None else guidance_weight
         # SEED
