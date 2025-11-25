@@ -990,7 +990,7 @@ if __name__ == "__main__":
                 )
                 print(f">>> Saved generated video to {args.output_filename}")
 
-        if args.video is not None and args.video2 is not None:
+        elif args.video is not None and args.video2 is not None:
             # Video-to-Video JOINING mode - create transition between two videos
             print(f">>> VIDEO JOINING MODE")
             print(f">>> First video: {args.video}")
