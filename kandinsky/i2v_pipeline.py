@@ -232,11 +232,10 @@ def get_conditioning_frames_from_two_videos(video1_path, video2_path, num_frames
     return start_latents, end_latents, scale_factor
 
 
-def get_conditioning_frames_from_two_images(start_image_path, end_image_path, vae, device, alignment=16):
+def get_conditioning_frames_from_two_images(start_image_path, end_image_path, vae, device, alignment=16, num_replicate=4):
     """
-    Load two images and encode them to latent space for dual image-to-video conditioning:
-    - Start image (first frame conditioning)
-    - End image (last frame conditioning)
+    Load two images and encode them to latent space for dual image-to-video conditioning.
+    Replicates each image frame to create multi-frame conditioning for model compatibility.
 
     Args:
         start_image_path: Path to the starting image file (or PIL Image)
@@ -244,11 +243,13 @@ def get_conditioning_frames_from_two_images(start_image_path, end_image_path, va
         vae: VAE model
         device: Device to use
         alignment: Pixel alignment for resizing
+        num_replicate: Number of times to replicate each frame (default: 4)
 
     Returns:
-        Tuple of (start_latent, end_latent, scale_factor)
-        start_latent: Tensor of shape [1, H, W, C] from start image
-        end_latent: Tensor of shape [1, H, W, C] from end image
+        Tuple of (start_latents, end_latents, scale_factor)
+        start_latents: Tensor of shape [num_replicate, H, W, C] - replicated start frames
+        end_latents: Tensor of shape [num_replicate, H, W, C] - replicated end frames
+        scale_factor: Resize scale factor
     """
     # Load start image
     if isinstance(start_image_path, str):
@@ -291,10 +292,13 @@ def get_conditioning_frames_from_two_images(start_image_path, end_image_path, va
         end_latent = vae.encode(end_image_enc, opt_tiling=False).latent_dist.sample().squeeze(0).permute(1, 2, 3, 0)
         end_latent = end_latent * vae.config.scaling_factor
 
-    # Latents are already in correct shape [1, H, W, C] where 1 is the temporal dimension (single frame)
-    # No need to add extra dimension
+    # Replicate each frame num_replicate times to create multi-frame conditioning
+    # start_latent shape: [1, H, W, C] -> [num_replicate, H, W, C]
+    # end_latent shape: [1, H, W, C] -> [num_replicate, H, W, C]
+    start_latents = start_latent.repeat(num_replicate, 1, 1, 1)
+    end_latents = end_latent.repeat(num_replicate, 1, 1, 1)
 
-    return start_latent, end_latent, scale_factor
+    return start_latents, end_latents, scale_factor
 
 
 def log_vram_usage(stage_name, dit=None, vae=None, text_embedder=None):
