@@ -67,6 +67,54 @@ def extract_last_frames_from_video(video_path, num_frames, target_fps=24):
     return pil_frames
 
 
+def extract_first_frames_from_video(video_path, num_frames, target_fps=24):
+    """
+    Extract the first N frames from a video file.
+
+    Args:
+        video_path: Path to the video file
+        num_frames: Number of frames to extract from the beginning
+        target_fps: Target FPS for frame extraction (default 24)
+
+    Returns:
+        List of PIL Images (first N frames)
+    """
+    import av
+    import numpy as np
+
+    container = av.open(video_path)
+    video_stream = container.streams.video[0]
+
+    # Get video properties
+    video_fps = float(video_stream.average_rate)
+
+    # Calculate frame skip for downsampling to target_fps if needed
+    if video_fps > target_fps:
+        frame_skip = int(video_fps / target_fps)
+    else:
+        frame_skip = 1
+
+    # Decode and keep first N frames (accounting for frame skip)
+    frames = []
+    frame_count = 0
+    for frame in container.decode(video=0):
+        if frame_count % frame_skip == 0:
+            frames.append(frame)
+            if len(frames) >= num_frames:
+                break
+        frame_count += 1
+
+    container.close()
+
+    # Convert to PIL Images
+    pil_frames = []
+    for frame in frames:
+        img = frame.to_image()
+        pil_frames.append(img.convert('RGB'))
+
+    return pil_frames
+
+
 def get_conditioning_frames_from_video(video_path, num_frames, vae, device, alignment=16):
     """
     Load video and encode last N frames to latent space for video continuation.
@@ -112,6 +160,77 @@ def get_conditioning_frames_from_video(video_path, num_frames, vae, device, alig
     latents = torch.cat(latents_list, dim=0)
 
     return latents, scale_factor
+
+
+def get_conditioning_frames_from_two_videos(video1_path, video2_path, num_frames, vae, device, alignment=16):
+    """
+    Load two videos and encode conditioning frames for video joining:
+    - Last N frames from video1 (start conditioning)
+    - First N frames from video2 (end conditioning)
+
+    Args:
+        video1_path: Path to the first video file
+        video2_path: Path to the second video file
+        num_frames: Number of conditioning frames to extract from each video
+        vae: VAE model
+        device: Device to use
+        alignment: Pixel alignment for resizing
+
+    Returns:
+        Tuple of (start_latents, end_latents, scale_factor)
+        start_latents: Tensor of shape [num_frames, H, W, C] from video1
+        end_latents: Tensor of shape [num_frames, H, W, C] from video2
+    """
+    # Extract last frames from video1 and first frames from video2
+    pil_frames_start = extract_last_frames_from_video(video1_path, num_frames)
+    pil_frames_end = extract_first_frames_from_video(video2_path, num_frames)
+
+    if len(pil_frames_start) < num_frames:
+        raise ValueError(f"Video1 has only {len(pil_frames_start)} frames, need {num_frames}")
+    if len(pil_frames_end) < num_frames:
+        raise ValueError(f"Video2 has only {len(pil_frames_end)} frames, need {num_frames}")
+
+    # Determine target size from first frame of video1
+    first_image = F.pil_to_tensor(pil_frames_start[0]).unsqueeze(0)
+    first_image, scale_factor = resize_image(first_image, max_area=MAX_AREA, alignment=alignment)
+    target_h, target_w = first_image.shape[2], first_image.shape[3]
+
+    # Encode start frames (from video1)
+    start_latents_list = []
+    for i, pil_image in enumerate(pil_frames_start):
+        image = F.pil_to_tensor(pil_image).unsqueeze(0)
+        image, _ = resize_image(image, max_area=MAX_AREA, alignment=alignment)
+        image = image / 127.5 - 1.
+
+        with torch.no_grad():
+            vae_dtype = next(vae.parameters()).dtype
+            image = image.to(device=device, dtype=vae_dtype).transpose(0, 1).unsqueeze(0)
+            lat_image = vae.encode(image, opt_tiling=False).latent_dist.sample().squeeze(0).permute(1, 2, 3, 0)
+            lat_image = lat_image * vae.config.scaling_factor
+            start_latents_list.append(lat_image)
+
+    # Encode end frames (from video2) - resize to match video1 dimensions
+    end_latents_list = []
+    for i, pil_image in enumerate(pil_frames_end):
+        image = F.pil_to_tensor(pil_image).unsqueeze(0)
+        # Resize to match video1 dimensions
+        import torch.nn.functional as F_torch
+        image = F_torch.interpolate(image, size=(target_h, target_w), mode='bilinear', align_corners=False)
+        image = image / 127.5 - 1.
+
+        with torch.no_grad():
+            vae_dtype = next(vae.parameters()).dtype
+            image = image.to(device=device, dtype=vae_dtype).transpose(0, 1).unsqueeze(0)
+            lat_image = vae.encode(image, opt_tiling=False).latent_dist.sample().squeeze(0).permute(1, 2, 3, 0)
+            lat_image = lat_image * vae.config.scaling_factor
+            end_latents_list.append(lat_image)
+
+    # Stack latents: [num_frames, H, W, C]
+    start_latents = torch.cat(start_latents_list, dim=0)
+    end_latents = torch.cat(end_latents_list, dim=0)
+
+    return start_latents, end_latents, scale_factor
+
 
 def log_vram_usage(stage_name, dit=None, vae=None, text_embedder=None):
     """Log VRAM usage and model locations for debugging."""
