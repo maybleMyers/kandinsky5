@@ -18,38 +18,35 @@ MAX_DIMENSION = 2048  # Maximum pixels per dimension to fit within RoPE max_pos=
 
 def get_conditioning_frames_with_end_image(start_input, end_image_path, num_frames, vae, device, alignment=16, is_start_video=True):
     """
-    Load start input (video or image) and end image, then encode for video joining.
+    Load start input (video or image) and end image, encoding them exactly like video joining.
     """
-    import torch.nn.functional as F_torch
     
-    # 1. Prepare Start Frames
+    # 1. Prepare Start Frames (Identical to Video Join)
     if is_start_video:
         pil_frames_start = extract_last_frames_from_video(start_input, num_frames)
         if len(pil_frames_start) < num_frames:
              raise ValueError(f"Video has only {len(pil_frames_start)} frames, need {num_frames}")
     else:
-        # Start input is an image
         if isinstance(start_input, str):
             img = Image.open(start_input).convert('RGB')
         else:
             img = start_input
-        # Repeat the start image num_frames times
         pil_frames_start = [img for _ in range(num_frames)]
 
-    # 2. Prepare End Frames (from Image)
+    # 2. Prepare End Frames (Treat Image as a static Video)
     if isinstance(end_image_path, str):
         end_img = Image.open(end_image_path).convert('RGB')
     else:
         end_img = end_image_path
-    # Repeat the end image num_frames times
+    # Repeat the end image to simulate a video clip
     pil_frames_end = [end_img for _ in range(num_frames)]
 
-    # Determine target size from first frame of start input
+    # 3. Determine Target Resolution (Match Start Input)
     first_image = F.pil_to_tensor(pil_frames_start[0]).unsqueeze(0)
     first_image, scale_factor = resize_image(first_image, max_area=MAX_AREA, alignment=alignment)
     target_h, target_w = first_image.shape[2], first_image.shape[3]
 
-    # Encode start frames
+    # 4. Encode Start Frames
     start_latents_list = []
     for i, pil_image in enumerate(pil_frames_start):
         image = F.pil_to_tensor(pil_image).unsqueeze(0)
@@ -63,11 +60,11 @@ def get_conditioning_frames_with_end_image(start_input, end_image_path, num_fram
             lat_image = lat_image * vae.config.scaling_factor
             start_latents_list.append(lat_image)
 
-    # Encode end frames - resize to match start dimensions
+    # 5. Encode End Frames (Resizing to match Start)
     end_latents_list = []
     for i, pil_image in enumerate(pil_frames_end):
         image = F.pil_to_tensor(pil_image).unsqueeze(0)
-        # Resize to match start dimensions
+        # Force resize to match the start video/image dimensions exactly
         image = F_torch.interpolate(image, size=(target_h, target_w), mode='bilinear', align_corners=False)
         image = image / 127.5 - 1.
 
