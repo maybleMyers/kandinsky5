@@ -862,9 +862,8 @@ if __name__ == "__main__":
                 try:
                     g_temp = torch.Generator(device=pipe.device_map["dit"])
                     g_temp.manual_seed(args.seed)
-                    # Preview middle section (exclude 1 frame each for start/end conditioning)
-                    middle_frames = total_frames - 2  # 1 start + 1 end conditioning frame
-                    initial_latent = torch.randn(shape[0] * middle_frames, shape[2], shape[3], shape[4],
+                    # Preview all frames being processed (start conditioning + middle + end conditioning)
+                    initial_latent = torch.randn(shape[0] * total_frames, shape[2], shape[3], shape[4],
                                                 device=pipe.device_map["dit"], generator=g_temp)
                     initial_latent = initial_latent.permute(3, 0, 1, 2)
 
@@ -989,9 +988,8 @@ if __name__ == "__main__":
                 try:
                     g_temp = torch.Generator(device=pipe.device_map["dit"])
                     g_temp.manual_seed(args.seed)
-                    # Only preview middle section
-                    middle_frames = total_frames - 2 * args.num_cond_frames
-                    initial_latent = torch.randn(shape[0] * middle_frames, shape[2], shape[3], shape[4], device=pipe.device_map["dit"], generator=g_temp)
+                    # Preview all frames being processed (start conditioning + middle + end conditioning)
+                    initial_latent = torch.randn(shape[0] * total_frames, shape[2], shape[3], shape[4], device=pipe.device_map["dit"], generator=g_temp)
                     initial_latent = initial_latent.permute(3, 0, 1, 2)
 
                     timesteps = torch.linspace(1, 0, num_steps + 1, device=pipe.device_map["dit"])
@@ -1202,7 +1200,8 @@ if __name__ == "__main__":
                 try:
                     g_temp = torch.Generator(device=pipe.device_map["dit"])
                     g_temp.manual_seed(args.seed)
-                    initial_latent = torch.randn(shape[0] * shape[1], shape[2], shape[3], shape[4], device=pipe.device_map["dit"], generator=g_temp)
+                    # Preview all frames being processed (conditioning + new)
+                    initial_latent = torch.randn(shape[0] * total_frames, shape[2], shape[3], shape[4], device=pipe.device_map["dit"], generator=g_temp)
                     initial_latent = initial_latent.permute(3, 0, 1, 2)
 
                     timesteps = torch.linspace(1, 0, num_steps + 1, device=pipe.device_map["dit"])
