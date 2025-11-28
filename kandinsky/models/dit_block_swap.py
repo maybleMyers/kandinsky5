@@ -172,7 +172,33 @@ class DiffusionTransformer3DBlockSwap(DiffusionTransformer3D):
         # Visual transformer blocks with block swapping and KV cache support
         kv_cache_dict_ret = {}
 
-        if self.enable_block_swap:
+        # Check if cache-dit has added a forward method to visual_transformer_blocks
+        # If so, call it directly and let cache-dit handle all block processing
+        cache_dit_active = callable(getattr(self.visual_transformer_blocks, 'forward', None))
+
+        if cache_dit_active:
+            # cache-dit wrapped the ModuleList - call its forward method
+            # This lets cache-dit handle caching internally while our device hooks
+            # move blocks to/from GPU as cache-dit iterates through them
+            block_output = self.visual_transformer_blocks(
+                visual_embed, text_embed, time_embed,
+                visual_rope, sparse_params, attention_mask,
+                num_cond_latents=num_cond_latents,
+                return_kv=return_kv,
+                kv_cache=kv_cache_dict
+            )
+
+            if return_kv:
+                visual_embed, kv_cache_dict_ret = block_output
+            else:
+                # Handle cache-dit wrapped output (may return tuple)
+                if isinstance(block_output, tuple):
+                    visual_embed = block_output[0]
+                else:
+                    visual_embed = block_output
+
+        elif self.enable_block_swap:
+            # Block swap mode - process blocks one at a time, moving to/from GPU
             for i, visual_transformer_block in enumerate(self.visual_transformer_blocks):
                 # Prefetch next block while processing current one
                 if i + 1 < self.num_visual_blocks:
@@ -195,17 +221,14 @@ class DiffusionTransformer3DBlockSwap(DiffusionTransformer3D):
 
                 if return_kv:
                     visual_embed, kv_cache = block_output
-                    # Store (k_cache, v_cache, visual_rope) for proper RoPE handling
                     k_cache, v_cache = kv_cache
                     kv_cache_dict_ret[i] = (k_cache, v_cache, visual_rope)
                 else:
-                    # Handle cache-dit wrapped output (may return tuple)
                     if isinstance(block_output, tuple):
-                        # cache-dit returns (hidden_states,) or (hidden_states, other_info)
-                        # We only need the hidden_states (first element)
                         visual_embed = block_output[0]
                     else:
                         visual_embed = block_output
+
         else:
             # Normal forward pass without swapping
             for i, visual_transformer_block in enumerate(self.visual_transformer_blocks):
@@ -222,14 +245,10 @@ class DiffusionTransformer3DBlockSwap(DiffusionTransformer3D):
 
                 if return_kv:
                     visual_embed, kv_cache = block_output
-                    # Store (k_cache, v_cache, visual_rope) for proper RoPE handling
                     k_cache, v_cache = kv_cache
                     kv_cache_dict_ret[i] = (k_cache, v_cache, visual_rope)
                 else:
-                    # Handle cache-dit wrapped output (may return tuple)
                     if isinstance(block_output, tuple):
-                        # cache-dit returns (hidden_states,) or (hidden_states, other_info)
-                        # We only need the hidden_states (first element)
                         visual_embed = block_output[0]
                     else:
                         visual_embed = block_output
