@@ -180,22 +180,18 @@ class DiffusionTransformer3DBlockSwap(DiffusionTransformer3D):
             # cache-dit wrapped the ModuleList - call its forward method
             # This lets cache-dit handle caching internally while our device hooks
             # move blocks to/from GPU as cache-dit iterates through them
+            # Note: cache-dit expects Pattern_1 signature (hidden_states, encoder_hidden_states, temb, ...)
+            # We can't use return_kv or kv_cache with cache-dit
             block_output = self.visual_transformer_blocks(
                 visual_embed, text_embed, time_embed,
-                visual_rope, sparse_params, attention_mask,
-                num_cond_latents=num_cond_latents,
-                return_kv=return_kv,
-                kv_cache=kv_cache_dict
+                visual_rope, sparse_params, attention_mask
             )
 
-            if return_kv:
-                visual_embed, kv_cache_dict_ret = block_output
+            # Handle cache-dit wrapped output (may return tuple)
+            if isinstance(block_output, tuple):
+                visual_embed = block_output[0]
             else:
-                # Handle cache-dit wrapped output (may return tuple)
-                if isinstance(block_output, tuple):
-                    visual_embed = block_output[0]
-                else:
-                    visual_embed = block_output
+                visual_embed = block_output
 
         elif self.enable_block_swap:
             # Block swap mode - process blocks one at a time, moving to/from GPU
