@@ -172,9 +172,10 @@ class DiffusionTransformer3DBlockSwap(DiffusionTransformer3D):
         # Visual transformer blocks with block swapping and KV cache support
         kv_cache_dict_ret = {}
 
-        # Check if cache-dit has added a forward method to visual_transformer_blocks
-        # If so, call it directly and let cache-dit handle all block processing
-        cache_dit_active = callable(getattr(self.visual_transformer_blocks, 'forward', None))
+        # Check if cache-dit has wrapped the visual_transformer_blocks
+        # cache-dit replaces ModuleList with CachedBlocks which is not a ModuleList
+        from torch.nn import ModuleList
+        cache_dit_active = not isinstance(self.visual_transformer_blocks, ModuleList)
 
         if cache_dit_active:
             # cache-dit wrapped the ModuleList - call its forward method
