@@ -198,13 +198,37 @@ class DiffusionTransformer3DBlockSwap(DiffusionTransformer3D):
                 self._debug_cached_blocks_printed = True
                 print(f">>> visual_embed shape before blocks: {visual_embed.shape}")
                 if hasattr(cached_blocks, 'transformer_blocks'):
-                    print(f">>> cached_blocks.transformer_blocks type: {type(cached_blocks.transformer_blocks)}")
                     print(f">>> cached_blocks.transformer_blocks len: {len(cached_blocks.transformer_blocks)}")
+                # Check for call_blocks method
+                if hasattr(cached_blocks, 'call_blocks'):
+                    print(f">>> cached_blocks has call_blocks method")
 
-            # Access original blocks through transformer_blocks attribute
-            # Device hooks on these blocks handle GPU/CPU movement
-            if hasattr(cached_blocks, 'transformer_blocks'):
-                # Iterate through original blocks - device hooks auto-move to GPU
+            # Try to use cache-dit's caching by calling its forward method
+            # The device hooks on transformer_blocks should auto-move blocks to/from GPU
+            # as cache-dit iterates through them internally
+            try:
+                # CachedBlocks.forward() implements the caching logic (Fn, Mn, Bn blocks)
+                # Pass arguments in Pattern_1 order: hidden_states, encoder_hidden_states, temb, ...
+                block_output = cached_blocks.forward(
+                    visual_embed,      # hidden_states
+                    text_embed,        # encoder_hidden_states
+                    time_embed,        # temb
+                    visual_rope,       # additional args...
+                    sparse_params,
+                    attention_mask
+                )
+
+                if isinstance(block_output, tuple):
+                    visual_embed = block_output[0]
+                else:
+                    visual_embed = block_output
+
+            except Exception as e:
+                # If cache-dit forward fails, fall back to manual iteration
+                if not getattr(self, '_cache_fallback_warned', False):
+                    self._cache_fallback_warned = True
+                    print(f">>> cache-dit forward failed ({e}), falling back to manual iteration (no caching)")
+
                 for i, block in enumerate(cached_blocks.transformer_blocks):
                     block_output = block(
                         visual_embed, text_embed, time_embed,
@@ -214,17 +238,6 @@ class DiffusionTransformer3DBlockSwap(DiffusionTransformer3D):
                         visual_embed = block_output[0]
                     else:
                         visual_embed = block_output
-            else:
-                # Fallback: try calling CachedBlocks.forward directly
-                # This uses cache-dit's internal iteration with caching
-                block_output = cached_blocks(
-                    visual_embed, text_embed, time_embed,
-                    visual_rope, sparse_params, attention_mask
-                )
-                if isinstance(block_output, tuple):
-                    visual_embed = block_output[0]
-                else:
-                    visual_embed = block_output
 
         elif self.enable_block_swap:
             # Block swap mode - process blocks one at a time, moving to/from GPU

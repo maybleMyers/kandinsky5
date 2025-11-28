@@ -377,6 +377,18 @@ def generate_video(
                     "vae_temporal_stride_frames": int(vae_temporal_stride_frames) if enable_vae_chunking and vae_temporal_stride_frames else None,
                     "vae_spatial_tile_height": int(vae_spatial_tile_height) if enable_vae_chunking and vae_spatial_tile_height else None,
                     "vae_spatial_tile_width": int(vae_spatial_tile_width) if enable_vae_chunking and vae_spatial_tile_width else None,
+                    # Extra settings
+                    "clip_prompt": clip_prompt.strip() if clip_prompt and clip_prompt.strip() else None,
+                    "use_prompt_expansion": use_prompt_expansion,
+                    "save_latents": save_latents,
+                    "enable_cache": enable_cache,
+                    "enable_taylorseer": enable_taylorseer if enable_cache else None,
+                    "taylorseer_order": int(taylorseer_order) if enable_cache and enable_taylorseer else None,
+                    "cache_Fn": int(cache_Fn) if enable_cache else None,
+                    "cache_Bn": int(cache_Bn) if enable_cache else None,
+                    "cache_rdt": cache_rdt if enable_cache else None,
+                    "cache_warmup": int(cache_warmup) if enable_cache else None,
+                    "cache_max_steps": int(cache_max_steps) if enable_cache else None,
                 }
                 try:
                     add_metadata_to_video(output_filename, params_for_meta)
@@ -735,6 +747,18 @@ def generate_v2v_video(
                     "use_apg": use_apg,
                     "apg_momentum": apg_momentum if use_apg else None,
                     "apg_norm_threshold": apg_norm_threshold if use_apg else None,
+                    # Extra settings
+                    "clip_prompt": clip_prompt.strip() if clip_prompt and clip_prompt.strip() else None,
+                    "use_prompt_expansion": use_prompt_expansion,
+                    "save_latents": save_latents,
+                    "enable_cache": enable_cache,
+                    "enable_taylorseer": enable_taylorseer if enable_cache else None,
+                    "taylorseer_order": int(taylorseer_order) if enable_cache and enable_taylorseer else None,
+                    "cache_Fn": int(cache_Fn) if enable_cache else None,
+                    "cache_Bn": int(cache_Bn) if enable_cache else None,
+                    "cache_rdt": cache_rdt if enable_cache else None,
+                    "cache_warmup": int(cache_warmup) if enable_cache else None,
+                    "cache_max_steps": int(cache_max_steps) if enable_cache else None,
                 }
                 try:
                     add_metadata_to_video(output_filename, params_for_meta)
@@ -1163,7 +1187,7 @@ def extract_video_details(video_path: str) -> Tuple[dict, str]:
 def send_to_generation(video_path, metadata):
     """Extract first frame and map metadata to generation inputs using subprocess."""
     if not video_path:
-        return [gr.update()] * 35
+        return [gr.update()] * 37
 
     # 1. Extract First Frame as PIL Image using subprocess
     input_img_pil = None
@@ -1233,13 +1257,15 @@ def send_to_generation(video_path, metadata):
         get_num("vae_temporal_tile_frames"),   # vae_temporal_tile_frames
         get_num("vae_temporal_stride_frames"), # vae_temporal_stride_frames
         get_num("vae_spatial_tile_height"),    # vae_spatial_tile_height
-        get_num("vae_spatial_tile_width")      # vae_spatial_tile_width
+        get_num("vae_spatial_tile_width"),     # vae_spatial_tile_width
+        get("clip_prompt"),                    # clip_prompt
+        get("use_prompt_expansion")            # use_prompt_expansion
     )
 
 def send_to_v2v(video_path, metadata):
     """Send video and metadata to V2V tab for continuation."""
     if not video_path:
-        return [gr.update()] * 36
+        return [gr.update()] * 38
 
     # Parse Metadata
     meta = metadata if isinstance(metadata, dict) else {}
@@ -1288,6 +1314,8 @@ def send_to_v2v(video_path, metadata):
         get_num("vae_spatial_tile_height"),    # v2v_vae_spatial_tile_height
         get_num("vae_spatial_tile_width"),     # v2v_vae_spatial_tile_width
         get_num("num_cond_frames", 4),  # v2v_num_cond_frames (default 4 if not in metadata)
+        get("clip_prompt"),                    # v2v_clip_prompt
+        get("use_prompt_expansion")            # v2v_use_prompt_expansion
     )
 
 def calculate_width_from_height(height, original_dims):
@@ -2331,7 +2359,9 @@ def create_interface():
                         vae_temporal_tile_frames,   # 32
                         vae_temporal_stride_frames, # 33
                         vae_spatial_tile_height,    # 34
-                        vae_spatial_tile_width      # 35
+                        vae_spatial_tile_width,     # 35
+                        clip_prompt,                # 36
+                        use_prompt_expansion        # 37
                     ]
                 )
 
@@ -2373,7 +2403,9 @@ def create_interface():
                         v2v_vae_temporal_stride_frames, # 32
                         v2v_vae_spatial_tile_height,    # 33
                         v2v_vae_spatial_tile_width,     # 34
-                        v2v_num_cond_frames             # 35
+                        v2v_num_cond_frames,            # 35
+                        v2v_clip_prompt,                # 36
+                        v2v_use_prompt_expansion        # 37
                     ]
                 )
 
