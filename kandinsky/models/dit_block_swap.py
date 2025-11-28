@@ -196,20 +196,16 @@ class DiffusionTransformer3DBlockSwap(DiffusionTransformer3D):
             # Debug: understand CachedBlocks structure on first call
             if not getattr(self, '_debug_cached_blocks_printed', False):
                 self._debug_cached_blocks_printed = True
-                print(f">>> CachedBlocks attributes: {[a for a in dir(cached_blocks) if not a.startswith('_')]}")
                 print(f">>> visual_embed shape before blocks: {visual_embed.shape}")
-                # Check if CachedBlocks has blocks attribute
-                if hasattr(cached_blocks, 'blocks'):
-                    print(f">>> cached_blocks.blocks type: {type(cached_blocks.blocks)}")
-                    print(f">>> cached_blocks.blocks len: {len(cached_blocks.blocks)}")
-                if hasattr(cached_blocks, 'original_blocks'):
-                    print(f">>> cached_blocks.original_blocks: {type(cached_blocks.original_blocks)}")
+                if hasattr(cached_blocks, 'transformer_blocks'):
+                    print(f">>> cached_blocks.transformer_blocks type: {type(cached_blocks.transformer_blocks)}")
+                    print(f">>> cached_blocks.transformer_blocks len: {len(cached_blocks.transformer_blocks)}")
 
-            # Try to access and iterate through the original blocks stored in CachedBlocks
-            # CachedBlocks should have the original blocks stored somewhere
-            if hasattr(cached_blocks, 'blocks'):
-                # Iterate through original blocks - cache-dit intercepts each call
-                for i, block in enumerate(cached_blocks.blocks):
+            # Access original blocks through transformer_blocks attribute
+            # Device hooks on these blocks handle GPU/CPU movement
+            if hasattr(cached_blocks, 'transformer_blocks'):
+                # Iterate through original blocks - device hooks auto-move to GPU
+                for i, block in enumerate(cached_blocks.transformer_blocks):
                     block_output = block(
                         visual_embed, text_embed, time_embed,
                         visual_rope, sparse_params, attention_mask
@@ -219,7 +215,8 @@ class DiffusionTransformer3DBlockSwap(DiffusionTransformer3D):
                     else:
                         visual_embed = block_output
             else:
-                # Fallback: try calling CachedBlocks directly
+                # Fallback: try calling CachedBlocks.forward directly
+                # This uses cache-dit's internal iteration with caching
                 block_output = cached_blocks(
                     visual_embed, text_embed, time_embed,
                     visual_rope, sparse_params, attention_mask
