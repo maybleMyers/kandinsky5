@@ -200,7 +200,9 @@ class DiffusionTransformer3DBlockSwap(DiffusionTransformer3D):
                     kv_cache_dict_ret[i] = (k_cache, v_cache, visual_rope)
                 else:
                     # Handle cache-dit wrapped output (may return tuple)
-                    if isinstance(block_output, tuple) and len(block_output) == 1:
+                    if isinstance(block_output, tuple):
+                        # cache-dit returns (hidden_states,) or (hidden_states, other_info)
+                        # We only need the hidden_states (first element)
                         visual_embed = block_output[0]
                     else:
                         visual_embed = block_output
@@ -225,7 +227,9 @@ class DiffusionTransformer3DBlockSwap(DiffusionTransformer3D):
                     kv_cache_dict_ret[i] = (k_cache, v_cache, visual_rope)
                 else:
                     # Handle cache-dit wrapped output (may return tuple)
-                    if isinstance(block_output, tuple) and len(block_output) == 1:
+                    if isinstance(block_output, tuple):
+                        # cache-dit returns (hidden_states,) or (hidden_states, other_info)
+                        # We only need the hidden_states (first element)
                         visual_embed = block_output[0]
                     else:
                         visual_embed = block_output
