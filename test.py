@@ -32,6 +32,14 @@ try:
 except ImportError:
     LatentPreviewer = None
 
+# Optional cache-dit import for TaylorSeer caching
+try:
+    import cache_dit
+    from cache_dit import BlockAdapter, ForwardPattern, DBCacheConfig, TaylorSeerCalibratorConfig
+    CACHE_DIT_AVAILABLE = True
+except ImportError:
+    CACHE_DIT_AVAILABLE = False
+    cache_dit = None
 
 
 def disable_warnings():
@@ -45,6 +53,111 @@ def disable_warnings():
         guards=False,
         recompiles=False
     )
+
+
+def setup_cache(pipe, args, num_inference_steps):
+    """
+    Setup cache-dit caching with optional TaylorSeer calibrator for the DiT model.
+
+    Args:
+        pipe: The Kandinsky5 pipeline (T2V, I2V, or T2I)
+        args: Command-line arguments containing cache configuration
+        num_inference_steps: Number of inference steps for this generation
+
+    Returns:
+        True if cache was enabled, False otherwise
+    """
+    if not args.cache:
+        return False
+
+    if not CACHE_DIT_AVAILABLE:
+        print("Warning: --cache requested but cache-dit is not installed. Install with: pip install cache-dit")
+        return False
+
+    # Get the DiT model from the pipeline
+    dit = pipe.dit
+
+    # Get the visual transformer blocks (main compute blocks)
+    if not hasattr(dit, 'visual_transformer_blocks'):
+        print("Warning: DiT model does not have visual_transformer_blocks, cache not enabled")
+        return False
+
+    blocks = dit.visual_transformer_blocks
+
+    # Determine if we have separate CFG based on guidance weight
+    # For Kandinsky5 with CFG, the model runs separate forward passes for cond/uncond
+    has_cfg = hasattr(pipe, 'conf') and pipe.conf.model.guidance_weight > 1.0
+
+    # Create BlockAdapter for transformer-only interface
+    # Kandinsky5's TransformerDecoderBlock.forward signature:
+    # forward(visual_embed, text_embed, time_embed, rope, sparse_params, attention_mask, ...)
+    # This maps to Pattern_1: (hidden_states, encoder_hidden_states, temb, ...)
+    adapter = BlockAdapter(
+        transformer=dit,
+        blocks=blocks,
+        forward_pattern=ForwardPattern.Pattern_1,
+        has_separate_cfg=has_cfg,
+    )
+
+    # Configure DBCache
+    cache_config = DBCacheConfig(
+        num_inference_steps=num_inference_steps,
+        Fn_compute_blocks=args.cache_Fn,
+        Bn_compute_blocks=args.cache_Bn,
+        residual_diff_threshold=args.cache_rdt,
+        max_warmup_steps=args.cache_warmup,
+        max_cached_steps=args.cache_max_steps,
+        enable_separate_cfg=has_cfg,
+    )
+
+    # Configure TaylorSeer calibrator if requested
+    calibrator_config = None
+    if args.taylorseer:
+        calibrator_config = TaylorSeerCalibratorConfig(
+            taylorseer_order=args.taylorseer_order,
+        )
+        print(f"TaylorSeer calibrator enabled (order={args.taylorseer_order})")
+
+    # Enable cache
+    cache_dit.enable_cache(
+        adapter,
+        cache_config=cache_config,
+        calibrator_config=calibrator_config,
+    )
+
+    print(f"Cache-dit enabled: Fn={args.cache_Fn}, Bn={args.cache_Bn}, "
+          f"threshold={args.cache_rdt}, warmup={args.cache_warmup}, "
+          f"steps={num_inference_steps}, CFG={has_cfg}")
+
+    return True
+
+
+def disable_cache(pipe):
+    """Disable cache-dit caching on the DiT model."""
+    if CACHE_DIT_AVAILABLE and hasattr(pipe, 'dit'):
+        try:
+            cache_dit.disable_cache(pipe.dit)
+        except Exception:
+            pass  # Silently ignore if cache wasn't enabled
+
+
+def print_cache_summary(pipe):
+    """Print cache acceleration statistics after inference."""
+    if not CACHE_DIT_AVAILABLE:
+        return
+
+    try:
+        # Try to get summary from the DiT model
+        if hasattr(pipe, 'dit'):
+            stats = cache_dit.summary(pipe.dit, details=True)
+            if stats:
+                print("\n" + "="*60)
+                print("Cache Acceleration Summary:")
+                print(stats)
+                print("="*60 + "\n")
+    except Exception as e:
+        # Silently ignore summary errors
+        pass
 
 
 def resize_image_to_resolution(image_path, target_width, target_height, alignment=32):
@@ -435,6 +548,56 @@ def parse_args():
         help="Path to load and decode previously saved latents. Skips generation and only runs VAE decoding."
     )
 
+    # Cache-dit / TaylorSeer caching configuration
+    parser.add_argument(
+        "--cache",
+        action='store_true',
+        default=False,
+        help="Enable cache-dit caching for faster inference (DBCache algorithm)"
+    )
+    parser.add_argument(
+        "--taylorseer",
+        action='store_true',
+        default=False,
+        help="Enable TaylorSeer calibrator for improved cache accuracy (use with --cache)"
+    )
+    parser.add_argument(
+        "--taylorseer_order",
+        type=int,
+        default=1,
+        help="TaylorSeer order for Taylor series expansion (default: 1)"
+    )
+    parser.add_argument(
+        "--cache_Fn",
+        type=int,
+        default=8,
+        help="Number of first transformer blocks to always compute (Fn in DBCache, default: 8)"
+    )
+    parser.add_argument(
+        "--cache_Bn",
+        type=int,
+        default=0,
+        help="Number of last transformer blocks to always compute (Bn in DBCache, default: 0)"
+    )
+    parser.add_argument(
+        "--cache_rdt",
+        type=float,
+        default=0.08,
+        help="Residual difference threshold for caching (default: 0.08, higher=faster but lower quality)"
+    )
+    parser.add_argument(
+        "--cache_warmup",
+        type=int,
+        default=8,
+        help="Number of warmup steps before caching starts (default: 8)"
+    )
+    parser.add_argument(
+        "--cache_max_steps",
+        type=int,
+        default=-1,
+        help="Maximum cached steps before forcing recompute (-1 for unlimited, default: -1)"
+    )
+
     args = parser.parse_args()
     return args
 
@@ -642,6 +805,13 @@ if __name__ == "__main__":
         return None
 
     start_time = time.perf_counter()
+
+    # Setup cache-dit caching if enabled (skip for decode/resume modes)
+    cache_enabled = False
+    if args.cache and not args.decode_from_file and not args.resume_from:
+        # Determine num_steps for cache configuration
+        num_steps_for_cache = args.sample_steps if args.sample_steps else getattr(pipe, 'num_steps', 50)
+        cache_enabled = setup_cache(pipe, args, num_steps_for_cache)
 
     # Handle decode from saved latents (VAE-only decoding)
     if args.decode_from_file:
@@ -1240,4 +1410,8 @@ if __name__ == "__main__":
     else:
         output_type = "image" if is_t2i else "video"
         print(f"Generated {output_type} is saved to {args.output_filename}")
-    
+
+    # Print cache statistics if caching was enabled
+    if cache_enabled:
+        print_cache_summary(pipe)
+        disable_cache(pipe)

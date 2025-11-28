@@ -105,6 +105,15 @@ def generate_video(
     use_prompt_expansion: bool,
     clip_prompt: str,
     save_latents: bool,
+    # Cache-dit / TaylorSeer options
+    enable_cache: bool,
+    enable_taylorseer: bool,
+    taylorseer_order: int,
+    cache_Fn: int,
+    cache_Bn: int,
+    cache_rdt: float,
+    cache_warmup: int,
+    cache_max_steps: int,
 ) -> Generator[Tuple[List[Tuple[str, str]], Optional[str], str, str], None, None]:
     global stop_event, current_process, current_output_filename
     stop_event.clear()
@@ -201,6 +210,18 @@ def generate_video(
             command.append("--no_compile")
         if use_magcache:
             command.append("--magcache")
+
+        # Cache-dit / TaylorSeer options
+        if enable_cache:
+            command.append("--cache")
+            command.extend(["--cache_Fn", str(int(cache_Fn))])
+            command.extend(["--cache_Bn", str(int(cache_Bn))])
+            command.extend(["--cache_rdt", str(cache_rdt)])
+            command.extend(["--cache_warmup", str(int(cache_warmup))])
+            command.extend(["--cache_max_steps", str(int(cache_max_steps))])
+            if enable_taylorseer:
+                command.append("--taylorseer")
+                command.extend(["--taylorseer_order", str(int(taylorseer_order))])
 
         if negative_prompt:
             command.extend(["--negative_prompt", str(negative_prompt)])
@@ -426,6 +447,15 @@ def generate_v2v_video(
     use_apg: bool,
     apg_momentum: float,
     apg_norm_threshold: float,
+    # Cache-dit / TaylorSeer options
+    enable_cache: bool,
+    enable_taylorseer: bool,
+    taylorseer_order: int,
+    cache_Fn: int,
+    cache_Bn: int,
+    cache_rdt: float,
+    cache_warmup: int,
+    cache_max_steps: int,
 ) -> Generator[Tuple[List[Tuple[str, str]], Optional[str], str, str], None, None]:
     """Generate video from video input (video continuation/v2v mode)."""
     global stop_event, current_process, current_output_filename
@@ -525,6 +555,18 @@ def generate_v2v_video(
             command.append("--no_compile")
         if use_magcache:
             command.append("--magcache")
+
+        # Cache-dit / TaylorSeer options
+        if enable_cache:
+            command.append("--cache")
+            command.extend(["--cache_Fn", str(int(cache_Fn))])
+            command.extend(["--cache_Bn", str(int(cache_Bn))])
+            command.extend(["--cache_rdt", str(cache_rdt)])
+            command.extend(["--cache_warmup", str(int(cache_warmup))])
+            command.extend(["--cache_max_steps", str(int(cache_max_steps))])
+            if enable_taylorseer:
+                command.append("--taylorseer")
+                command.extend(["--taylorseer_order", str(int(taylorseer_order))])
 
         if negative_prompt:
             command.extend(["--negative_prompt", str(negative_prompt)])
@@ -1687,6 +1729,31 @@ def create_interface():
                                 info="Spatial chunk width (reduce if high resolution causes OOM)"
                             )
 
+                    with gr.Accordion("Advanced: Cache Acceleration (TaylorSeer)", open=False):
+                        gr.Markdown("""
+                        **Enable cache-dit caching for faster inference using DBCache and TaylorSeer algorithms.**
+
+                        - **Enable Cache**: Turn on DBCache acceleration (recommended with TaylorSeer)
+                        - **Enable TaylorSeer**: Use Taylor series expansion for better cache accuracy
+                        - **Fn Blocks**: First N transformer blocks to always compute (higher = better quality)
+                        - **Bn Blocks**: Last N blocks to always compute (use 0 with TaylorSeer)
+                        - **Threshold**: Residual diff threshold (higher = faster, lower quality)
+                        - **Warmup Steps**: Steps before caching starts (higher = better quality)
+
+                        **Recommended for Pro 20B**: Enable Cache + TaylorSeer, Fn=8, Bn=0, Threshold=0.08
+                        """)
+                        with gr.Row():
+                            enable_cache = gr.Checkbox(label="Enable Cache", value=False, info="Enable DBCache acceleration")
+                            enable_taylorseer = gr.Checkbox(label="Enable TaylorSeer", value=True, info="Use Taylor series for better accuracy")
+                            taylorseer_order = gr.Slider(minimum=1, maximum=3, value=1, step=1, label="TaylorSeer Order", info="Taylor expansion order (1 recommended)")
+                        with gr.Row():
+                            cache_Fn = gr.Slider(minimum=0, maximum=32, value=8, step=1, label="Fn Compute Blocks", info="First N blocks to always compute")
+                            cache_Bn = gr.Slider(minimum=0, maximum=32, value=0, step=1, label="Bn Compute Blocks", info="Last N blocks to always compute (0 with TaylorSeer)")
+                        with gr.Row():
+                            cache_rdt = gr.Slider(minimum=0.01, maximum=0.5, value=0.08, step=0.01, label="Residual Threshold", info="Higher = faster but lower quality")
+                            cache_warmup = gr.Slider(minimum=0, maximum=20, value=8, step=1, label="Warmup Steps", info="Steps before caching starts")
+                            cache_max_steps = gr.Slider(minimum=-1, maximum=100, value=-1, step=1, label="Max Cached Steps", info="-1 = unlimited")
+
                     save_path = gr.Textbox(label="Save Path", value="outputs")
 
                 random_seed_btn.click(
@@ -1747,7 +1814,10 @@ def create_interface():
                         enable_vae_chunking, vae_temporal_tile_frames, vae_temporal_stride_frames,
                         vae_spatial_tile_height, vae_spatial_tile_width,
                         use_prompt_expansion, clip_prompt,
-                        save_latents_checkbox
+                        save_latents_checkbox,
+                        # Cache-dit / TaylorSeer options
+                        enable_cache, enable_taylorseer, taylorseer_order,
+                        cache_Fn, cache_Bn, cache_rdt, cache_warmup, cache_max_steps
                     ],
                     outputs=[output, preview_output, batch_progress, progress_text]
                 )
@@ -2064,6 +2134,31 @@ def create_interface():
                                 info="Spatial chunk width (reduce if high resolution causes OOM)"
                             )
 
+                    with gr.Accordion("Advanced: Cache Acceleration (TaylorSeer)", open=False):
+                        gr.Markdown("""
+                        **Enable cache-dit caching for faster inference using DBCache and TaylorSeer algorithms.**
+
+                        - **Enable Cache**: Turn on DBCache acceleration (recommended with TaylorSeer)
+                        - **Enable TaylorSeer**: Use Taylor series expansion for better cache accuracy
+                        - **Fn Blocks**: First N transformer blocks to always compute (higher = better quality)
+                        - **Bn Blocks**: Last N blocks to always compute (use 0 with TaylorSeer)
+                        - **Threshold**: Residual diff threshold (higher = faster, lower quality)
+                        - **Warmup Steps**: Steps before caching starts (higher = better quality)
+
+                        **Recommended for Pro 20B**: Enable Cache + TaylorSeer, Fn=8, Bn=0, Threshold=0.08
+                        """)
+                        with gr.Row():
+                            v2v_enable_cache = gr.Checkbox(label="Enable Cache", value=False, info="Enable DBCache acceleration")
+                            v2v_enable_taylorseer = gr.Checkbox(label="Enable TaylorSeer", value=True, info="Use Taylor series for better accuracy")
+                            v2v_taylorseer_order = gr.Slider(minimum=1, maximum=3, value=1, step=1, label="TaylorSeer Order", info="Taylor expansion order (1 recommended)")
+                        with gr.Row():
+                            v2v_cache_Fn = gr.Slider(minimum=0, maximum=32, value=8, step=1, label="Fn Compute Blocks", info="First N blocks to always compute")
+                            v2v_cache_Bn = gr.Slider(minimum=0, maximum=32, value=0, step=1, label="Bn Compute Blocks", info="Last N blocks to always compute (0 with TaylorSeer)")
+                        with gr.Row():
+                            v2v_cache_rdt = gr.Slider(minimum=0.01, maximum=0.5, value=0.08, step=0.01, label="Residual Threshold", info="Higher = faster but lower quality")
+                            v2v_cache_warmup = gr.Slider(minimum=0, maximum=20, value=8, step=1, label="Warmup Steps", info="Steps before caching starts")
+                            v2v_cache_max_steps = gr.Slider(minimum=-1, maximum=100, value=-1, step=1, label="Max Cached Steps", info="-1 = unlimited")
+
                     v2v_save_path = gr.Textbox(label="Save Path", value="outputs")
 
                 v2v_random_seed_btn.click(
@@ -2134,7 +2229,10 @@ def create_interface():
                         v2v_vae_spatial_tile_height, v2v_vae_spatial_tile_width,
                         v2v_use_prompt_expansion, v2v_clip_prompt,
                         v2v_save_latents_checkbox,
-                        v2v_use_apg, v2v_apg_momentum, v2v_apg_norm_threshold
+                        v2v_use_apg, v2v_apg_momentum, v2v_apg_norm_threshold,
+                        # Cache-dit / TaylorSeer options
+                        v2v_enable_cache, v2v_enable_taylorseer, v2v_taylorseer_order,
+                        v2v_cache_Fn, v2v_cache_Bn, v2v_cache_rdt, v2v_cache_warmup, v2v_cache_max_steps
                     ],
                     outputs=[v2v_output, v2v_preview_output, v2v_batch_progress, v2v_progress_text]
                 )
