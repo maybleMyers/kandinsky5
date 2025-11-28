@@ -55,6 +55,26 @@ def disable_warnings():
     )
 
 
+def _create_block_device_hooks(block, device):
+    """
+    Create forward hooks to auto-move block to GPU before forward
+    and back to CPU after. This makes cache-dit compatible with block swap.
+    Returns tuple of (pre_hook_handle, post_hook_handle).
+    """
+    def pre_forward_hook(module, args):
+        module.to(device)
+        return args
+
+    def post_forward_hook(module, args, output):
+        module.to("cpu")
+        torch.cuda.empty_cache()
+        return output
+
+    pre_handle = block.register_forward_pre_hook(pre_forward_hook)
+    post_handle = block.register_forward_hook(post_forward_hook)
+    return (pre_handle, post_handle)
+
+
 def setup_cache(pipe, args, num_inference_steps):
     """
     Setup cache-dit caching with optional TaylorSeer calibrator for the DiT model.
@@ -83,6 +103,18 @@ def setup_cache(pipe, args, num_inference_steps):
         return False
 
     blocks = dit.visual_transformer_blocks
+
+    # Check if block swap is enabled - if so, we need to add hooks for device management
+    block_swap_enabled = hasattr(dit, 'enable_block_swap') and dit.enable_block_swap
+    if block_swap_enabled:
+        print("Block swap detected - adding device hooks for cache-dit compatibility...")
+        device = pipe.device_map.get("dit", "cuda")
+        # Store hook handles so we can remove them later
+        dit._cache_device_hooks = []
+        for i, block in enumerate(blocks):
+            hook_handles = _create_block_device_hooks(block, device)
+            dit._cache_device_hooks.append(hook_handles)
+        print(f"Added device hooks to {len(blocks)} blocks for auto-swap")
 
     # Determine if we have separate CFG based on guidance weight
     # For Kandinsky5 with CFG, the model runs separate forward passes for cond/uncond
@@ -128,6 +160,8 @@ def setup_cache(pipe, args, num_inference_steps):
     print(f"Cache-dit enabled: Fn={args.cache_Fn}, Bn={args.cache_Bn}, "
           f"threshold={args.cache_rdt}, warmup={args.cache_warmup}, "
           f"steps={num_inference_steps}, CFG={has_cfg}")
+    if block_swap_enabled:
+        print("Note: Running with block swap + cache (experimental)")
 
     return True
 
@@ -139,6 +173,14 @@ def disable_cache(pipe):
             cache_dit.disable_cache(pipe.dit)
         except Exception:
             pass  # Silently ignore if cache wasn't enabled
+
+        # Remove device hooks if we added them for block swap
+        dit = pipe.dit
+        if hasattr(dit, '_cache_device_hooks') and dit._cache_device_hooks:
+            for pre_handle, post_handle in dit._cache_device_hooks:
+                pre_handle.remove()
+                post_handle.remove()
+            dit._cache_device_hooks = []
 
 
 def print_cache_summary(pipe):
