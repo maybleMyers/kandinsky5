@@ -68,6 +68,10 @@ def _create_block_device_hooks(block, device):
     def post_forward_hook(module, args, output):
         module.to("cpu")
         torch.cuda.empty_cache()
+        # cache-dit may wrap output in a tuple - extract tensor if needed
+        # but preserve tuple output if return_kv=True was used
+        if isinstance(output, tuple) and len(output) == 1:
+            return output[0]
         return output
 
     pre_handle = block.register_forward_pre_hook(pre_forward_hook)

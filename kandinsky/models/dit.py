@@ -257,7 +257,11 @@ class DiffusionTransformer3D(nn.Module):
                 k_cache, v_cache = kv_cache
                 kv_cache_dict_ret[i] = (k_cache, v_cache, visual_rope)
             else:
-                visual_embed = block_output
+                # Handle cache-dit wrapped output (may return tuple)
+                if isinstance(block_output, tuple) and len(block_output) == 1:
+                    visual_embed = block_output[0]
+                else:
+                    visual_embed = block_output
 
         x = self.after_blocks(visual_embed, visual_shape, to_fractal, text_embed, time_embed)
 
