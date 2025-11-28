@@ -126,11 +126,14 @@ def setup_cache(pipe, args, num_inference_steps):
     # Create BlockAdapter for transformer-only interface
     # Kandinsky5's TransformerDecoderBlock.forward signature:
     # forward(visual_embed, text_embed, time_embed, rope, sparse_params, attention_mask, ...)
-    # This maps to Pattern_1: (hidden_states, encoder_hidden_states, temb, ...)
+    # The block returns just visual_embed (single tensor), so use Pattern_2:
+    # - Input: (hidden_states, encoder_hidden_states) = (visual_embed, text_embed)
+    # - Output: (hidden_states,) = just visual_embed
+    # - Return_H_Only = True, so CachedBlocks.forward() returns just hidden_states
     adapter = BlockAdapter(
         transformer=dit,
         blocks=blocks,
-        forward_pattern=ForwardPattern.Pattern_1,
+        forward_pattern=ForwardPattern.Pattern_2,
         has_separate_cfg=has_cfg,
     )
 

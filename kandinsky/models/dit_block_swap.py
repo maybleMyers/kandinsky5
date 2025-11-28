@@ -218,16 +218,52 @@ class DiffusionTransformer3DBlockSwap(DiffusionTransformer3D):
                     attention_mask
                 )
 
+                # Debug: print output shape
+                if not getattr(self, '_debug_output_printed', False):
+                    self._debug_output_printed = True
+                    print(f">>> cached_blocks.forward() returned type: {type(block_output)}")
+                    if isinstance(block_output, tuple):
+                        print(f">>> block_output tuple len: {len(block_output)}")
+                        for idx, item in enumerate(block_output):
+                            if hasattr(item, 'shape'):
+                                print(f">>> block_output[{idx}] shape: {item.shape}")
+                            else:
+                                print(f">>> block_output[{idx}] type: {type(item)}")
+                    elif hasattr(block_output, 'shape'):
+                        print(f">>> block_output shape: {block_output.shape}")
+
+                # Extract visual_embed from output
+                # Pattern_2 (Return_H_Only=True) returns just hidden_states (visual_embed)
+                # Pattern_1 (Return_H_First=False) returns (encoder_hidden_states, hidden_states)
                 if isinstance(block_output, tuple):
-                    visual_embed = block_output[0]
+                    # For Pattern_1: block_output = (text_embed, visual_embed)
+                    # For Pattern_0: block_output = (visual_embed, text_embed)
+                    # We need visual_embed which is hidden_states
+                    # Check forward_pattern to extract correctly
+                    if hasattr(cached_blocks, 'forward_pattern'):
+                        if cached_blocks.forward_pattern.Return_H_First:
+                            visual_embed = block_output[0]  # Pattern_0
+                        else:
+                            visual_embed = block_output[1]  # Pattern_1
+                    else:
+                        visual_embed = block_output[0]  # Fallback
                 else:
+                    # Pattern_2: single tensor output
                     visual_embed = block_output
+
+                # Debug: print final visual_embed shape
+                if not getattr(self, '_debug_final_printed', False):
+                    self._debug_final_printed = True
+                    print(f">>> visual_embed after cache-dit: {visual_embed.shape}")
+                    print(f">>> expected shape to match visual_shape: {visual_shape}")
 
             except Exception as e:
                 # If cache-dit forward fails, fall back to manual iteration
                 if not getattr(self, '_cache_fallback_warned', False):
                     self._cache_fallback_warned = True
                     print(f">>> cache-dit forward failed ({e}), falling back to manual iteration (no caching)")
+                    import traceback
+                    traceback.print_exc()
 
                 for i, block in enumerate(cached_blocks.transformer_blocks):
                     block_output = block(
