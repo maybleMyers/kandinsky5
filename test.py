@@ -25,8 +25,11 @@ if _no_compile:
 
 from kandinsky import get_T2V_pipeline, get_I2V_pipeline, get_I2V_pipeline_with_block_swap, get_T2V_pipeline_with_block_swap, get_T2I_pipeline
 from kandinsky.generation_utils import generate_sample_from_checkpoint, generate_sample_i2v_from_checkpoint, generate_sample_v2v, generate_sample_v2v_join
-from kandinsky.i2v_pipeline import get_conditioning_frames_from_video, get_conditioning_frames_from_two_videos
-
+from kandinsky.i2v_pipeline import (
+    get_conditioning_frames_from_video, 
+    get_conditioning_frames_from_two_videos,
+    get_conditioning_latents_from_two_images
+)
 try:
     from scripts.latentpreviewer import LatentPreviewer
 except ImportError:
@@ -128,6 +131,12 @@ def parse_args():
         type=str,
         default="./assets/test_image.jpg",
         help="The input image for image-to-video generation"
+    )
+    parser.add_argument(
+        "--end_image",
+        type=str,
+        default=None,
+        help="Ending image for image-to-video generation. When provided with --image, generates a video transitioning from the start image to the end image."
     )
     parser.add_argument(
         "--video",
@@ -796,8 +805,142 @@ if __name__ == "__main__":
                  save_path=args.output_filename,
                  seed=args.seed)
     elif is_i2v:
-        # Check if video joining or continuation mode
-        if args.video is not None and args.video2 is not None:
+        if args.image is not None and args.end_image is not None:
+            # ============================================================
+            # IMAGE-TO-IMAGE-VIDEO MODE
+            # Generate video transitioning from start image to end image
+            # Uses same dual-conditioning as video join mode
+            # ============================================================
+            print(f">>> IMAGE-TO-IMAGE-VIDEO MODE")
+            print(f">>> Start image: {args.image}")
+            print(f">>> End image: {args.end_image}")
+
+            alignment = 128 if args.attention_type == "nabla" else 32
+
+            # Load VAE for encoding conditioning frames
+            force_offload = hasattr(pipe.dit, 'enable_block_swap') and pipe.dit.enable_block_swap
+            if pipe.offload or force_offload:
+                pipe.vae = pipe.vae.to(pipe.device_map["vae"], non_blocking=True)
+
+            # Optionally resize images to target dimensions
+            start_image_path = args.image
+            end_image_path = args.end_image
+            if args.width and args.height:
+                print(f">>> Resizing images to {args.width}x{args.height}")
+                start_image_path = resize_image_to_resolution(args.image, args.width, args.height, alignment)
+                end_image_path = resize_image_to_resolution(args.end_image, args.width, args.height, alignment)
+
+            # Encode both images to latent space
+            start_cond_latents, end_cond_latents, scale_factor = get_conditioning_latents_from_two_images(
+                start_image_path,
+                end_image_path,
+                pipe.vae,
+                pipe.device_map["vae"],
+                alignment=alignment
+            )
+
+            # Offload VAE after encoding
+            if pipe.offload or force_offload:
+                pipe.vae = pipe.vae.to("cpu", non_blocking=True)
+                torch.cuda.empty_cache()
+
+            # Calculate output dimensions
+            height, width = start_cond_latents.shape[1:3]
+            total_frames = 1 if args.video_duration == 0 else args.video_duration * 24 // 4 + 1
+            shape = (1, total_frames, height, width, 16)
+
+            print(f">>> Start conditioning latents shape: {start_cond_latents.shape}")
+            print(f">>> End conditioning latents shape: {end_cond_latents.shape}")
+            print(f">>> Total frames (latent): {total_frames}")
+            print(f">>> Output shape: {shape}")
+
+            # Create previewer for I2I-Video mode
+            previewer = None
+            num_steps = args.sample_steps if args.sample_steps else pipe.num_steps
+            if LatentPreviewer is not None and args.preview is not None and args.preview > 0:
+                print(f"\n>>> I2I-Video: Initializing previewer with preview={args.preview}")
+                try:
+                    g_temp = torch.Generator(device=pipe.device_map["dit"])
+                    g_temp.manual_seed(args.seed)
+                    # Preview all frames being processed (start conditioning + middle + end conditioning)
+                    initial_latent = torch.randn(shape[0] * total_frames, shape[2], shape[3], shape[4],
+                                                device=pipe.device_map["dit"], generator=g_temp)
+                    initial_latent = initial_latent.permute(3, 0, 1, 2)
+
+                    timesteps = torch.linspace(1, 0, num_steps + 1, device=pipe.device_map["dit"])
+                    timesteps = args.scheduler_scale * timesteps / (1 + (args.scheduler_scale - 1) * timesteps)
+                    timesteps = timesteps[:-1] * 1000
+
+                    class Args:
+                        def __init__(self, save_path, fps):
+                            self.save_path = save_path
+                            self.fps = fps
+
+                    args_obj = Args(
+                        save_path=os.path.dirname(args.output_filename) if args.output_filename else './',
+                        fps=24
+                    )
+
+                    previewer = LatentPreviewer(
+                        args=args_obj,
+                        original_latents=initial_latent,
+                        timesteps=timesteps,
+                        device=pipe.device_map["dit"],
+                        dtype=torch.bfloat16,
+                        model_type="hunyuan"
+                    )
+                    print(f">>> I2I-Video: Previewer initialized successfully")
+                except Exception as e:
+                    print(f">>> I2I-Video: Failed to initialize previewer: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    previewer = None
+
+            # Generate video using dual-image conditioning
+            # Reuses the same function as video join mode
+            x = generate_sample_v2v_join(
+                shape,
+                args.prompt,
+                pipe.dit,
+                pipe.vae,
+                pipe.conf,
+                text_embedder=pipe.text_embedder,
+                start_cond_latents=start_cond_latents,
+                end_cond_latents=end_cond_latents,
+                num_steps=num_steps,
+                guidance_weight=args.guidance_weight if args.guidance_weight else pipe.guidance_weight,
+                scheduler_scale=args.scheduler_scale,
+                negative_caption=args.negative_prompt,
+                clip_prompt=args.clip_prompt,
+                seed=args.seed,
+                device=pipe.device_map["dit"],
+                vae_device=pipe.device_map["vae"],
+                progress=True,
+                offload=pipe.offload,
+                force_offload=force_offload,
+                previewer=previewer,
+                preview_interval=args.preview,
+                preview_suffix=args.preview_suffix,
+                stop_check=check_stop_signals,
+                checkpoint_path=checkpoint_file,
+                save_latents=args.save_latents,
+                use_apg=args.use_apg,
+                apg_momentum=args.apg_momentum,
+                apg_norm_threshold=args.apg_norm_threshold,
+            )
+
+            # Save output video directly (no concatenation needed unlike video join mode)
+            if x is not None:
+                import torchvision
+                torchvision.io.write_video(
+                    args.output_filename,
+                    x[0].float().permute(1, 2, 3, 0).cpu().numpy(),
+                    fps=24,
+                    options={"crf": "5"},
+                )
+                print(f">>> Saved image-to-image video to {args.output_filename}")
+
+        elif args.video is not None and args.video2 is not None:
             # Video-to-Video JOINING mode - create transition between two videos
             print(f">>> VIDEO JOINING MODE")
             print(f">>> First video: {args.video}")
@@ -845,9 +988,8 @@ if __name__ == "__main__":
                 try:
                     g_temp = torch.Generator(device=pipe.device_map["dit"])
                     g_temp.manual_seed(args.seed)
-                    # Only preview middle section
-                    middle_frames = total_frames - 2 * args.num_cond_frames
-                    initial_latent = torch.randn(shape[0] * middle_frames, shape[2], shape[3], shape[4], device=pipe.device_map["dit"], generator=g_temp)
+                    # Preview all frames being processed (start conditioning + middle + end conditioning)
+                    initial_latent = torch.randn(shape[0] * total_frames, shape[2], shape[3], shape[4], device=pipe.device_map["dit"], generator=g_temp)
                     initial_latent = initial_latent.permute(3, 0, 1, 2)
 
                     timesteps = torch.linspace(1, 0, num_steps + 1, device=pipe.device_map["dit"])
@@ -1058,7 +1200,8 @@ if __name__ == "__main__":
                 try:
                     g_temp = torch.Generator(device=pipe.device_map["dit"])
                     g_temp.manual_seed(args.seed)
-                    initial_latent = torch.randn(shape[0] * shape[1], shape[2], shape[3], shape[4], device=pipe.device_map["dit"], generator=g_temp)
+                    # Preview all frames being processed (conditioning + new)
+                    initial_latent = torch.randn(shape[0] * total_frames, shape[2], shape[3], shape[4], device=pipe.device_map["dit"], generator=g_temp)
                     initial_latent = initial_latent.permute(3, 0, 1, 2)
 
                     timesteps = torch.linspace(1, 0, num_steps + 1, device=pipe.device_map["dit"])
