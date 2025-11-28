@@ -55,19 +55,20 @@ def disable_warnings():
     )
 
 
-def _create_block_device_hooks(block, device):
+def _create_block_device_hooks(block, device, block_idx=None):
     """
     Create forward hooks to auto-move block to GPU before forward
     and back to CPU after. This makes cache-dit compatible with block swap.
     Returns tuple of (pre_hook_handle, post_hook_handle).
     """
     def pre_forward_hook(module, args):
-        module.to(device)
+        module.to(device, non_blocking=True)
+        torch.cuda.synchronize()  # Ensure transfer complete before forward
         return args
 
     def post_forward_hook(module, args, output):
-        module.to("cpu")
-        torch.cuda.empty_cache()
+        torch.cuda.synchronize()  # Ensure forward complete before offload
+        module.to("cpu", non_blocking=True)
         # Don't modify output here - let dit_block_swap.py handle tuple unwrapping
         # This avoids conflicts with return_kv=True which legitimately returns tuples
         return output

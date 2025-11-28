@@ -177,22 +177,39 @@ class DiffusionTransformer3DBlockSwap(DiffusionTransformer3D):
         from torch.nn import ModuleList
         cache_dit_active = not isinstance(self.visual_transformer_blocks, ModuleList)
 
-        if cache_dit_active:
-            # cache-dit wrapped the ModuleList - call its forward method
-            # This lets cache-dit handle caching internally while our device hooks
-            # move blocks to/from GPU as cache-dit iterates through them
-            # Note: cache-dit expects Pattern_1 signature (hidden_states, encoder_hidden_states, temb, ...)
-            # We can't use return_kv or kv_cache with cache-dit
-            block_output = self.visual_transformer_blocks(
-                visual_embed, text_embed, time_embed,
-                visual_rope, sparse_params, attention_mask
-            )
+        # Debug: print type and len on first timestep
+        if not getattr(self, '_debug_printed_once', False):
+            self._debug_printed_once = True
+            print(f">>> cache_dit_active: {cache_dit_active}")
+            print(f">>> visual_transformer_blocks type: {type(self.visual_transformer_blocks)}")
+            print(f">>> visual_transformer_blocks len: {len(self.visual_transformer_blocks)}")
+            if cache_dit_active:
+                # Try to understand the CachedBlocks structure
+                try:
+                    first_block = list(self.visual_transformer_blocks)[0]
+                    print(f">>> First block type from iteration: {type(first_block)}")
+                except Exception as e:
+                    print(f">>> Error iterating blocks: {e}")
 
-            # Handle cache-dit wrapped output (may return tuple)
-            if isinstance(block_output, tuple):
-                visual_embed = block_output[0]
-            else:
-                visual_embed = block_output
+        if cache_dit_active:
+            # cache-dit wrapped the ModuleList with CachedBlocks
+            # We iterate through it like normal - cache-dit intercepts each block call
+            # to decide whether to use cached values or run the actual forward.
+            # Device hooks handle GPU/CPU movement for each block.
+            # Note: return_kv and kv_cache are incompatible with cache-dit
+            for i, visual_transformer_block in enumerate(self.visual_transformer_blocks):
+                # Call block - device hooks auto-move to GPU before forward, back to CPU after
+                # cache-dit may skip actual computation and return cached values
+                block_output = visual_transformer_block(
+                    visual_embed, text_embed, time_embed,
+                    visual_rope, sparse_params, attention_mask
+                )
+
+                # Handle cache-dit wrapped output (may return tuple)
+                if isinstance(block_output, tuple):
+                    visual_embed = block_output[0]
+                else:
+                    visual_embed = block_output
 
         elif self.enable_block_swap:
             # Block swap mode - process blocks one at a time, moving to/from GPU
