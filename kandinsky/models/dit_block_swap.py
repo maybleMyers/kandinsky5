@@ -190,20 +190,44 @@ class DiffusionTransformer3DBlockSwap(DiffusionTransformer3D):
 
         if cache_dit_active:
             # cache-dit wrapped all 60 blocks into a single CachedBlocks object
-            # Call the CachedBlocks wrapper once - it processes all blocks internally
-            # Device hooks on individual blocks handle GPU/CPU movement as cache-dit iterates
-            # Note: return_kv and kv_cache are incompatible with cache-dit
+            # The CachedBlocks stores original blocks and handles caching internally
             cached_blocks = self.visual_transformer_blocks[0]
-            block_output = cached_blocks(
-                visual_embed, text_embed, time_embed,
-                visual_rope, sparse_params, attention_mask
-            )
 
-            # Handle cache-dit wrapped output (may return tuple)
-            if isinstance(block_output, tuple):
-                visual_embed = block_output[0]
+            # Debug: understand CachedBlocks structure on first call
+            if not getattr(self, '_debug_cached_blocks_printed', False):
+                self._debug_cached_blocks_printed = True
+                print(f">>> CachedBlocks attributes: {[a for a in dir(cached_blocks) if not a.startswith('_')]}")
+                print(f">>> visual_embed shape before blocks: {visual_embed.shape}")
+                # Check if CachedBlocks has blocks attribute
+                if hasattr(cached_blocks, 'blocks'):
+                    print(f">>> cached_blocks.blocks type: {type(cached_blocks.blocks)}")
+                    print(f">>> cached_blocks.blocks len: {len(cached_blocks.blocks)}")
+                if hasattr(cached_blocks, 'original_blocks'):
+                    print(f">>> cached_blocks.original_blocks: {type(cached_blocks.original_blocks)}")
+
+            # Try to access and iterate through the original blocks stored in CachedBlocks
+            # CachedBlocks should have the original blocks stored somewhere
+            if hasattr(cached_blocks, 'blocks'):
+                # Iterate through original blocks - cache-dit intercepts each call
+                for i, block in enumerate(cached_blocks.blocks):
+                    block_output = block(
+                        visual_embed, text_embed, time_embed,
+                        visual_rope, sparse_params, attention_mask
+                    )
+                    if isinstance(block_output, tuple):
+                        visual_embed = block_output[0]
+                    else:
+                        visual_embed = block_output
             else:
-                visual_embed = block_output
+                # Fallback: try calling CachedBlocks directly
+                block_output = cached_blocks(
+                    visual_embed, text_embed, time_embed,
+                    visual_rope, sparse_params, attention_mask
+                )
+                if isinstance(block_output, tuple):
+                    visual_embed = block_output[0]
+                else:
+                    visual_embed = block_output
 
         elif self.enable_block_swap:
             # Block swap mode - process blocks one at a time, moving to/from GPU
