@@ -10,23 +10,54 @@ from .models.utils import fast_sta_nabla
 # Reference: https://arxiv.org/abs/2410.02416
 
 class MomentumBuffer:
-    """Momentum buffer for APG to smooth guidance updates."""
-    def __init__(self, momentum: float):
-        self.momentum = momentum
-        self.running_average = 0
+    """Momentum buffer for APG to smooth guidance updates using EMA."""
+    def __init__(self, momentum: float = 0.9):
+        # Momentum should be positive (0.9 = 90% old, 10% new)
+        self.momentum = abs(momentum)  # Force positive
+        self.running_average = None
 
     def update(self, update_value: torch.Tensor):
-        new_average = self.momentum * self.running_average
-        self.running_average = update_value + new_average
+        if self.running_average is None:
+            self.running_average = update_value.clone()
+        else:
+            # Proper EMA: new_avg = momentum * old_avg + (1 - momentum) * new_value
+            self.running_average = (
+                self.momentum * self.running_average +
+                (1 - self.momentum) * update_value
+            )
+        return self.running_average
 
 
-def project(v0: torch.Tensor, v1: torch.Tensor):
-    """Project v0 onto v1 and get orthogonal component."""
+def project_per_frame(v0: torch.Tensor, v1: torch.Tensor):
+    """
+    Project v0 onto v1 per-frame to preserve temporal structure.
+
+    Args:
+        v0: Tensor of shape [batch, C, frames, H, W]
+        v1: Tensor of shape [batch, C, frames, H, W]
+
+    Returns:
+        v0_parallel, v0_orthogonal - both same shape as input
+    """
     dtype = v0.dtype
     v0, v1 = v0.double(), v1.double()
-    v1 = torch.nn.functional.normalize(v1, dim=[-1, -2, -3, -4])
-    v0_parallel = (v0 * v1).sum(dim=[-1, -2, -3, -4], keepdim=True) * v1
+
+    # Normalize per-frame (over C, H, W only, keeping frames separate)
+    # dims: [batch=0, C=1, frames=2, H=3, W=4]
+    # Sum over C, H, W (dims 1, 3, 4) but keep frames (dim 2) separate
+    v1_norm = torch.sqrt((v1 * v1).sum(dim=(1, 3, 4), keepdim=True) + 1e-8)
+    v1_normalized = v1 / v1_norm
+
+    # Compute projection coefficient per-frame
+    # dot product over C, H, W dimensions only
+    dot_product = (v0 * v1_normalized).sum(dim=(1, 3, 4), keepdim=True)
+
+    # Parallel component (projection of v0 onto v1)
+    v0_parallel = dot_product * v1_normalized
+
+    # Orthogonal component (what's left after removing parallel)
     v0_orthogonal = v0 - v0_parallel
+
     return v0_parallel.to(dtype), v0_orthogonal.to(dtype)
 
 
@@ -34,30 +65,47 @@ def adaptive_projected_guidance(
     diff: torch.Tensor,
     pred_cond: torch.Tensor,
     momentum_buffer: MomentumBuffer = None,
-    norm_threshold: float = 55,
+    norm_threshold: float = 55.0,
+    parallel_scale: float = 0.3,
 ):
     """
-    Apply Adaptive Projected Guidance to reduce color drift.
+    Apply Adaptive Projected Guidance to reduce color drift while maintaining coherence.
+
+    This works by decomposing the CFG difference into:
+    - Parallel component: aligns with conditional prediction (content/structure)
+    - Orthogonal component: perpendicular to conditional (style/color adjustments)
+
+    We keep a blend of both to maintain coherence while reducing drift.
 
     Args:
-        diff: Difference between conditional and unconditional predictions
-        pred_cond: Conditional prediction
-        momentum_buffer: Optional momentum buffer for smoothing
-        norm_threshold: Threshold for norm clipping (0 to disable)
+        diff: Difference between conditional and unconditional predictions [B, C, T, H, W]
+        pred_cond: Conditional prediction [B, C, T, H, W]
+        momentum_buffer: Optional momentum buffer for temporal smoothing
+        norm_threshold: Per-frame norm clipping threshold (0 to disable)
+        parallel_scale: How much of parallel component to keep (0-1, default 0.3)
+                       1.0 = normal CFG, 0.0 = only orthogonal
 
     Returns:
-        Adjusted guidance direction (orthogonal component)
+        Adjusted guidance direction (blend of parallel and orthogonal)
     """
+    # Apply momentum smoothing if enabled
     if momentum_buffer is not None:
-        momentum_buffer.update(diff)
-        diff = momentum_buffer.running_average
+        diff = momentum_buffer.update(diff)
+
+    # Apply per-frame norm clipping to prevent any single frame from dominating
     if norm_threshold > 0:
-        ones = torch.ones_like(diff)
-        diff_norm = diff.norm(p=2, dim=[-1, -2, -3, -4], keepdim=True)
-        scale_factor = torch.minimum(ones, norm_threshold / diff_norm)
+        # Compute norm per-frame (over C, H, W)
+        diff_norm = torch.sqrt((diff * diff).sum(dim=(1, 3, 4), keepdim=True) + 1e-8)
+        # Clip frames that exceed threshold
+        scale_factor = torch.clamp(norm_threshold / diff_norm, max=1.0)
         diff = diff * scale_factor
-    diff_parallel, diff_orthogonal = project(diff, pred_cond)
-    return diff_orthogonal
+
+    # Project per-frame to preserve temporal structure
+    diff_parallel, diff_orthogonal = project_per_frame(diff, pred_cond)
+
+    # Return blend: keep some parallel (for coherence) + orthogonal (for drift reduction)
+    # parallel_scale=1.0 means normal CFG, parallel_scale=0.0 means only orthogonal
+    return parallel_scale * diff_parallel + diff_orthogonal
 
 
 def adaptive_mean_std_normalization(source, reference):
@@ -674,8 +722,9 @@ def generate_v2v(
     preview_suffix=None,
     stop_check=None,
     use_apg=False,
-    apg_momentum=-0.75,
+    apg_momentum=0.9,
     apg_norm_threshold=55.0,
+    apg_parallel_scale=0.3,
 ):
     """
     Generate video continuation using visual conditioning (like I2V but with multiple frames).
@@ -771,7 +820,8 @@ def generate_v2v(
                     pred_reshaped = pred_velocity.permute(3, 0, 1, 2).unsqueeze(0)
 
                     apg_result = adaptive_projected_guidance(
-                        diff_reshaped, pred_reshaped, momentum_buffer, apg_norm_threshold
+                        diff_reshaped, pred_reshaped, momentum_buffer,
+                        apg_norm_threshold, apg_parallel_scale
                     )
                     # Permute back: [1, C, frames, H, W] -> [frames, H, W, C]
                     apg_result = apg_result.squeeze(0).permute(1, 2, 3, 0)
@@ -836,8 +886,9 @@ def generate_v2v_join(
     preview_suffix=None,
     stop_check=None,
     use_apg=False,
-    apg_momentum=-0.75,
+    apg_momentum=0.9,
     apg_norm_threshold=55.0,
+    apg_parallel_scale=0.3,
 ):
     """
     Generate video joining with dual conditioning (start and end frames).
@@ -940,7 +991,8 @@ def generate_v2v_join(
                     pred_reshaped = pred_velocity.permute(3, 0, 1, 2).unsqueeze(0)
 
                     apg_result = adaptive_projected_guidance(
-                        diff_reshaped, pred_reshaped, momentum_buffer, apg_norm_threshold
+                        diff_reshaped, pred_reshaped, momentum_buffer,
+                        apg_norm_threshold, apg_parallel_scale
                     )
                     # Permute back: [1, C, frames, H, W] -> [frames, H, W, C]
                     apg_result = apg_result.squeeze(0).permute(1, 2, 3, 0)
@@ -1010,8 +1062,9 @@ def generate_sample_v2v_join(
     checkpoint_path=None,
     save_latents=None,
     use_apg=False,
-    apg_momentum=-0.75,
+    apg_momentum=0.9,
     apg_norm_threshold=55.0,
+    apg_parallel_scale=0.3,
 ):
     """
     Generate video joining with dual conditioning (start and end frames).
@@ -1109,6 +1162,7 @@ def generate_sample_v2v_join(
                 use_apg=use_apg,
                 apg_momentum=apg_momentum,
                 apg_norm_threshold=apg_norm_threshold,
+                apg_parallel_scale=apg_parallel_scale,
             )
 
     # Handle early stop results
@@ -1225,8 +1279,9 @@ def generate_sample_v2v(
     checkpoint_path=None,
     save_latents=None,
     use_apg=False,
-    apg_momentum=-0.75,
+    apg_momentum=0.9,
     apg_norm_threshold=55.0,
+    apg_parallel_scale=0.3,
 ):
     """
     Generate video continuation from conditioning latents using KV cache.
@@ -1325,6 +1380,7 @@ def generate_sample_v2v(
                 use_apg=use_apg,
                 apg_momentum=apg_momentum,
                 apg_norm_threshold=apg_norm_threshold,
+                apg_parallel_scale=apg_parallel_scale,
             )
 
     # Handle early stop results
@@ -1570,12 +1626,17 @@ def generate_sample_i2v(
         latent_visual = result
 
     # Apply first frame normalization for i2v
+    # Normalize generated frames (1-4) to match the input image (frame 0)
+    # This ensures smooth transition from input image to generated content
     with torch.no_grad():
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             if first_frames is not None:
                 first_frames = first_frames.to(device=latent_visual.device, dtype=latent_visual.dtype)
                 latent_visual[:1] = first_frames
-                latent_visual = normalize_first_frame(latent_visual)
+                # Normalize frames 1-4 to match frame 0 (the input image) for smooth transition
+                latent_visual = normalize_generated_frames_to_conditioning(
+                    latent_visual, num_cond_frames=1, transition_frames=4, clump_values=True
+                )
 
     # Save latents before VAE decoding if requested
     if save_latents:
@@ -1998,12 +2059,17 @@ def generate_sample_i2v_from_checkpoint(
         latent_visual = result
 
     # Apply first frame normalization for i2v
+    # Normalize generated frames (1-4) to match the input image (frame 0)
+    # This ensures smooth transition from input image to generated content
     with torch.no_grad():
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             if first_frames is not None:
                 first_frames = first_frames.to(device=latent_visual.device, dtype=latent_visual.dtype)
                 latent_visual[:1] = first_frames
-                latent_visual = normalize_first_frame(latent_visual)
+                # Normalize frames 1-4 to match frame 0 (the input image) for smooth transition
+                latent_visual = normalize_generated_frames_to_conditioning(
+                    latent_visual, num_cond_frames=1, transition_frames=4, clump_values=True
+                )
 
     # Offload DiT before VAE decode
     if hasattr(dit, 'offload_all_blocks'):

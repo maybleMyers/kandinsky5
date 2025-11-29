@@ -23,6 +23,34 @@ def count_tokens(text):
         return 0
     return len(enc.encode(text))
 
+
+def get_lora_options(lora_folder: str = "lora") -> List[str]:
+    """Get list of available LoRA files in the specified folder."""
+    if not lora_folder or not os.path.exists(lora_folder):
+        return ["None"]
+    # For Kandinsky, LoRAs are in subdirectories with config_lora.json and lora.safetensors
+    lora_dirs = []
+    for item in os.listdir(lora_folder):
+        item_path = os.path.join(lora_folder, item)
+        if os.path.isdir(item_path):
+            config_path = os.path.join(item_path, "config_lora.json")
+            weights_path = os.path.join(item_path, "lora.safetensors")
+            if os.path.exists(config_path) and os.path.exists(weights_path):
+                lora_dirs.append(item)
+    lora_dirs.sort()
+    return ["None"] + lora_dirs
+
+
+def refresh_lora_dropdowns(lora_folder: str) -> List[gr.update]:
+    """Refresh LoRA dropdown choices."""
+    new_choices = get_lora_options(lora_folder)
+    print(f"Refreshing LoRA dropdowns. Found: {new_choices}")
+    results = []
+    for i in range(4):
+        results.append(gr.update(choices=new_choices, value="None"))
+    return results
+
+
 stop_event = threading.Event()
 current_process = None  # Track the currently running process
 current_output_filename = None  # Track current output filename for early stop signals
@@ -105,6 +133,20 @@ def generate_video(
     use_prompt_expansion: bool,
     clip_prompt: str,
     save_latents: bool,
+    # Cache-dit / TaylorSeer options
+    enable_cache: bool,
+    enable_taylorseer: bool,
+    taylorseer_order: int,
+    cache_Fn: int,
+    cache_Bn: int,
+    cache_rdt: float,
+    cache_warmup: int,
+    cache_max_steps: int,
+    # LoRA options
+    lora_folder: str,
+    lora1_str: str, lora2_str: str, lora3_str: str, lora4_str: str,
+    lora1_mult: float, lora2_mult: float, lora3_mult: float, lora4_mult: float,
+    no_lora_triggers: bool,
 ) -> Generator[Tuple[List[Tuple[str, str]], Optional[str], str, str], None, None]:
     global stop_event, current_process, current_output_filename
     stop_event.clear()
@@ -202,6 +244,18 @@ def generate_video(
         if use_magcache:
             command.append("--magcache")
 
+        # Cache-dit / TaylorSeer options
+        if enable_cache:
+            command.append("--cache")
+            command.extend(["--cache_Fn", str(int(cache_Fn))])
+            command.extend(["--cache_Bn", str(int(cache_Bn))])
+            command.extend(["--cache_rdt", str(cache_rdt)])
+            command.extend(["--cache_warmup", str(int(cache_warmup))])
+            command.extend(["--cache_max_steps", str(int(cache_max_steps))])
+            if enable_taylorseer:
+                command.append("--taylorseer")
+                command.extend(["--taylorseer_order", str(int(taylorseer_order))])
+
         if negative_prompt:
             command.extend(["--negative_prompt", str(negative_prompt)])
 
@@ -254,6 +308,21 @@ def generate_video(
         if save_latents:
             latents_filename = os.path.join(save_path, f"k1_{mode}_{timestamp}_{current_seed}_latents.pt")
             command.extend(["--save_latents", latents_filename])
+
+        # LoRA handling
+        lora_inputs = [
+            (lora1_str, lora1_mult), (lora2_str, lora2_mult),
+            (lora3_str, lora3_mult), (lora4_str, lora4_mult)
+        ]
+        if lora_folder and os.path.exists(lora_folder):
+            for name, mult in lora_inputs:
+                if name and name != "None":
+                    lora_path = os.path.join(lora_folder, name)
+                    if os.path.exists(lora_path):
+                        command.extend(["--lora_path", lora_path])
+                        if no_lora_triggers:
+                            command.append("--no_lora_triggers")
+                        break  # Only one LoRA supported at a time for now
 
         # Print the command for debugging/transparency
         print("\n" + "="*80)
@@ -356,6 +425,18 @@ def generate_video(
                     "vae_temporal_stride_frames": int(vae_temporal_stride_frames) if enable_vae_chunking and vae_temporal_stride_frames else None,
                     "vae_spatial_tile_height": int(vae_spatial_tile_height) if enable_vae_chunking and vae_spatial_tile_height else None,
                     "vae_spatial_tile_width": int(vae_spatial_tile_width) if enable_vae_chunking and vae_spatial_tile_width else None,
+                    # Extra settings
+                    "clip_prompt": clip_prompt.strip() if clip_prompt and clip_prompt.strip() else None,
+                    "use_prompt_expansion": use_prompt_expansion,
+                    "save_latents": save_latents,
+                    "enable_cache": enable_cache,
+                    "enable_taylorseer": enable_taylorseer if enable_cache else None,
+                    "taylorseer_order": int(taylorseer_order) if enable_cache and enable_taylorseer else None,
+                    "cache_Fn": int(cache_Fn) if enable_cache else None,
+                    "cache_Bn": int(cache_Bn) if enable_cache else None,
+                    "cache_rdt": cache_rdt if enable_cache else None,
+                    "cache_warmup": int(cache_warmup) if enable_cache else None,
+                    "cache_max_steps": int(cache_max_steps) if enable_cache else None,
                 }
                 try:
                     add_metadata_to_video(output_filename, params_for_meta)
@@ -426,6 +507,20 @@ def generate_v2v_video(
     use_apg: bool,
     apg_momentum: float,
     apg_norm_threshold: float,
+    # Cache-dit / TaylorSeer options
+    enable_cache: bool,
+    enable_taylorseer: bool,
+    taylorseer_order: int,
+    cache_Fn: int,
+    cache_Bn: int,
+    cache_rdt: float,
+    cache_warmup: int,
+    cache_max_steps: int,
+    # LoRA options
+    lora_folder: str,
+    lora1_str: str, lora2_str: str, lora3_str: str, lora4_str: str,
+    lora1_mult: float, lora2_mult: float, lora3_mult: float, lora4_mult: float,
+    no_lora_triggers: bool,
 ) -> Generator[Tuple[List[Tuple[str, str]], Optional[str], str, str], None, None]:
     """Generate video from video input (video continuation/v2v mode)."""
     global stop_event, current_process, current_output_filename
@@ -526,6 +621,18 @@ def generate_v2v_video(
         if use_magcache:
             command.append("--magcache")
 
+        # Cache-dit / TaylorSeer options
+        if enable_cache:
+            command.append("--cache")
+            command.extend(["--cache_Fn", str(int(cache_Fn))])
+            command.extend(["--cache_Bn", str(int(cache_Bn))])
+            command.extend(["--cache_rdt", str(cache_rdt)])
+            command.extend(["--cache_warmup", str(int(cache_warmup))])
+            command.extend(["--cache_max_steps", str(int(cache_max_steps))])
+            if enable_taylorseer:
+                command.append("--taylorseer")
+                command.extend(["--taylorseer_order", str(int(taylorseer_order))])
+
         if negative_prompt:
             command.extend(["--negative_prompt", str(negative_prompt)])
 
@@ -586,6 +693,21 @@ def generate_v2v_video(
         if save_latents:
             latents_filename = os.path.join(save_path, f"k1_v2v_{timestamp}_{current_seed}_latents.pt")
             command.extend(["--save_latents", latents_filename])
+
+        # LoRA handling
+        lora_inputs = [
+            (lora1_str, lora1_mult), (lora2_str, lora2_mult),
+            (lora3_str, lora3_mult), (lora4_str, lora4_mult)
+        ]
+        if lora_folder and os.path.exists(lora_folder):
+            for name, mult in lora_inputs:
+                if name and name != "None":
+                    lora_path = os.path.join(lora_folder, name)
+                    if os.path.exists(lora_path):
+                        command.extend(["--lora_path", lora_path])
+                        if no_lora_triggers:
+                            command.append("--no_lora_triggers")
+                        break  # Only one LoRA supported at a time for now
 
         # Print the command for debugging/transparency
         print("\n" + "="*80)
@@ -693,6 +815,18 @@ def generate_v2v_video(
                     "use_apg": use_apg,
                     "apg_momentum": apg_momentum if use_apg else None,
                     "apg_norm_threshold": apg_norm_threshold if use_apg else None,
+                    # Extra settings
+                    "clip_prompt": clip_prompt.strip() if clip_prompt and clip_prompt.strip() else None,
+                    "use_prompt_expansion": use_prompt_expansion,
+                    "save_latents": save_latents,
+                    "enable_cache": enable_cache,
+                    "enable_taylorseer": enable_taylorseer if enable_cache else None,
+                    "taylorseer_order": int(taylorseer_order) if enable_cache and enable_taylorseer else None,
+                    "cache_Fn": int(cache_Fn) if enable_cache else None,
+                    "cache_Bn": int(cache_Bn) if enable_cache else None,
+                    "cache_rdt": cache_rdt if enable_cache else None,
+                    "cache_warmup": int(cache_warmup) if enable_cache else None,
+                    "cache_max_steps": int(cache_max_steps) if enable_cache else None,
                 }
                 try:
                     add_metadata_to_video(output_filename, params_for_meta)
@@ -1121,7 +1255,7 @@ def extract_video_details(video_path: str) -> Tuple[dict, str]:
 def send_to_generation(video_path, metadata):
     """Extract first frame and map metadata to generation inputs using subprocess."""
     if not video_path:
-        return [gr.update()] * 35
+        return [gr.update()] * 37
 
     # 1. Extract First Frame as PIL Image using subprocess
     input_img_pil = None
@@ -1191,13 +1325,15 @@ def send_to_generation(video_path, metadata):
         get_num("vae_temporal_tile_frames"),   # vae_temporal_tile_frames
         get_num("vae_temporal_stride_frames"), # vae_temporal_stride_frames
         get_num("vae_spatial_tile_height"),    # vae_spatial_tile_height
-        get_num("vae_spatial_tile_width")      # vae_spatial_tile_width
+        get_num("vae_spatial_tile_width"),     # vae_spatial_tile_width
+        get("clip_prompt"),                    # clip_prompt
+        get("use_prompt_expansion")            # use_prompt_expansion
     )
 
 def send_to_v2v(video_path, metadata):
     """Send video and metadata to V2V tab for continuation."""
     if not video_path:
-        return [gr.update()] * 36
+        return [gr.update()] * 38
 
     # Parse Metadata
     meta = metadata if isinstance(metadata, dict) else {}
@@ -1246,6 +1382,8 @@ def send_to_v2v(video_path, metadata):
         get_num("vae_spatial_tile_height"),    # v2v_vae_spatial_tile_height
         get_num("vae_spatial_tile_width"),     # v2v_vae_spatial_tile_width
         get_num("num_cond_frames", 4),  # v2v_num_cond_frames (default 4 if not in metadata)
+        get("clip_prompt"),                    # v2v_clip_prompt
+        get("use_prompt_expansion")            # v2v_use_prompt_expansion
     )
 
 def calculate_width_from_height(height, original_dims):
@@ -1628,6 +1766,21 @@ def create_interface():
                             scale=3
                         )
                         decode_latents_btn = gr.Button("Decode from Saved Latents", elem_classes="light-blue-btn", scale=1)
+                        with gr.Row():
+                            lora_folder = gr.Textbox(label="LoRA Folder", value="lora", scale=4)
+                            lora_refresh_btn = gr.Button("🔄 LoRA", elem_classes="refresh-btn")
+                        lora_weights = []
+                        lora_multipliers = []
+                        for i in range(4):
+                            with gr.Row():
+                                lora_weights.append(gr.Dropdown(
+                                    label=f"LoRA {i+1}", choices=get_lora_options("lora"),
+                                    value="None", allow_custom_value=False, interactive=True, scale=2
+                                ))
+                                lora_multipliers.append(gr.Slider(
+                                    label=f"Multiplier", minimum=0.0, maximum=2.0, step=0.05, value=1.0, scale=1, interactive=True
+                                ))
+                        no_lora_triggers = gr.Checkbox(label="Disable LoRA Trigger Words", value=False, info="Disable automatic concatenation of trigger words to prompts")
 
                 with gr.Accordion("Model Settings & Performance", open=True):
                     with gr.Row():
@@ -1686,6 +1839,31 @@ def create_interface():
                                 label="Spatial Tile Width",
                                 info="Spatial chunk width (reduce if high resolution causes OOM)"
                             )
+
+                    with gr.Accordion("Advanced: Cache Acceleration (TaylorSeer)", open=False):
+                        gr.Markdown("""
+                        **Enable cache-dit caching for faster inference using DBCache and TaylorSeer algorithms.**
+
+                        - **Enable Cache**: Turn on DBCache acceleration (recommended with TaylorSeer)
+                        - **Enable TaylorSeer**: Use Taylor series expansion for better cache accuracy
+                        - **Fn Blocks**: First N transformer blocks to always compute (higher = better quality)
+                        - **Bn Blocks**: Last N blocks to always compute (use 0 with TaylorSeer)
+                        - **Threshold**: Residual diff threshold (higher = faster, lower quality)
+                        - **Warmup Steps**: Steps before caching starts (higher = better quality)
+
+                        **Recommended for Pro 20B**: Enable Cache + TaylorSeer, Fn=8, Bn=0, Threshold=0.08
+                        """)
+                        with gr.Row():
+                            enable_cache = gr.Checkbox(label="Enable Cache", value=False, info="Enable DBCache acceleration")
+                            enable_taylorseer = gr.Checkbox(label="Enable TaylorSeer", value=False, info="Use Taylor series for better accuracy")
+                            taylorseer_order = gr.Slider(minimum=1, maximum=3, value=1, step=1, label="TaylorSeer Order", info="Taylor expansion order (1 recommended)")
+                        with gr.Row():
+                            cache_Fn = gr.Slider(minimum=0, maximum=32, value=8, step=1, label="Fn Compute Blocks", info="First N blocks to always compute")
+                            cache_Bn = gr.Slider(minimum=0, maximum=32, value=0, step=1, label="Bn Compute Blocks", info="Last N blocks to always compute (0 with TaylorSeer)")
+                        with gr.Row():
+                            cache_rdt = gr.Slider(minimum=0.01, maximum=0.5, value=0.08, step=0.01, label="Residual Threshold", info="Higher = faster but lower quality")
+                            cache_warmup = gr.Slider(minimum=0, maximum=20, value=8, step=1, label="Warmup Steps", info="Steps before caching starts")
+                            cache_max_steps = gr.Slider(minimum=-1, maximum=100, value=-1, step=1, label="Max Cached Steps", info="-1 = unlimited")
 
                     save_path = gr.Textbox(label="Save Path", value="outputs")
 
@@ -1747,9 +1925,23 @@ def create_interface():
                         enable_vae_chunking, vae_temporal_tile_frames, vae_temporal_stride_frames,
                         vae_spatial_tile_height, vae_spatial_tile_width,
                         use_prompt_expansion, clip_prompt,
-                        save_latents_checkbox
+                        save_latents_checkbox,
+                        # Cache-dit / TaylorSeer options
+                        enable_cache, enable_taylorseer, taylorseer_order,
+                        cache_Fn, cache_Bn, cache_rdt, cache_warmup, cache_max_steps,
+                        # LoRA options
+                        lora_folder, lora_weights[0], lora_weights[1], lora_weights[2], lora_weights[3],
+                        lora_multipliers[0], lora_multipliers[1], lora_multipliers[2], lora_multipliers[3],
+                        no_lora_triggers
                     ],
                     outputs=[output, preview_output, batch_progress, progress_text]
+                )
+
+                # LoRA refresh button
+                lora_refresh_btn.click(
+                    fn=refresh_lora_dropdowns,
+                    inputs=[lora_folder],
+                    outputs=lora_weights
                 )
 
                 stop_btn.click(
@@ -2005,6 +2197,21 @@ def create_interface():
                             scale=3
                         )
                         v2v_decode_latents_btn = gr.Button("Decode from Saved Latents", elem_classes="light-blue-btn", scale=1)
+                        with gr.Row():
+                            v2v_lora_folder = gr.Textbox(label="LoRA Folder", value="lora", scale=4)
+                            v2v_lora_refresh_btn = gr.Button("🔄 LoRA", elem_classes="refresh-btn")
+                        v2v_lora_weights = []
+                        v2v_lora_multipliers = []
+                        for i in range(4):
+                            with gr.Row():
+                                v2v_lora_weights.append(gr.Dropdown(
+                                    label=f"LoRA {i+1}", choices=get_lora_options("lora"),
+                                    value="None", allow_custom_value=False, interactive=True, scale=2
+                                ))
+                                v2v_lora_multipliers.append(gr.Slider(
+                                    label=f"Multiplier", minimum=0.0, maximum=2.0, step=0.05, value=1.0, scale=1, interactive=True
+                                ))
+                        v2v_no_lora_triggers = gr.Checkbox(label="Disable LoRA Trigger Words", value=False, info="Disable automatic concatenation of trigger words to prompts")
 
                 with gr.Accordion("Model Settings & Performance", open=True):
                     with gr.Row():
@@ -2063,6 +2270,31 @@ def create_interface():
                                 label="Spatial Tile Width",
                                 info="Spatial chunk width (reduce if high resolution causes OOM)"
                             )
+
+                    with gr.Accordion("Advanced: Cache Acceleration (TaylorSeer)", open=False):
+                        gr.Markdown("""
+                        **Enable cache-dit caching for faster inference using DBCache and TaylorSeer algorithms.**
+
+                        - **Enable Cache**: Turn on DBCache acceleration (recommended with TaylorSeer)
+                        - **Enable TaylorSeer**: Use Taylor series expansion for better cache accuracy
+                        - **Fn Blocks**: First N transformer blocks to always compute (higher = better quality)
+                        - **Bn Blocks**: Last N blocks to always compute (use 0 with TaylorSeer)
+                        - **Threshold**: Residual diff threshold (higher = faster, lower quality)
+                        - **Warmup Steps**: Steps before caching starts (higher = better quality)
+
+                        **Recommended for Pro 20B**: Enable Cache + TaylorSeer, Fn=8, Bn=0, Threshold=0.08
+                        """)
+                        with gr.Row():
+                            v2v_enable_cache = gr.Checkbox(label="Enable Cache", value=False, info="Enable DBCache acceleration")
+                            v2v_enable_taylorseer = gr.Checkbox(label="Enable TaylorSeer", value=False, info="Use Taylor series for better accuracy")
+                            v2v_taylorseer_order = gr.Slider(minimum=1, maximum=3, value=1, step=1, label="TaylorSeer Order", info="Taylor expansion order (1 recommended)")
+                        with gr.Row():
+                            v2v_cache_Fn = gr.Slider(minimum=0, maximum=32, value=8, step=1, label="Fn Compute Blocks", info="First N blocks to always compute")
+                            v2v_cache_Bn = gr.Slider(minimum=0, maximum=32, value=0, step=1, label="Bn Compute Blocks", info="Last N blocks to always compute (0 with TaylorSeer)")
+                        with gr.Row():
+                            v2v_cache_rdt = gr.Slider(minimum=0.01, maximum=0.5, value=0.08, step=0.01, label="Residual Threshold", info="Higher = faster but lower quality")
+                            v2v_cache_warmup = gr.Slider(minimum=0, maximum=20, value=8, step=1, label="Warmup Steps", info="Steps before caching starts")
+                            v2v_cache_max_steps = gr.Slider(minimum=-1, maximum=100, value=-1, step=1, label="Max Cached Steps", info="-1 = unlimited")
 
                     v2v_save_path = gr.Textbox(label="Save Path", value="outputs")
 
@@ -2134,9 +2366,23 @@ def create_interface():
                         v2v_vae_spatial_tile_height, v2v_vae_spatial_tile_width,
                         v2v_use_prompt_expansion, v2v_clip_prompt,
                         v2v_save_latents_checkbox,
-                        v2v_use_apg, v2v_apg_momentum, v2v_apg_norm_threshold
+                        v2v_use_apg, v2v_apg_momentum, v2v_apg_norm_threshold,
+                        # Cache-dit / TaylorSeer options
+                        v2v_enable_cache, v2v_enable_taylorseer, v2v_taylorseer_order,
+                        v2v_cache_Fn, v2v_cache_Bn, v2v_cache_rdt, v2v_cache_warmup, v2v_cache_max_steps,
+                        # LoRA options
+                        v2v_lora_folder, v2v_lora_weights[0], v2v_lora_weights[1], v2v_lora_weights[2], v2v_lora_weights[3],
+                        v2v_lora_multipliers[0], v2v_lora_multipliers[1], v2v_lora_multipliers[2], v2v_lora_multipliers[3],
+                        v2v_no_lora_triggers
                     ],
                     outputs=[v2v_output, v2v_preview_output, v2v_batch_progress, v2v_progress_text]
+                )
+
+                # V2V LoRA refresh button
+                v2v_lora_refresh_btn.click(
+                    fn=refresh_lora_dropdowns,
+                    inputs=[v2v_lora_folder],
+                    outputs=v2v_lora_weights
                 )
 
                 v2v_stop_btn.click(
@@ -2233,7 +2479,9 @@ def create_interface():
                         vae_temporal_tile_frames,   # 32
                         vae_temporal_stride_frames, # 33
                         vae_spatial_tile_height,    # 34
-                        vae_spatial_tile_width      # 35
+                        vae_spatial_tile_width,     # 35
+                        clip_prompt,                # 36
+                        use_prompt_expansion        # 37
                     ]
                 )
 
@@ -2275,7 +2523,9 @@ def create_interface():
                         v2v_vae_temporal_stride_frames, # 32
                         v2v_vae_spatial_tile_height,    # 33
                         v2v_vae_spatial_tile_width,     # 34
-                        v2v_num_cond_frames             # 35
+                        v2v_num_cond_frames,            # 35
+                        v2v_clip_prompt,                # 36
+                        v2v_use_prompt_expansion        # 37
                     ]
                 )
 

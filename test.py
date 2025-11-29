@@ -35,6 +35,14 @@ try:
 except ImportError:
     LatentPreviewer = None
 
+# Optional cache-dit import for TaylorSeer caching
+try:
+    import cache_dit
+    from cache_dit import BlockAdapter, ForwardPattern, DBCacheConfig, TaylorSeerCalibratorConfig
+    CACHE_DIT_AVAILABLE = True
+except ImportError:
+    CACHE_DIT_AVAILABLE = False
+    cache_dit = None
 
 
 def disable_warnings():
@@ -48,6 +56,159 @@ def disable_warnings():
         guards=False,
         recompiles=False
     )
+
+
+def _create_block_device_hooks(block, device, block_idx=None):
+    """
+    Create forward hooks to auto-move block to GPU before forward
+    and back to CPU after. This makes cache-dit compatible with block swap.
+    Returns tuple of (pre_hook_handle, post_hook_handle).
+    """
+    def pre_forward_hook(module, args):
+        module.to(device, non_blocking=True)
+        torch.cuda.synchronize()  # Ensure transfer complete before forward
+        return args
+
+    def post_forward_hook(module, args, output):
+        torch.cuda.synchronize()  # Ensure forward complete before offload
+        module.to("cpu", non_blocking=True)
+        # Don't modify output here - let dit_block_swap.py handle tuple unwrapping
+        # This avoids conflicts with return_kv=True which legitimately returns tuples
+        return output
+
+    pre_handle = block.register_forward_pre_hook(pre_forward_hook)
+    post_handle = block.register_forward_hook(post_forward_hook)
+    return (pre_handle, post_handle)
+
+
+def setup_cache(pipe, args, num_inference_steps):
+    """
+    Setup cache-dit caching with optional TaylorSeer calibrator for the DiT model.
+
+    Args:
+        pipe: The Kandinsky5 pipeline (T2V, I2V, or T2I)
+        args: Command-line arguments containing cache configuration
+        num_inference_steps: Number of inference steps for this generation
+
+    Returns:
+        True if cache was enabled, False otherwise
+    """
+    if not args.cache:
+        return False
+
+    if not CACHE_DIT_AVAILABLE:
+        print("Warning: --cache requested but cache-dit is not installed. Install with: pip install cache-dit")
+        return False
+
+    # Get the DiT model from the pipeline
+    dit = pipe.dit
+
+    # Get the visual transformer blocks (main compute blocks)
+    if not hasattr(dit, 'visual_transformer_blocks'):
+        print("Warning: DiT model does not have visual_transformer_blocks, cache not enabled")
+        return False
+
+    blocks = dit.visual_transformer_blocks
+
+    # Check if block swap is enabled - if so, we need to add hooks for device management
+    block_swap_enabled = hasattr(dit, 'enable_block_swap') and dit.enable_block_swap
+    if block_swap_enabled:
+        print("Block swap detected - adding device hooks for cache-dit compatibility...")
+        device = pipe.device_map.get("dit", "cuda")
+        # Store hook handles so we can remove them later
+        dit._cache_device_hooks = []
+        for i, block in enumerate(blocks):
+            hook_handles = _create_block_device_hooks(block, device)
+            dit._cache_device_hooks.append(hook_handles)
+        print(f"Added device hooks to {len(blocks)} blocks for auto-swap")
+
+    # Determine if we have separate CFG based on guidance weight
+    # For Kandinsky5 with CFG, the model runs separate forward passes for cond/uncond
+    has_cfg = hasattr(pipe, 'conf') and pipe.conf.model.guidance_weight > 1.0
+
+    # Create BlockAdapter for transformer-only interface
+    # Kandinsky5's TransformerDecoderBlock.forward signature:
+    # forward(visual_embed, text_embed, time_embed, rope, sparse_params, attention_mask, ...)
+    # The block returns just visual_embed (single tensor), so use Pattern_2:
+    # - Input: (hidden_states, encoder_hidden_states) = (visual_embed, text_embed)
+    # - Output: (hidden_states,) = just visual_embed
+    # - Return_H_Only = True, so CachedBlocks.forward() returns just hidden_states
+    adapter = BlockAdapter(
+        transformer=dit,
+        blocks=blocks,
+        forward_pattern=ForwardPattern.Pattern_2,
+        has_separate_cfg=has_cfg,
+    )
+
+    # Configure DBCache
+    cache_config = DBCacheConfig(
+        num_inference_steps=num_inference_steps,
+        Fn_compute_blocks=args.cache_Fn,
+        Bn_compute_blocks=args.cache_Bn,
+        residual_diff_threshold=args.cache_rdt,
+        max_warmup_steps=args.cache_warmup,
+        max_cached_steps=args.cache_max_steps,
+        enable_separate_cfg=has_cfg,
+    )
+
+    # Configure TaylorSeer calibrator if requested
+    calibrator_config = None
+    if args.taylorseer:
+        calibrator_config = TaylorSeerCalibratorConfig(
+            taylorseer_order=args.taylorseer_order,
+        )
+        print(f"TaylorSeer calibrator enabled (order={args.taylorseer_order})")
+
+    # Enable cache
+    cache_dit.enable_cache(
+        adapter,
+        cache_config=cache_config,
+        calibrator_config=calibrator_config,
+    )
+
+    print(f"Cache-dit enabled: Fn={args.cache_Fn}, Bn={args.cache_Bn}, "
+          f"threshold={args.cache_rdt}, warmup={args.cache_warmup}, "
+          f"steps={num_inference_steps}, CFG={has_cfg}")
+    if block_swap_enabled:
+        print("Note: Running with block swap + cache (experimental)")
+
+    return True
+
+
+def disable_cache(pipe):
+    """Disable cache-dit caching on the DiT model."""
+    if CACHE_DIT_AVAILABLE and hasattr(pipe, 'dit'):
+        try:
+            cache_dit.disable_cache(pipe.dit)
+        except Exception:
+            pass  # Silently ignore if cache wasn't enabled
+
+        # Remove device hooks if we added them for block swap
+        dit = pipe.dit
+        if hasattr(dit, '_cache_device_hooks') and dit._cache_device_hooks:
+            for pre_handle, post_handle in dit._cache_device_hooks:
+                pre_handle.remove()
+                post_handle.remove()
+            dit._cache_device_hooks = []
+
+
+def print_cache_summary(pipe):
+    """Print cache acceleration statistics after inference."""
+    if not CACHE_DIT_AVAILABLE:
+        return
+
+    try:
+        # Try to get summary from the DiT model
+        if hasattr(pipe, 'dit'):
+            stats = cache_dit.summary(pipe.dit, details=True)
+            if stats:
+                print("\n" + "="*60)
+                print("Cache Acceleration Summary:")
+                print(stats)
+                print("="*60 + "\n")
+    except Exception as e:
+        # Silently ignore summary errors
+        pass
 
 
 def resize_image_to_resolution(image_path, target_width, target_height, alignment=32):
@@ -384,14 +545,20 @@ def parse_args():
     parser.add_argument(
         "--apg_momentum",
         type=float,
-        default=-0.75,
-        help="Momentum for APG running average (default: -0.75)"
+        default=0.9,
+        help="Momentum for APG running average (default: 0.9, higher = smoother)"
     )
     parser.add_argument(
         "--apg_norm_threshold",
         type=float,
         default=55.0,
-        help="Norm threshold for APG guidance clipping (default: 55.0)"
+        help="Per-frame norm threshold for APG guidance clipping (default: 55.0)"
+    )
+    parser.add_argument(
+        "--apg_parallel_scale",
+        type=float,
+        default=0.3,
+        help="How much of parallel guidance to keep (0-1, default: 0.3). 1.0 = normal CFG, 0.0 = only orthogonal"
     )
 
     # VAE temporal chunking configuration
@@ -442,6 +609,76 @@ def parse_args():
         type=str,
         default=None,
         help="Path to load and decode previously saved latents. Skips generation and only runs VAE decoding."
+    )
+
+    # Cache-dit / TaylorSeer caching configuration
+    parser.add_argument(
+        "--cache",
+        action='store_true',
+        default=False,
+        help="Enable cache-dit caching for faster inference (DBCache algorithm)"
+    )
+    parser.add_argument(
+        "--taylorseer",
+        action='store_true',
+        default=False,
+        help="Enable TaylorSeer calibrator for improved cache accuracy (use with --cache)"
+    )
+    parser.add_argument(
+        "--taylorseer_order",
+        type=int,
+        default=1,
+        help="TaylorSeer order for Taylor series expansion (default: 1)"
+    )
+    parser.add_argument(
+        "--cache_Fn",
+        type=int,
+        default=8,
+        help="Number of first transformer blocks to always compute (Fn in DBCache, default: 8)"
+    )
+    parser.add_argument(
+        "--cache_Bn",
+        type=int,
+        default=0,
+        help="Number of last transformer blocks to always compute (Bn in DBCache, default: 0)"
+    )
+    parser.add_argument(
+        "--cache_rdt",
+        type=float,
+        default=0.08,
+        help="Residual difference threshold for caching (default: 0.08, higher=faster but lower quality)"
+    )
+    parser.add_argument(
+        "--cache_warmup",
+        type=int,
+        default=8,
+        help="Number of warmup steps before caching starts (default: 8)"
+    )
+    parser.add_argument(
+        "--cache_max_steps",
+        type=int,
+        default=-1,
+        help="Maximum cached steps before forcing recompute (-1 for unlimited, default: -1)"
+    )
+
+    # LoRA configuration
+    parser.add_argument(
+        "--lora_path",
+        type=str,
+        default=None,
+        help="Local path to LoRA adapter directory (must contain config_lora.json and lora.safetensors)"
+    )
+    parser.add_argument(
+        "--lora_name",
+        type=str,
+        default=None,
+        help="Name for the LoRA adapter (used for identification, defaults to directory name)"
+    )
+    parser.add_argument(
+        "--no_lora_triggers",
+        action='store_true',
+        default=False,
+        help="Disable automatic concatenation of LoRA trigger words to prompts"
     )
 
     args = parser.parse_args()
@@ -617,6 +854,29 @@ if __name__ == "__main__":
                 vae_spatial_tile_width=args.vae_spatial_tile_width,
             )
 
+    # Load LoRA adapter if specified
+    if args.lora_path:
+        lora_config = os.path.join(args.lora_path, "config_lora.json")
+        lora_weights = os.path.join(args.lora_path, "lora.safetensors")
+        lora_name = args.lora_name if args.lora_name else os.path.basename(args.lora_path)
+
+        if not os.path.exists(lora_config):
+            raise FileNotFoundError(f"LoRA config not found: {lora_config}")
+        if not os.path.exists(lora_weights):
+            raise FileNotFoundError(f"LoRA weights not found: {lora_weights}")
+
+        print(f"Loading LoRA adapter '{lora_name}' from {args.lora_path}")
+        pipe.load_adapter(
+            adapter_config=lora_config,
+            adapter_path=lora_weights,
+            adapter_name=lora_name
+        )
+        if args.no_lora_triggers:
+            pipe.peft_trigger = ""
+            print(f"LoRA adapter loaded. Trigger word concatenation disabled.")
+        else:
+            print(f"LoRA adapter loaded. Trigger word: '{pipe.peft_trigger}'")
+
     if args.output_filename is None:
         # Determine file extension based on generation mode
         if is_t2i:
@@ -651,6 +911,13 @@ if __name__ == "__main__":
         return None
 
     start_time = time.perf_counter()
+
+    # Setup cache-dit caching if enabled (skip for decode/resume modes)
+    cache_enabled = False
+    if args.cache and not args.decode_from_file and not args.resume_from:
+        # Determine num_steps for cache configuration
+        num_steps_for_cache = args.sample_steps if args.sample_steps else getattr(pipe, 'num_steps', 50)
+        cache_enabled = setup_cache(pipe, args, num_steps_for_cache)
 
     # Handle decode from saved latents (VAE-only decoding)
     if args.decode_from_file:
@@ -1053,6 +1320,7 @@ if __name__ == "__main__":
                 use_apg=args.use_apg,
                 apg_momentum=args.apg_momentum,
                 apg_norm_threshold=args.apg_norm_threshold,
+                apg_parallel_scale=args.apg_parallel_scale,
             )
 
             # Concatenate: video1 + generated middle + video2
@@ -1264,6 +1532,7 @@ if __name__ == "__main__":
                 use_apg=args.use_apg,
                 apg_momentum=args.apg_momentum,
                 apg_norm_threshold=args.apg_norm_threshold,
+                apg_parallel_scale=args.apg_parallel_scale,
             )
 
             # Concatenate input video with newly generated frames
@@ -1383,4 +1652,8 @@ if __name__ == "__main__":
     else:
         output_type = "image" if is_t2i else "video"
         print(f"Generated {output_type} is saved to {args.output_filename}")
-    
+
+    # Print cache statistics if caching was enabled
+    if cache_enabled:
+        print_cache_summary(pipe)
+        disable_cache(pipe)

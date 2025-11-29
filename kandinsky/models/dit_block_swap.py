@@ -172,7 +172,111 @@ class DiffusionTransformer3DBlockSwap(DiffusionTransformer3D):
         # Visual transformer blocks with block swapping and KV cache support
         kv_cache_dict_ret = {}
 
-        if self.enable_block_swap:
+        # Check if cache-dit has wrapped the visual_transformer_blocks
+        # cache-dit wraps all blocks into a single CachedBlocks object inside a ModuleList
+        # So the list length changes from num_visual_blocks to 1
+        cache_dit_active = len(self.visual_transformer_blocks) != self.num_visual_blocks
+
+        # Debug: print type and len on first timestep
+        if not getattr(self, '_debug_printed_once', False):
+            self._debug_printed_once = True
+            print(f">>> cache_dit_active: {cache_dit_active}")
+            print(f">>> visual_transformer_blocks type: {type(self.visual_transformer_blocks)}")
+            print(f">>> visual_transformer_blocks len: {len(self.visual_transformer_blocks)} (expected {self.num_visual_blocks})")
+            if cache_dit_active and len(self.visual_transformer_blocks) > 0:
+                # Print the type of the wrapped object
+                wrapped = self.visual_transformer_blocks[0]
+                print(f">>> Wrapped CachedBlocks type: {type(wrapped)}")
+
+        if cache_dit_active:
+            # cache-dit wrapped all 60 blocks into a single CachedBlocks object
+            # The CachedBlocks stores original blocks and handles caching internally
+            cached_blocks = self.visual_transformer_blocks[0]
+
+            # Debug: understand CachedBlocks structure on first call
+            if not getattr(self, '_debug_cached_blocks_printed', False):
+                self._debug_cached_blocks_printed = True
+                print(f">>> visual_embed shape before blocks: {visual_embed.shape}")
+                if hasattr(cached_blocks, 'transformer_blocks'):
+                    print(f">>> cached_blocks.transformer_blocks len: {len(cached_blocks.transformer_blocks)}")
+                # Check for call_blocks method
+                if hasattr(cached_blocks, 'call_blocks'):
+                    print(f">>> cached_blocks has call_blocks method")
+
+            # Try to use cache-dit's caching by calling its forward method
+            # The device hooks on transformer_blocks should auto-move blocks to/from GPU
+            # as cache-dit iterates through them internally
+            try:
+                # CachedBlocks.forward() implements the caching logic (Fn, Mn, Bn blocks)
+                # Pass arguments in Pattern_1 order: hidden_states, encoder_hidden_states, temb, ...
+                block_output = cached_blocks.forward(
+                    visual_embed,      # hidden_states
+                    text_embed,        # encoder_hidden_states
+                    time_embed,        # temb
+                    visual_rope,       # additional args...
+                    sparse_params,
+                    attention_mask
+                )
+
+                # Debug: print output shape
+                if not getattr(self, '_debug_output_printed', False):
+                    self._debug_output_printed = True
+                    print(f">>> cached_blocks.forward() returned type: {type(block_output)}")
+                    if isinstance(block_output, tuple):
+                        print(f">>> block_output tuple len: {len(block_output)}")
+                        for idx, item in enumerate(block_output):
+                            if hasattr(item, 'shape'):
+                                print(f">>> block_output[{idx}] shape: {item.shape}")
+                            else:
+                                print(f">>> block_output[{idx}] type: {type(item)}")
+                    elif hasattr(block_output, 'shape'):
+                        print(f">>> block_output shape: {block_output.shape}")
+
+                # Extract visual_embed from output
+                # Pattern_2 (Return_H_Only=True) returns just hidden_states (visual_embed)
+                # Pattern_1 (Return_H_First=False) returns (encoder_hidden_states, hidden_states)
+                if isinstance(block_output, tuple):
+                    # For Pattern_1: block_output = (text_embed, visual_embed)
+                    # For Pattern_0: block_output = (visual_embed, text_embed)
+                    # We need visual_embed which is hidden_states
+                    # Check forward_pattern to extract correctly
+                    if hasattr(cached_blocks, 'forward_pattern'):
+                        if cached_blocks.forward_pattern.Return_H_First:
+                            visual_embed = block_output[0]  # Pattern_0
+                        else:
+                            visual_embed = block_output[1]  # Pattern_1
+                    else:
+                        visual_embed = block_output[0]  # Fallback
+                else:
+                    # Pattern_2: single tensor output
+                    visual_embed = block_output
+
+                # Debug: print final visual_embed shape
+                if not getattr(self, '_debug_final_printed', False):
+                    self._debug_final_printed = True
+                    print(f">>> visual_embed after cache-dit: {visual_embed.shape}")
+                    print(f">>> expected shape to match visual_shape: {visual_shape}")
+
+            except Exception as e:
+                # If cache-dit forward fails, fall back to manual iteration
+                if not getattr(self, '_cache_fallback_warned', False):
+                    self._cache_fallback_warned = True
+                    print(f">>> cache-dit forward failed ({e}), falling back to manual iteration (no caching)")
+                    import traceback
+                    traceback.print_exc()
+
+                for i, block in enumerate(cached_blocks.transformer_blocks):
+                    block_output = block(
+                        visual_embed, text_embed, time_embed,
+                        visual_rope, sparse_params, attention_mask
+                    )
+                    if isinstance(block_output, tuple):
+                        visual_embed = block_output[0]
+                    else:
+                        visual_embed = block_output
+
+        elif self.enable_block_swap:
+            # Block swap mode - process blocks one at a time, moving to/from GPU
             for i, visual_transformer_block in enumerate(self.visual_transformer_blocks):
                 # Prefetch next block while processing current one
                 if i + 1 < self.num_visual_blocks:
@@ -195,11 +299,14 @@ class DiffusionTransformer3DBlockSwap(DiffusionTransformer3D):
 
                 if return_kv:
                     visual_embed, kv_cache = block_output
-                    # Store (k_cache, v_cache, visual_rope) for proper RoPE handling
                     k_cache, v_cache = kv_cache
                     kv_cache_dict_ret[i] = (k_cache, v_cache, visual_rope)
                 else:
-                    visual_embed = block_output
+                    if isinstance(block_output, tuple):
+                        visual_embed = block_output[0]
+                    else:
+                        visual_embed = block_output
+
         else:
             # Normal forward pass without swapping
             for i, visual_transformer_block in enumerate(self.visual_transformer_blocks):
@@ -216,11 +323,13 @@ class DiffusionTransformer3DBlockSwap(DiffusionTransformer3D):
 
                 if return_kv:
                     visual_embed, kv_cache = block_output
-                    # Store (k_cache, v_cache, visual_rope) for proper RoPE handling
                     k_cache, v_cache = kv_cache
                     kv_cache_dict_ret[i] = (k_cache, v_cache, visual_rope)
                 else:
-                    visual_embed = block_output
+                    if isinstance(block_output, tuple):
+                        visual_embed = block_output[0]
+                    else:
+                        visual_embed = block_output
 
         x = self.after_blocks(visual_embed, visual_shape, to_fractal, text_embed, time_embed)
 
