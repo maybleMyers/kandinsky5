@@ -1957,7 +1957,8 @@ def create_interface():
                 generate_btn.click(
                     fn=generate_video,
                     inputs=[
-                        prompt, negative_prompt, input_image, end_image, mode, model_config, dit_checkpoint_path, attention_engine,
+                        prompt, negative_prompt, input_image, end_image, normalize_latents, normalize_transition_frames,
+                        mode, model_config, dit_checkpoint_path, attention_engine,
                         attention_type, nabla_P, nabla_wT, nabla_wW, nabla_wH,
                         width, height, video_duration, sample_steps,
                         guidance_weight, scheduler_scale, seed,
