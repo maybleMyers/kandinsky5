@@ -188,6 +188,59 @@ def normalize_generated_frames_to_conditioning(latents, num_cond_frames=4, trans
     return samples
 
 
+def normalize_join_frames(latents, num_start_cond=1, num_end_cond=1, transition_frames=4, clump_values=True):
+    """
+    Normalize generated frames for video joining/image interpolation.
+    Handles dual-ended conditioning by normalizing frames near both the start and end.
+
+    Args:
+        latents: Full latent tensor [total_frames, H, W, C]
+        num_start_cond: Number of conditioning frames at the start
+        num_end_cond: Number of conditioning frames at the end
+        transition_frames: Number of frames to normalize at each end
+        clump_values: Whether to clamp normalized values to reference range
+
+    Returns:
+        Normalized latents with smooth transitions at both ends
+    """
+    latents_copy = latents.clone()
+    samples = latents_copy
+    total_frames = samples.shape[0]
+
+    # Calculate generated frame range
+    gen_start = num_start_cond
+    gen_end = total_frames - num_end_cond
+
+    if gen_start >= gen_end:
+        return latents  # No generated frames to normalize
+
+    # Normalize frames after start conditioning
+    start_cond_frames = samples[:num_start_cond]
+    num_start_normalize = min(transition_frames, gen_end - gen_start)
+    if num_start_normalize > 0:
+        start_gen_frames = samples[gen_start:gen_start + num_start_normalize]
+        normalized_start = adaptive_mean_std_normalization(start_gen_frames, start_cond_frames)
+        if clump_values:
+            min_val = start_cond_frames.min()
+            max_val = start_cond_frames.max()
+            normalized_start = torch.clamp(normalized_start, min_val, max_val)
+        samples[gen_start:gen_start + num_start_normalize] = normalized_start
+
+    # Normalize frames before end conditioning
+    end_cond_frames = samples[-num_end_cond:] if num_end_cond > 0 else samples[-1:]
+    num_end_normalize = min(transition_frames, gen_end - gen_start)
+    if num_end_normalize > 0:
+        end_gen_frames = samples[gen_end - num_end_normalize:gen_end]
+        normalized_end = adaptive_mean_std_normalization(end_gen_frames, end_cond_frames)
+        if clump_values:
+            min_val = end_cond_frames.min()
+            max_val = end_cond_frames.max()
+            normalized_end = torch.clamp(normalized_end, min_val, max_val)
+        samples[gen_end - num_end_normalize:gen_end] = normalized_end
+
+    return samples
+
+
 def log_vram_usage(stage_name, dit=None, vae=None, text_embedder=None):
     """Log VRAM usage and model locations for debugging."""
     if not torch.cuda.is_available():
@@ -1065,6 +1118,8 @@ def generate_sample_v2v_join(
     apg_momentum=0.9,
     apg_norm_threshold=55.0,
     apg_parallel_scale=0.3,
+    normalize_latents=True,
+    normalize_transition_frames=4,
 ):
     """
     Generate video joining with dual conditioning (start and end frames).
@@ -1204,6 +1259,25 @@ def generate_sample_v2v_join(
             print(f">>> Subtracted {noise_remaining.item():.4f} of original noise", flush=True)
     else:
         latent_visual = result
+
+    # Apply normalization to smooth transitions at both ends
+    if normalize_latents and normalize_transition_frames > 0:
+        with torch.no_grad():
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                # Ensure conditioning frames are preserved
+                start_cond_latents_device = start_cond_latents.to(device=latent_visual.device, dtype=latent_visual.dtype)
+                end_cond_latents_device = end_cond_latents.to(device=latent_visual.device, dtype=latent_visual.dtype)
+                latent_visual[:num_start_cond_frames] = start_cond_latents_device
+                latent_visual[-num_end_cond_frames:] = end_cond_latents_device
+                # Normalize generated frames to match conditioning frames
+                latent_visual = normalize_join_frames(
+                    latent_visual,
+                    num_start_cond=num_start_cond_frames,
+                    num_end_cond=num_end_cond_frames,
+                    transition_frames=normalize_transition_frames,
+                    clump_values=True
+                )
+                print(f">>> Applied normalization with {normalize_transition_frames} transition frames at each end")
 
     # Save latents if requested
     if save_latents:

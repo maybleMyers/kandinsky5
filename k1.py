@@ -96,6 +96,8 @@ def generate_video(
     negative_prompt: str,
     input_image: str,
     end_image: str,
+    normalize_latents: bool,
+    normalize_transition_frames: int,
     mode: str,
     model_config: str,
     dit_checkpoint_path: str,
@@ -275,6 +277,12 @@ def generate_video(
             # Add ending image for image interpolation if provided
             if end_image:
                 command.extend(["--end_image", str(end_image)])
+                # Add normalization parameters for image interpolation
+                if normalize_latents:
+                    command.append("--normalize_latents")
+                    command.extend(["--normalize_transition_frames", str(int(normalize_transition_frames))])
+                else:
+                    command.append("--no_normalize_latents")
             # Pass width and height for i2v mode to resize the input image
             command.extend(["--width", str(int(width))])
             command.extend(["--height", str(int(height))])
@@ -512,6 +520,9 @@ def generate_v2v_video(
     apg_momentum: float,
     apg_norm_threshold: float,
     apg_parallel_scale: float,
+    # Latent normalization for smooth transitions
+    normalize_latents: bool,
+    normalize_transition_frames: int,
     # Cache-dit / TaylorSeer options
     enable_cache: bool,
     enable_taylorseer: bool,
@@ -668,6 +679,13 @@ def generate_v2v_video(
             command.extend(["--apg_momentum", str(apg_momentum)])
             command.extend(["--apg_norm_threshold", str(apg_norm_threshold)])
             command.extend(["--apg_parallel_scale", str(apg_parallel_scale)])
+
+        # Latent normalization parameters
+        if normalize_latents:
+            command.append("--normalize_latents")
+            command.extend(["--normalize_transition_frames", str(int(normalize_transition_frames))])
+        else:
+            command.append("--no_normalize_latents")
 
         if enable_block_swap:
             command.append("--enable_block_swap")
@@ -1651,6 +1669,17 @@ def create_interface():
                             The model will generate frames that smoothly interpolate between the two images.
                             """)
                             end_image = gr.Image(label="Ending Image", type="filepath")
+                            gr.Markdown("#### Transition Smoothing")
+                            normalize_latents = gr.Checkbox(
+                                label="Enable Latent Normalization",
+                                value=True,
+                                info="Normalize generated frames for smoother transitions (reduces flash/blink)"
+                            )
+                            normalize_transition_frames = gr.Slider(
+                                minimum=0, maximum=10, value=4, step=1,
+                                label="Transition Frames",
+                                info="Number of frames to normalize at each transition point (default: 4)"
+                            )
 
                         gr.Markdown("### Generation Parameters")
                         mode = gr.Dropdown(
@@ -2121,6 +2150,22 @@ def create_interface():
                                 info="How much parallel (content) guidance to keep. 1.0 = normal CFG, 0.0 = only orthogonal (default: 0.3)"
                             )
 
+                        with gr.Accordion("Latent Normalization (Transition Smoothing)", open=False):
+                            gr.Markdown("""
+                            Normalize generated frames to match conditioning frames for smoother transitions.
+                            Reduces flash/blink artifacts at video join points.
+                            """)
+                            v2v_normalize_latents = gr.Checkbox(
+                                label="Enable Latent Normalization",
+                                value=True,
+                                info="Normalize generated frames to match conditioning frame statistics"
+                            )
+                            v2v_normalize_transition_frames = gr.Slider(
+                                minimum=0, maximum=10, value=4, step=1,
+                                label="Transition Frames",
+                                info="Number of frames to normalize at each transition point (default: 4)"
+                            )
+
                         with gr.Accordion("NABLA Sparse Attention Settings", open=False):
                             gr.Markdown("""
                             Configure NABLA sparse attention for memory-efficient long video generation. Recommended for 10s models.
@@ -2387,6 +2432,7 @@ def create_interface():
                         v2v_use_prompt_expansion, v2v_clip_prompt,
                         v2v_save_latents_checkbox,
                         v2v_use_apg, v2v_apg_momentum, v2v_apg_norm_threshold, v2v_apg_parallel_scale,
+                        v2v_normalize_latents, v2v_normalize_transition_frames,
                         # Cache-dit / TaylorSeer options
                         v2v_enable_cache, v2v_enable_taylorseer, v2v_taylorseer_order,
                         v2v_cache_Fn, v2v_cache_Bn, v2v_cache_rdt, v2v_cache_warmup, v2v_cache_max_steps,

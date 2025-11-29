@@ -558,6 +558,26 @@ def parse_args():
         help="How much of parallel guidance to keep (0-1, default: 0.3). 1.0 = normal CFG, 0.0 = only orthogonal"
     )
 
+    # Latent normalization for smooth transitions
+    parser.add_argument(
+        "--normalize_latents",
+        action='store_true',
+        default=True,
+        help="Apply latent normalization to smooth transitions in video joining/image interpolation (default: True)"
+    )
+    parser.add_argument(
+        "--no_normalize_latents",
+        action='store_true',
+        default=False,
+        help="Disable latent normalization"
+    )
+    parser.add_argument(
+        "--normalize_transition_frames",
+        type=int,
+        default=4,
+        help="Number of frames to normalize at each end for smooth transitions (default: 4, 0 to disable)"
+    )
+
     # VAE temporal chunking configuration
     parser.add_argument(
         "--vae_temporal_tile_frames",
@@ -1185,6 +1205,8 @@ if __name__ == "__main__":
                 apg_momentum=args.apg_momentum,
                 apg_norm_threshold=args.apg_norm_threshold,
                 apg_parallel_scale=args.apg_parallel_scale,
+                normalize_latents=args.normalize_latents and not args.no_normalize_latents,
+                normalize_transition_frames=args.normalize_transition_frames,
             )
 
             # Concatenate: video1 + generated middle + video2
@@ -1395,6 +1417,8 @@ if __name__ == "__main__":
                 apg_momentum=args.apg_momentum,
                 apg_norm_threshold=args.apg_norm_threshold,
                 apg_parallel_scale=args.apg_parallel_scale,
+                normalize_latents=args.normalize_latents and not args.no_normalize_latents,
+                normalize_transition_frames=args.normalize_transition_frames,
             )
 
             # Save the generated video directly (it already contains the full interpolation)
