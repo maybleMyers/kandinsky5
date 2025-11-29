@@ -254,6 +254,52 @@ def get_conditioning_frames_from_two_videos(video1_path, video2_path, num_frames
     return start_latents, end_latents, scale_factor
 
 
+def get_conditioning_frames_from_two_images(image1_path, image2_path, vae, device, alignment=16):
+    """
+    Load two images and encode them as conditioning frames for image-to-image video interpolation.
+
+    Args:
+        image1_path: Path to the start image
+        image2_path: Path to the end image
+        vae: VAE model
+        device: Device to use
+        alignment: Pixel alignment for resizing (use 128 for NABLA attention)
+
+    Returns:
+        Tuple of (start_latents, end_latents, scale_factor)
+        start_latents: Tensor of shape [1, H, W, C] from image1
+        end_latents: Tensor of shape [1, H, W, C] from image2
+    """
+    from PIL import Image
+
+    # Load and encode first image
+    pil_image1 = Image.open(image1_path).convert('RGB')
+    image1 = F.pil_to_tensor(pil_image1).unsqueeze(0)
+    image1, scale_factor = resize_image(image1, max_area=MAX_AREA, alignment=alignment)
+    target_h, target_w = image1.shape[2], image1.shape[3]
+    image1 = image1 / 127.5 - 1.
+
+    with torch.no_grad():
+        vae_dtype = next(vae.parameters()).dtype
+        image1 = image1.to(device=device, dtype=vae_dtype).transpose(0, 1).unsqueeze(0)
+        start_latents = vae.encode(image1, opt_tiling=False).latent_dist.sample().squeeze(0).permute(1, 2, 3, 0)
+        start_latents = start_latents * vae.config.scaling_factor
+
+    # Load and encode second image - resize to match first image dimensions
+    pil_image2 = Image.open(image2_path).convert('RGB')
+    image2 = F.pil_to_tensor(pil_image2).unsqueeze(0)
+    import torch.nn.functional as F_torch
+    image2 = F_torch.interpolate(image2.float(), size=(target_h, target_w), mode='bilinear', align_corners=False)
+    image2 = image2 / 127.5 - 1.
+
+    with torch.no_grad():
+        image2 = image2.to(device=device, dtype=vae_dtype).transpose(0, 1).unsqueeze(0)
+        end_latents = vae.encode(image2, opt_tiling=False).latent_dist.sample().squeeze(0).permute(1, 2, 3, 0)
+        end_latents = end_latents * vae.config.scaling_factor
+
+    return start_latents, end_latents, scale_factor
+
+
 def log_vram_usage(stage_name, dit=None, vae=None, text_embedder=None):
     """Log VRAM usage and model locations for debugging."""
     if not torch.cuda.is_available():

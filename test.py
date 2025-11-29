@@ -25,7 +25,7 @@ if _no_compile:
 
 from kandinsky import get_T2V_pipeline, get_I2V_pipeline, get_I2V_pipeline_with_block_swap, get_T2V_pipeline_with_block_swap, get_T2I_pipeline
 from kandinsky.generation_utils import generate_sample_from_checkpoint, generate_sample_i2v_from_checkpoint, generate_sample_v2v, generate_sample_v2v_join
-from kandinsky.i2v_pipeline import get_conditioning_frames_from_video, get_conditioning_frames_from_two_videos
+from kandinsky.i2v_pipeline import get_conditioning_frames_from_video, get_conditioning_frames_from_two_videos, get_conditioning_frames_from_two_images
 
 try:
     from scripts.latentpreviewer import LatentPreviewer
@@ -289,6 +289,12 @@ def parse_args():
         type=str,
         default="./assets/test_image.jpg",
         help="The input image for image-to-video generation"
+    )
+    parser.add_argument(
+        "--end_image",
+        type=str,
+        default=None,
+        help="Ending image for image-to-image video interpolation. Creates a video transitioning from --image to --end_image."
     )
     parser.add_argument(
         "--video",
@@ -1278,6 +1284,130 @@ if __name__ == "__main__":
                     options={"crf": "5"},
                 )
                 print(f">>> Saved joined video to {args.output_filename}")
+
+        elif args.end_image is not None:
+            # Image-to-Image interpolation mode - create video transitioning between two images
+            print(f">>> IMAGE INTERPOLATION MODE")
+            print(f">>> Start image: {args.image}")
+            print(f">>> End image: {args.end_image}")
+
+            alignment = 128 if args.attention_type == "nabla" else 32
+
+            # Load VAE for encoding images
+            force_offload = hasattr(pipe.dit, 'enable_block_swap') and pipe.dit.enable_block_swap
+            if pipe.offload or force_offload:
+                pipe.vae = pipe.vae.to(pipe.device_map["vae"], non_blocking=True)
+
+            # Encode both images as single-frame latents
+            start_cond_latents, end_cond_latents, scale_factor = get_conditioning_frames_from_two_images(
+                args.image,
+                args.end_image,
+                pipe.vae,
+                pipe.device_map["vae"],
+                alignment=alignment
+            )
+
+            # Offload VAE after encoding
+            if pipe.offload or force_offload:
+                pipe.vae = pipe.vae.to("cpu", non_blocking=True)
+                torch.cuda.empty_cache()
+
+            height, width = start_cond_latents.shape[1:3]
+            # Total frames includes: start_cond (1) + middle + end_cond (1)
+            total_frames = 1 if args.video_duration == 0 else args.video_duration * 24 // 4 + 1
+            shape = (1, total_frames, height, width, 16)
+
+            print(f">>> Start conditioning latents shape: {start_cond_latents.shape}")
+            print(f">>> End conditioning latents shape: {end_cond_latents.shape}")
+            print(f">>> Total frames (model expects): {total_frames}")
+            print(f">>> Output shape: {shape}")
+
+            # Create previewer for image interpolation mode
+            previewer = None
+            num_steps = args.sample_steps if args.sample_steps else pipe.num_steps
+            if LatentPreviewer is not None and args.preview is not None and args.preview > 0:
+                print(f"\n>>> IMAGE INTERP: Initializing previewer with preview={args.preview}")
+                try:
+                    g_temp = torch.Generator(device=pipe.device_map["dit"])
+                    g_temp.manual_seed(args.seed)
+                    # Preview middle section (exclude 1 frame from each end)
+                    middle_frames = total_frames - 2
+                    initial_latent = torch.randn(shape[0] * middle_frames, shape[2], shape[3], shape[4], device=pipe.device_map["dit"], generator=g_temp)
+                    initial_latent = initial_latent.permute(3, 0, 1, 2)
+
+                    timesteps = torch.linspace(1, 0, num_steps + 1, device=pipe.device_map["dit"])
+                    timesteps = args.scheduler_scale * timesteps / (1 + (args.scheduler_scale - 1) * timesteps)
+                    timesteps = timesteps[:-1] * 1000
+
+                    class Args:
+                        def __init__(self, save_path, fps):
+                            self.save_path = save_path
+                            self.fps = fps
+
+                    args_obj = Args(
+                        save_path=os.path.dirname(args.output_filename) if args.output_filename else './',
+                        fps=24
+                    )
+
+                    previewer = LatentPreviewer(
+                        args=args_obj,
+                        original_latents=initial_latent,
+                        timesteps=timesteps,
+                        device=pipe.device_map["dit"],
+                        dtype=torch.bfloat16,
+                        model_type="hunyuan"
+                    )
+                    print(f">>> IMAGE INTERP: Previewer initialized successfully")
+                except Exception as e:
+                    print(f">>> IMAGE INTERP: Failed to initialize previewer: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    previewer = None
+
+            # Generate video using dual conditioning (same as video join but with single-frame latents)
+            x = generate_sample_v2v_join(
+                shape,
+                args.prompt,
+                pipe.dit,
+                pipe.vae,
+                pipe.conf,
+                text_embedder=pipe.text_embedder,
+                start_cond_latents=start_cond_latents,
+                end_cond_latents=end_cond_latents,
+                num_steps=num_steps,
+                guidance_weight=args.guidance_weight if args.guidance_weight else pipe.guidance_weight,
+                scheduler_scale=args.scheduler_scale,
+                negative_caption=args.negative_prompt,
+                clip_prompt=args.clip_prompt,
+                seed=args.seed,
+                device=pipe.device_map["dit"],
+                vae_device=pipe.device_map["vae"],
+                progress=True,
+                offload=pipe.offload,
+                force_offload=force_offload,
+                previewer=previewer,
+                preview_interval=args.preview,
+                preview_suffix=args.preview_suffix,
+                stop_check=check_stop_signals,
+                checkpoint_path=checkpoint_file,
+                save_latents=args.save_latents,
+                use_apg=args.use_apg,
+                apg_momentum=args.apg_momentum,
+                apg_norm_threshold=args.apg_norm_threshold,
+                apg_parallel_scale=args.apg_parallel_scale,
+            )
+
+            # Save the generated video directly (it already contains the full interpolation)
+            if x is not None:
+                import torchvision
+                for video in x:
+                    torchvision.io.write_video(
+                        args.output_filename,
+                        video.float().permute(1, 2, 3, 0).cpu().numpy(),
+                        fps=24,
+                        options={"crf": "5"},
+                    )
+                print(f">>> Saved image interpolation video to {args.output_filename}")
 
         elif args.video is not None:
             # Video-to-Video continuation mode

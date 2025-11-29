@@ -95,6 +95,7 @@ def generate_video(
     prompt: str,
     negative_prompt: str,
     input_image: str,
+    end_image: str,
     mode: str,
     model_config: str,
     dit_checkpoint_path: str,
@@ -271,6 +272,9 @@ def generate_video(
                 yield all_generated_videos, "Error: Input image required for i2v mode.", ""
                 return
             command.extend(["--image", str(input_image)])
+            # Add ending image for image interpolation if provided
+            if end_image:
+                command.extend(["--end_image", str(end_image)])
             # Pass width and height for i2v mode to resize the input image
             command.extend(["--width", str(int(width))])
             command.extend(["--height", str(int(height))])
@@ -507,6 +511,7 @@ def generate_v2v_video(
     use_apg: bool,
     apg_momentum: float,
     apg_norm_threshold: float,
+    apg_parallel_scale: float,
     # Cache-dit / TaylorSeer options
     enable_cache: bool,
     enable_taylorseer: bool,
@@ -662,6 +667,7 @@ def generate_v2v_video(
             command.append("--use_apg")
             command.extend(["--apg_momentum", str(apg_momentum)])
             command.extend(["--apg_norm_threshold", str(apg_norm_threshold)])
+            command.extend(["--apg_parallel_scale", str(apg_parallel_scale)])
 
         if enable_block_swap:
             command.append("--enable_block_swap")
@@ -815,6 +821,7 @@ def generate_v2v_video(
                     "use_apg": use_apg,
                     "apg_momentum": apg_momentum if use_apg else None,
                     "apg_norm_threshold": apg_norm_threshold if use_apg else None,
+                    "apg_parallel_scale": apg_parallel_scale if use_apg else None,
                     # Extra settings
                     "clip_prompt": clip_prompt.strip() if clip_prompt and clip_prompt.strip() else None,
                     "use_prompt_expansion": use_prompt_expansion,
@@ -1638,6 +1645,13 @@ def create_interface():
                     with gr.Column():
                         input_image = gr.Image(label="Input Image (for i2v mode)", type="filepath")
 
+                        with gr.Accordion("Ending Image (Image Interpolation)", open=False):
+                            gr.Markdown("""
+                            Provide an ending image to create a video that transitions from the input image to this ending image.
+                            The model will generate frames that smoothly interpolate between the two images.
+                            """)
+                            end_image = gr.Image(label="Ending Image", type="filepath")
+
                         gr.Markdown("### Generation Parameters")
                         mode = gr.Dropdown(
                             label="Mode",
@@ -1914,7 +1928,7 @@ def create_interface():
                 generate_btn.click(
                     fn=generate_video,
                     inputs=[
-                        prompt, negative_prompt, input_image, mode, model_config, dit_checkpoint_path, attention_engine,
+                        prompt, negative_prompt, input_image, end_image, mode, model_config, dit_checkpoint_path, attention_engine,
                         attention_type, nabla_P, nabla_wT, nabla_wW, nabla_wH,
                         width, height, video_duration, sample_steps,
                         guidance_weight, scheduler_scale, seed,
@@ -2082,7 +2096,8 @@ def create_interface():
 
                         with gr.Accordion("APG (Adaptive Projected Guidance)", open=False):
                             gr.Markdown("""
-                            APG screws up the contiuation. NOT FINISHED YET. can make some different outputs though.
+                            APG reduces color drift in video continuation by decomposing CFG guidance into parallel (content) and orthogonal (style) components.
+                            Use **Parallel Scale** to balance coherence vs drift reduction.
                             """)
                             v2v_use_apg = gr.Checkbox(
                                 label="Enable APG",
@@ -2091,15 +2106,20 @@ def create_interface():
                             )
                             with gr.Row():
                                 v2v_apg_momentum = gr.Slider(
-                                    minimum=-1.0, maximum=0.0, value=-0.75, step=0.05,
+                                    minimum=0.0, maximum=1.0, value=0.9, step=0.05,
                                     label="APG Momentum",
-                                    info="Momentum for running average (default: -0.75)"
+                                    info="Smoothing factor for running average (default: 0.9, higher = smoother)"
                                 )
                                 v2v_apg_norm_threshold = gr.Slider(
                                     minimum=0, maximum=100, value=55.0, step=1.0,
                                     label="APG Norm Threshold",
-                                    info="Threshold for guidance clipping (default: 55.0)"
+                                    info="Per-frame norm clipping threshold (default: 55.0)"
                                 )
+                            v2v_apg_parallel_scale = gr.Slider(
+                                minimum=0.0, maximum=1.0, value=0.3, step=0.05,
+                                label="APG Parallel Scale",
+                                info="How much parallel (content) guidance to keep. 1.0 = normal CFG, 0.0 = only orthogonal (default: 0.3)"
+                            )
 
                         with gr.Accordion("NABLA Sparse Attention Settings", open=False):
                             gr.Markdown("""
@@ -2366,7 +2386,7 @@ def create_interface():
                         v2v_vae_spatial_tile_height, v2v_vae_spatial_tile_width,
                         v2v_use_prompt_expansion, v2v_clip_prompt,
                         v2v_save_latents_checkbox,
-                        v2v_use_apg, v2v_apg_momentum, v2v_apg_norm_threshold,
+                        v2v_use_apg, v2v_apg_momentum, v2v_apg_norm_threshold, v2v_apg_parallel_scale,
                         # Cache-dit / TaylorSeer options
                         v2v_enable_cache, v2v_enable_taylorseer, v2v_taylorseer_order,
                         v2v_cache_Fn, v2v_cache_Bn, v2v_cache_rdt, v2v_cache_warmup, v2v_cache_max_steps,
