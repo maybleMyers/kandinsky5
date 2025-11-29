@@ -23,6 +23,34 @@ def count_tokens(text):
         return 0
     return len(enc.encode(text))
 
+
+def get_lora_options(lora_folder: str = "lora") -> List[str]:
+    """Get list of available LoRA files in the specified folder."""
+    if not lora_folder or not os.path.exists(lora_folder):
+        return ["None"]
+    # For Kandinsky, LoRAs are in subdirectories with config_lora.json and lora.safetensors
+    lora_dirs = []
+    for item in os.listdir(lora_folder):
+        item_path = os.path.join(lora_folder, item)
+        if os.path.isdir(item_path):
+            config_path = os.path.join(item_path, "config_lora.json")
+            weights_path = os.path.join(item_path, "lora.safetensors")
+            if os.path.exists(config_path) and os.path.exists(weights_path):
+                lora_dirs.append(item)
+    lora_dirs.sort()
+    return ["None"] + lora_dirs
+
+
+def refresh_lora_dropdowns(lora_folder: str) -> List[gr.update]:
+    """Refresh LoRA dropdown choices."""
+    new_choices = get_lora_options(lora_folder)
+    print(f"Refreshing LoRA dropdowns. Found: {new_choices}")
+    results = []
+    for i in range(4):
+        results.append(gr.update(choices=new_choices, value="None"))
+    return results
+
+
 stop_event = threading.Event()
 current_process = None  # Track the currently running process
 current_output_filename = None  # Track current output filename for early stop signals
@@ -114,6 +142,11 @@ def generate_video(
     cache_rdt: float,
     cache_warmup: int,
     cache_max_steps: int,
+    # LoRA options
+    lora_folder: str,
+    lora1_str: str, lora2_str: str, lora3_str: str, lora4_str: str,
+    lora1_mult: float, lora2_mult: float, lora3_mult: float, lora4_mult: float,
+    no_lora_triggers: bool,
 ) -> Generator[Tuple[List[Tuple[str, str]], Optional[str], str, str], None, None]:
     global stop_event, current_process, current_output_filename
     stop_event.clear()
@@ -275,6 +308,21 @@ def generate_video(
         if save_latents:
             latents_filename = os.path.join(save_path, f"k1_{mode}_{timestamp}_{current_seed}_latents.pt")
             command.extend(["--save_latents", latents_filename])
+
+        # LoRA handling
+        lora_inputs = [
+            (lora1_str, lora1_mult), (lora2_str, lora2_mult),
+            (lora3_str, lora3_mult), (lora4_str, lora4_mult)
+        ]
+        if lora_folder and os.path.exists(lora_folder):
+            for name, mult in lora_inputs:
+                if name and name != "None":
+                    lora_path = os.path.join(lora_folder, name)
+                    if os.path.exists(lora_path):
+                        command.extend(["--lora_path", lora_path])
+                        if no_lora_triggers:
+                            command.append("--no_lora_triggers")
+                        break  # Only one LoRA supported at a time for now
 
         # Print the command for debugging/transparency
         print("\n" + "="*80)
@@ -468,6 +516,11 @@ def generate_v2v_video(
     cache_rdt: float,
     cache_warmup: int,
     cache_max_steps: int,
+    # LoRA options
+    lora_folder: str,
+    lora1_str: str, lora2_str: str, lora3_str: str, lora4_str: str,
+    lora1_mult: float, lora2_mult: float, lora3_mult: float, lora4_mult: float,
+    no_lora_triggers: bool,
 ) -> Generator[Tuple[List[Tuple[str, str]], Optional[str], str, str], None, None]:
     """Generate video from video input (video continuation/v2v mode)."""
     global stop_event, current_process, current_output_filename
@@ -640,6 +693,21 @@ def generate_v2v_video(
         if save_latents:
             latents_filename = os.path.join(save_path, f"k1_v2v_{timestamp}_{current_seed}_latents.pt")
             command.extend(["--save_latents", latents_filename])
+
+        # LoRA handling
+        lora_inputs = [
+            (lora1_str, lora1_mult), (lora2_str, lora2_mult),
+            (lora3_str, lora3_mult), (lora4_str, lora4_mult)
+        ]
+        if lora_folder and os.path.exists(lora_folder):
+            for name, mult in lora_inputs:
+                if name and name != "None":
+                    lora_path = os.path.join(lora_folder, name)
+                    if os.path.exists(lora_path):
+                        command.extend(["--lora_path", lora_path])
+                        if no_lora_triggers:
+                            command.append("--no_lora_triggers")
+                        break  # Only one LoRA supported at a time for now
 
         # Print the command for debugging/transparency
         print("\n" + "="*80)
@@ -1698,6 +1766,21 @@ def create_interface():
                             scale=3
                         )
                         decode_latents_btn = gr.Button("Decode from Saved Latents", elem_classes="light-blue-btn", scale=1)
+                        with gr.Row():
+                            lora_folder = gr.Textbox(label="LoRA Folder", value="lora", scale=4)
+                            lora_refresh_btn = gr.Button("🔄 LoRA", elem_classes="refresh-btn")
+                        lora_weights = []
+                        lora_multipliers = []
+                        for i in range(4):
+                            with gr.Row():
+                                lora_weights.append(gr.Dropdown(
+                                    label=f"LoRA {i+1}", choices=get_lora_options("lora"),
+                                    value="None", allow_custom_value=False, interactive=True, scale=2
+                                ))
+                                lora_multipliers.append(gr.Slider(
+                                    label=f"Multiplier", minimum=0.0, maximum=2.0, step=0.05, value=1.0, scale=1, interactive=True
+                                ))
+                        no_lora_triggers = gr.Checkbox(label="Disable LoRA Trigger Words", value=False, info="Disable automatic concatenation of trigger words to prompts")
 
                 with gr.Accordion("Model Settings & Performance", open=True):
                     with gr.Row():
@@ -1845,9 +1928,20 @@ def create_interface():
                         save_latents_checkbox,
                         # Cache-dit / TaylorSeer options
                         enable_cache, enable_taylorseer, taylorseer_order,
-                        cache_Fn, cache_Bn, cache_rdt, cache_warmup, cache_max_steps
+                        cache_Fn, cache_Bn, cache_rdt, cache_warmup, cache_max_steps,
+                        # LoRA options
+                        lora_folder, lora_weights[0], lora_weights[1], lora_weights[2], lora_weights[3],
+                        lora_multipliers[0], lora_multipliers[1], lora_multipliers[2], lora_multipliers[3],
+                        no_lora_triggers
                     ],
                     outputs=[output, preview_output, batch_progress, progress_text]
+                )
+
+                # LoRA refresh button
+                lora_refresh_btn.click(
+                    fn=refresh_lora_dropdowns,
+                    inputs=[lora_folder],
+                    outputs=lora_weights
                 )
 
                 stop_btn.click(
@@ -2103,6 +2197,21 @@ def create_interface():
                             scale=3
                         )
                         v2v_decode_latents_btn = gr.Button("Decode from Saved Latents", elem_classes="light-blue-btn", scale=1)
+                        with gr.Row():
+                            v2v_lora_folder = gr.Textbox(label="LoRA Folder", value="lora", scale=4)
+                            v2v_lora_refresh_btn = gr.Button("🔄 LoRA", elem_classes="refresh-btn")
+                        v2v_lora_weights = []
+                        v2v_lora_multipliers = []
+                        for i in range(4):
+                            with gr.Row():
+                                v2v_lora_weights.append(gr.Dropdown(
+                                    label=f"LoRA {i+1}", choices=get_lora_options("lora"),
+                                    value="None", allow_custom_value=False, interactive=True, scale=2
+                                ))
+                                v2v_lora_multipliers.append(gr.Slider(
+                                    label=f"Multiplier", minimum=0.0, maximum=2.0, step=0.05, value=1.0, scale=1, interactive=True
+                                ))
+                        v2v_no_lora_triggers = gr.Checkbox(label="Disable LoRA Trigger Words", value=False, info="Disable automatic concatenation of trigger words to prompts")
 
                 with gr.Accordion("Model Settings & Performance", open=True):
                     with gr.Row():
@@ -2260,9 +2369,20 @@ def create_interface():
                         v2v_use_apg, v2v_apg_momentum, v2v_apg_norm_threshold,
                         # Cache-dit / TaylorSeer options
                         v2v_enable_cache, v2v_enable_taylorseer, v2v_taylorseer_order,
-                        v2v_cache_Fn, v2v_cache_Bn, v2v_cache_rdt, v2v_cache_warmup, v2v_cache_max_steps
+                        v2v_cache_Fn, v2v_cache_Bn, v2v_cache_rdt, v2v_cache_warmup, v2v_cache_max_steps,
+                        # LoRA options
+                        v2v_lora_folder, v2v_lora_weights[0], v2v_lora_weights[1], v2v_lora_weights[2], v2v_lora_weights[3],
+                        v2v_lora_multipliers[0], v2v_lora_multipliers[1], v2v_lora_multipliers[2], v2v_lora_multipliers[3],
+                        v2v_no_lora_triggers
                     ],
                     outputs=[v2v_output, v2v_preview_output, v2v_batch_progress, v2v_progress_text]
+                )
+
+                # V2V LoRA refresh button
+                v2v_lora_refresh_btn.click(
+                    fn=refresh_lora_dropdowns,
+                    inputs=[v2v_lora_folder],
+                    outputs=v2v_lora_weights
                 )
 
                 v2v_stop_btn.click(

@@ -646,6 +646,26 @@ def parse_args():
         help="Maximum cached steps before forcing recompute (-1 for unlimited, default: -1)"
     )
 
+    # LoRA configuration
+    parser.add_argument(
+        "--lora_path",
+        type=str,
+        default=None,
+        help="Local path to LoRA adapter directory (must contain config_lora.json and lora.safetensors)"
+    )
+    parser.add_argument(
+        "--lora_name",
+        type=str,
+        default=None,
+        help="Name for the LoRA adapter (used for identification, defaults to directory name)"
+    )
+    parser.add_argument(
+        "--no_lora_triggers",
+        action='store_true',
+        default=False,
+        help="Disable automatic concatenation of LoRA trigger words to prompts"
+    )
+
     args = parser.parse_args()
     return args
 
@@ -818,6 +838,29 @@ if __name__ == "__main__":
                 vae_spatial_tile_height=args.vae_spatial_tile_height,
                 vae_spatial_tile_width=args.vae_spatial_tile_width,
             )
+
+    # Load LoRA adapter if specified
+    if args.lora_path:
+        lora_config = os.path.join(args.lora_path, "config_lora.json")
+        lora_weights = os.path.join(args.lora_path, "lora.safetensors")
+        lora_name = args.lora_name if args.lora_name else os.path.basename(args.lora_path)
+
+        if not os.path.exists(lora_config):
+            raise FileNotFoundError(f"LoRA config not found: {lora_config}")
+        if not os.path.exists(lora_weights):
+            raise FileNotFoundError(f"LoRA weights not found: {lora_weights}")
+
+        print(f"Loading LoRA adapter '{lora_name}' from {args.lora_path}")
+        pipe.load_adapter(
+            adapter_config=lora_config,
+            adapter_path=lora_weights,
+            adapter_name=lora_name
+        )
+        if args.no_lora_triggers:
+            pipe.peft_triggers = {}
+            print(f"LoRA adapter loaded. Trigger word concatenation disabled.")
+        else:
+            print(f"LoRA adapter loaded. Trigger words: {pipe.peft_triggers}")
 
     if args.output_filename is None:
         # Determine file extension based on generation mode
