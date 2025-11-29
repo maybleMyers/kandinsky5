@@ -857,10 +857,10 @@ if __name__ == "__main__":
             adapter_name=lora_name
         )
         if args.no_lora_triggers:
-            pipe.peft_triggers = {}
+            pipe.peft_trigger = ""
             print(f"LoRA adapter loaded. Trigger word concatenation disabled.")
         else:
-            print(f"LoRA adapter loaded. Trigger words: {pipe.peft_triggers}")
+            print(f"LoRA adapter loaded. Trigger word: '{pipe.peft_trigger}'")
 
     if args.output_filename is None:
         # Determine file extension based on generation mode
