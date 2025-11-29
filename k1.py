@@ -1855,7 +1855,7 @@ def create_interface():
                         """)
                         with gr.Row():
                             enable_cache = gr.Checkbox(label="Enable Cache", value=False, info="Enable DBCache acceleration")
-                            enable_taylorseer = gr.Checkbox(label="Enable TaylorSeer", value=True, info="Use Taylor series for better accuracy")
+                            enable_taylorseer = gr.Checkbox(label="Enable TaylorSeer", value=False, info="Use Taylor series for better accuracy")
                             taylorseer_order = gr.Slider(minimum=1, maximum=3, value=1, step=1, label="TaylorSeer Order", info="Taylor expansion order (1 recommended)")
                         with gr.Row():
                             cache_Fn = gr.Slider(minimum=0, maximum=32, value=8, step=1, label="Fn Compute Blocks", info="First N blocks to always compute")
@@ -2286,7 +2286,7 @@ def create_interface():
                         """)
                         with gr.Row():
                             v2v_enable_cache = gr.Checkbox(label="Enable Cache", value=False, info="Enable DBCache acceleration")
-                            v2v_enable_taylorseer = gr.Checkbox(label="Enable TaylorSeer", value=True, info="Use Taylor series for better accuracy")
+                            v2v_enable_taylorseer = gr.Checkbox(label="Enable TaylorSeer", value=False, info="Use Taylor series for better accuracy")
                             v2v_taylorseer_order = gr.Slider(minimum=1, maximum=3, value=1, step=1, label="TaylorSeer Order", info="Taylor expansion order (1 recommended)")
                         with gr.Row():
                             v2v_cache_Fn = gr.Slider(minimum=0, maximum=32, value=8, step=1, label="Fn Compute Blocks", info="First N blocks to always compute")
