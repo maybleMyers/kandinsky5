@@ -1570,12 +1570,17 @@ def generate_sample_i2v(
         latent_visual = result
 
     # Apply first frame normalization for i2v
+    # Normalize generated frames (1-4) to match the input image (frame 0)
+    # This ensures smooth transition from input image to generated content
     with torch.no_grad():
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             if first_frames is not None:
                 first_frames = first_frames.to(device=latent_visual.device, dtype=latent_visual.dtype)
                 latent_visual[:1] = first_frames
-                latent_visual = normalize_first_frame(latent_visual)
+                # Normalize frames 1-4 to match frame 0 (the input image) for smooth transition
+                latent_visual = normalize_generated_frames_to_conditioning(
+                    latent_visual, num_cond_frames=1, transition_frames=4, clump_values=True
+                )
 
     # Save latents before VAE decoding if requested
     if save_latents:
@@ -1998,12 +2003,17 @@ def generate_sample_i2v_from_checkpoint(
         latent_visual = result
 
     # Apply first frame normalization for i2v
+    # Normalize generated frames (1-4) to match the input image (frame 0)
+    # This ensures smooth transition from input image to generated content
     with torch.no_grad():
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             if first_frames is not None:
                 first_frames = first_frames.to(device=latent_visual.device, dtype=latent_visual.dtype)
                 latent_visual[:1] = first_frames
-                latent_visual = normalize_first_frame(latent_visual)
+                # Normalize frames 1-4 to match frame 0 (the input image) for smooth transition
+                latent_visual = normalize_generated_frames_to_conditioning(
+                    latent_visual, num_cond_frames=1, transition_frames=4, clump_values=True
+                )
 
     # Offload DiT before VAE decode
     if hasattr(dit, 'offload_all_blocks'):
