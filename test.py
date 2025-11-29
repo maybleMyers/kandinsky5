@@ -536,14 +536,20 @@ def parse_args():
     parser.add_argument(
         "--apg_momentum",
         type=float,
-        default=-0.75,
-        help="Momentum for APG running average (default: -0.75)"
+        default=0.9,
+        help="Momentum for APG running average (default: 0.9, higher = smoother)"
     )
     parser.add_argument(
         "--apg_norm_threshold",
         type=float,
         default=55.0,
-        help="Norm threshold for APG guidance clipping (default: 55.0)"
+        help="Per-frame norm threshold for APG guidance clipping (default: 55.0)"
+    )
+    parser.add_argument(
+        "--apg_parallel_scale",
+        type=float,
+        default=0.3,
+        help="How much of parallel guidance to keep (0-1, default: 0.3). 1.0 = normal CFG, 0.0 = only orthogonal"
     )
 
     # VAE temporal chunking configuration
@@ -1172,6 +1178,7 @@ if __name__ == "__main__":
                 use_apg=args.use_apg,
                 apg_momentum=args.apg_momentum,
                 apg_norm_threshold=args.apg_norm_threshold,
+                apg_parallel_scale=args.apg_parallel_scale,
             )
 
             # Concatenate: video1 + generated middle + video2
@@ -1382,6 +1389,7 @@ if __name__ == "__main__":
                 use_apg=args.use_apg,
                 apg_momentum=args.apg_momentum,
                 apg_norm_threshold=args.apg_norm_threshold,
+                apg_parallel_scale=args.apg_parallel_scale,
             )
 
             # Concatenate input video with newly generated frames
