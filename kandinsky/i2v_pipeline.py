@@ -306,7 +306,10 @@ def get_conditioning_frames_from_two_videos(video1_path, video2_path, num_frames
 
 def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24, max_frames=None):
     """
-    Load a video file and encode all frames to latent space.
+    Load a video file and encode to latent space with proper temporal compression.
+
+    The VAE has 4x temporal compression, so 121 video frames -> 31 latent frames.
+    Videos are processed in chunks to handle long videos.
 
     Args:
         video_path: Path to the video file
@@ -314,14 +317,15 @@ def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24
         device: Device to use
         alignment: Pixel alignment for resizing
         target_fps: Target FPS for frame extraction
-        max_frames: Maximum number of frames to encode (None = all frames)
+        max_frames: Maximum number of video frames to process (None = all frames)
 
     Returns:
-        Tuple of (latents, scale_factor, num_frames)
-        latents: Tensor of shape [num_frames, H, W, C]
+        Tuple of (latents, scale_factor, num_latent_frames)
+        latents: Tensor of shape [num_latent_frames, H, W, C]
     """
     import av
     import numpy as np
+    import torch.nn.functional as F_torch
 
     container = av.open(video_path)
     video_stream = container.streams.video[0]
@@ -335,7 +339,7 @@ def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24
     else:
         frame_skip = 1
 
-    # Decode frames
+    # Decode all frames
     pil_frames = []
     frame_count = 0
     for frame in container.decode(video=0):
@@ -351,39 +355,71 @@ def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24
     if len(pil_frames) == 0:
         raise ValueError(f"No frames extracted from video: {video_path}")
 
-    print(f">>> Extracted {len(pil_frames)} frames from video", flush=True)
+    num_video_frames = len(pil_frames)
+    print(f">>> Extracted {num_video_frames} video frames", flush=True)
 
     # Determine target size from first frame
     first_image = F.pil_to_tensor(pil_frames[0]).unsqueeze(0)
     first_image, scale_factor = resize_image(first_image, max_area=MAX_AREA, alignment=alignment)
     target_h, target_w = first_image.shape[2], first_image.shape[3]
 
-    # Encode all frames
-    latents_list = []
+    # Convert all frames to tensors
+    frame_tensors = []
+    for pil_image in pil_frames:
+        image = F.pil_to_tensor(pil_image).unsqueeze(0).float()
+        if image.shape[2] != target_h or image.shape[3] != target_w:
+            image = F_torch.interpolate(image, size=(target_h, target_w), mode='bilinear', align_corners=False)
+        image = image / 127.5 - 1.
+        frame_tensors.append(image)
+
+    # Stack all frames: [N, 1, C, H, W] -> [1, C, N, H, W]
+    all_frames = torch.cat(frame_tensors, dim=0)  # [N, C, H, W]
+    all_frames = all_frames.permute(1, 0, 2, 3).unsqueeze(0)  # [1, C, N, H, W]
+
     vae_dtype = next(vae.parameters()).dtype
 
-    print(f">>> Encoding {len(pil_frames)} frames to latent space...", flush=True)
+    # Encode video in chunks
+    # VAE temporal compression is 4x, so 121 video frames -> ~31 latent frames
+    # Process in chunks of 121 video frames (5 seconds at 24fps) to match model training
+    video_chunk_size = 121  # 5 seconds of video at 24fps
+    latent_chunks = []
 
-    for i, pil_image in enumerate(pil_frames):
-        image = F.pil_to_tensor(pil_image).unsqueeze(0)
-        # Resize to match first frame dimensions
-        import torch.nn.functional as F_torch
-        if image.shape[2] != target_h or image.shape[3] != target_w:
-            image = F_torch.interpolate(image.float(), size=(target_h, target_w), mode='bilinear', align_corners=False)
-        image = image / 127.5 - 1.
+    print(f">>> Encoding video to latent space (4x temporal compression)...", flush=True)
 
-        with torch.no_grad():
-            image = image.to(device=device, dtype=vae_dtype).transpose(0, 1).unsqueeze(0)
-            lat_image = vae.encode(image, opt_tiling=False).latent_dist.sample().squeeze(0).permute(1, 2, 3, 0)
-            lat_image = lat_image * vae.config.scaling_factor
-            latents_list.append(lat_image)
+    with torch.no_grad():
+        for chunk_start in range(0, num_video_frames, video_chunk_size):
+            chunk_end = min(chunk_start + video_chunk_size, num_video_frames)
 
-        if (i + 1) % 10 == 0:
-            print(f">>> Encoded {i + 1}/{len(pil_frames)} frames", flush=True)
+            # Ensure chunk has valid temporal size for VAE
+            # VAE needs (T-1) divisible by 4 for clean compression
+            actual_chunk_frames = chunk_end - chunk_start
 
-    # Stack latents: [num_frames, H, W, C]
-    latents = torch.cat(latents_list, dim=0)
-    print(f">>> Video encoded to latents: {latents.shape}", flush=True)
+            print(f">>> Encoding video frames {chunk_start}-{chunk_end} ({actual_chunk_frames} frames)...", flush=True)
+
+            # Extract chunk: [1, C, chunk_frames, H, W]
+            chunk = all_frames[:, :, chunk_start:chunk_end, :, :]
+            chunk = chunk.to(device=device, dtype=vae_dtype)
+
+            # Encode chunk
+            latent_chunk = vae.encode(chunk, opt_tiling=False).latent_dist.sample()
+            # Output shape: [1, latent_C, latent_T, latent_H, latent_W]
+
+            # Convert to [latent_T, latent_H, latent_W, latent_C] format
+            latent_chunk = latent_chunk.squeeze(0).permute(1, 2, 3, 0)
+            latent_chunk = latent_chunk * vae.config.scaling_factor
+
+            latent_chunks.append(latent_chunk.cpu())
+
+            # Clear GPU memory
+            del chunk
+            torch.cuda.empty_cache()
+
+    # Concatenate all latent chunks
+    latents = torch.cat(latent_chunks, dim=0)
+    num_latent_frames = latents.shape[0]
+
+    print(f">>> Video encoded: {num_video_frames} video frames -> {num_latent_frames} latent frames", flush=True)
+    print(f">>> Latent shape: {latents.shape}", flush=True)
 
     return latents, scale_factor, len(pil_frames)
 

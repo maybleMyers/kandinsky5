@@ -849,7 +849,7 @@ if __name__ == "__main__":
             torch.cuda.empty_cache()
 
         print(f">>> Video latents shape: {video_latents.shape}")
-        print(f">>> Total frames: {num_frames}")
+        print(f">>> Input video frames: {num_frames}, Latent frames: {video_latents.shape[0]}")
 
         # Load text embedder if needed
         if pipe.offload or force_offload:

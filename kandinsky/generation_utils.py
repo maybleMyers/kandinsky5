@@ -2023,12 +2023,15 @@ def generate_sample_denoise(
     progress=True,
     offload=False,
     force_offload=False,
+    chunk_frames=31,
+    chunk_overlap=4,
 ):
     """
     Apply light denoising to video latents (v2v img2img style).
 
     This takes already-encoded video latents, adds a small amount of noise,
     and denoises them. Useful for smoothing artifacts at video join points.
+    Processes video in chunks to handle videos longer than 5 seconds.
 
     Args:
         video_latents: Pre-encoded video latents [frames, H, W, C]
@@ -2041,6 +2044,8 @@ def generate_sample_denoise(
         num_steps: Base number of denoising steps
         guidance_weight: CFG weight (lower like 2-3 for preservation)
         scheduler_scale: Scheduler scale
+        chunk_frames: Max frames per chunk (default 31 = 5 seconds)
+        chunk_overlap: Overlap frames between chunks for blending (default 4)
         ...
 
     Returns:
@@ -2048,11 +2053,11 @@ def generate_sample_denoise(
     """
     text_embedder.embedder.mode = "i2v"
 
-    num_frames = video_latents.shape[0]
+    total_frames = video_latents.shape[0]
     height, width = video_latents.shape[1:3]
     dim = video_latents.shape[3]
 
-    type_of_content = "video" if num_frames > 1 else "image"
+    type_of_content = "video"
 
     with torch.no_grad():
         clip_texts = [clip_prompt] if clip_prompt else None
@@ -2081,11 +2086,6 @@ def generate_sample_denoise(
     attention_mask = attention_mask.to(device=device)
     null_attention_mask = null_attention_mask.to(device=device)
 
-    visual_rope_pos = [
-        torch.arange(num_frames),
-        torch.arange(height // conf.model.dit_params.patch_size[1]),
-        torch.arange(width // conf.model.dit_params.patch_size[2]),
-    ]
     text_rope_pos = torch.arange(text_cu_seqlens)
     null_text_rope_pos = torch.arange(null_text_cu_seqlens)
 
@@ -2095,35 +2095,98 @@ def generate_sample_denoise(
         dit.to(device, non_blocking=True)
 
     # Set random seed for reproducible noise
-    g = torch.Generator(device=device)
-    g.manual_seed(seed)
     torch.manual_seed(seed)
+
+    # Process video in chunks
+    num_chunks = (total_frames + chunk_frames - chunk_overlap - 1) // (chunk_frames - chunk_overlap)
+    num_chunks = max(1, num_chunks)
+
+    print(f">>> Denoising video with strength {denoise_strength}...", flush=True)
+    print(f">>> Total frames: {total_frames}, processing in {num_chunks} chunk(s) of {chunk_frames} frames", flush=True)
+
+    # Output buffer for denoised latents
+    denoised_latents = torch.zeros_like(video_latents)
+    blend_weights = torch.zeros(total_frames, 1, 1, 1, device=video_latents.device, dtype=video_latents.dtype)
 
     with torch.no_grad():
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            print(f">>> Denoising video with strength {denoise_strength}...", flush=True)
-            latents_device = video_latents.to(device=device, dtype=torch.bfloat16)
+            chunk_start = 0
+            chunk_idx = 0
 
-            result = generate_denoise(
-                dit,
-                device,
-                latents_device,
-                start_timestep=denoise_strength,
-                num_steps=num_steps,
-                text_embeds=bs_text_embed,
-                null_text_embeds=bs_null_text_embed,
-                visual_rope_pos=visual_rope_pos,
-                text_rope_pos=text_rope_pos,
-                null_text_rope_pos=null_text_rope_pos,
-                guidance_weight=guidance_weight,
-                scheduler_scale=scheduler_scale,
-                conf=conf,
-                progress=progress,
-                attention_mask=attention_mask,
-                null_attention_mask=null_attention_mask,
-            )
+            while chunk_start < total_frames:
+                chunk_end = min(chunk_start + chunk_frames, total_frames)
+                actual_chunk_size = chunk_end - chunk_start
 
-    latent_visual = result
+                print(f">>> Processing chunk {chunk_idx + 1}/{num_chunks}: frames {chunk_start}-{chunk_end} ({actual_chunk_size} frames)", flush=True)
+
+                # Extract chunk
+                chunk_latents = video_latents[chunk_start:chunk_end].to(device=device, dtype=torch.bfloat16)
+
+                # Create visual RoPE positions for this chunk (always starts from 0)
+                visual_rope_pos = [
+                    torch.arange(actual_chunk_size),
+                    torch.arange(height // conf.model.dit_params.patch_size[1]),
+                    torch.arange(width // conf.model.dit_params.patch_size[2]),
+                ]
+
+                # Denoise this chunk
+                chunk_result = generate_denoise(
+                    dit,
+                    device,
+                    chunk_latents,
+                    start_timestep=denoise_strength,
+                    num_steps=num_steps,
+                    text_embeds=bs_text_embed,
+                    null_text_embeds=bs_null_text_embed,
+                    visual_rope_pos=visual_rope_pos,
+                    text_rope_pos=text_rope_pos,
+                    null_text_rope_pos=null_text_rope_pos,
+                    guidance_weight=guidance_weight,
+                    scheduler_scale=scheduler_scale,
+                    conf=conf,
+                    progress=progress,
+                    attention_mask=attention_mask,
+                    null_attention_mask=null_attention_mask,
+                )
+
+                # Move result back to CPU to save VRAM
+                chunk_result = chunk_result.to(device=video_latents.device, dtype=video_latents.dtype)
+
+                # Blend chunk into output with linear ramp for overlapping regions
+                for i in range(actual_chunk_size):
+                    frame_idx = chunk_start + i
+
+                    # Calculate blend weight for this frame
+                    # Ramp up at start of chunk (if not first chunk)
+                    # Ramp down at end of chunk (if not last chunk)
+                    weight = 1.0
+
+                    if chunk_start > 0 and i < chunk_overlap:
+                        # Ramp up: 0 to 1 over overlap region
+                        weight = (i + 1) / (chunk_overlap + 1)
+                    elif chunk_end < total_frames and i >= actual_chunk_size - chunk_overlap:
+                        # Ramp down: 1 to 0 over overlap region
+                        frames_from_end = actual_chunk_size - 1 - i
+                        weight = (frames_from_end + 1) / (chunk_overlap + 1)
+
+                    denoised_latents[frame_idx] += chunk_result[i] * weight
+                    blend_weights[frame_idx] += weight
+
+                # Clear GPU memory
+                del chunk_latents, chunk_result
+                torch.cuda.empty_cache()
+
+                # Move to next chunk (with overlap)
+                chunk_start = chunk_end - chunk_overlap
+                if chunk_start >= total_frames - chunk_overlap:
+                    break
+                chunk_idx += 1
+
+    # Normalize by blend weights
+    blend_weights = blend_weights.clamp(min=1e-8)
+    denoised_latents = denoised_latents / blend_weights
+
+    latent_visual = denoised_latents
 
     # Offload DiT before VAE decode
     if hasattr(dit, 'offload_all_blocks'):
@@ -2138,19 +2201,38 @@ def generate_sample_denoise(
     if offload or force_offload:
         vae = vae.to(vae_device, non_blocking=True)
 
+    # Decode in chunks to avoid VAE OOM
+    print(f">>> Decoding {total_frames} latent frames to video...", flush=True)
+
     with torch.no_grad():
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            images = latent_visual.reshape(
-                1,
-                -1,
-                latent_visual.shape[-3],
-                latent_visual.shape[-2],
-                latent_visual.shape[-1],
-            )
-            images = images.to(device=vae_device)
-            images = (images / vae.config.scaling_factor).permute(0, 4, 1, 2, 3)
-            images = vae.decode(images).sample
-            images = ((images.clamp(-1.0, 1.0) + 1.0) * 127.5).to(torch.uint8)
+            # VAE can handle more frames than DiT, but still chunk for safety
+            vae_chunk_size = 31  # ~5 seconds of video at a time
+            decoded_chunks = []
+
+            for vae_start in range(0, total_frames, vae_chunk_size):
+                vae_end = min(vae_start + vae_chunk_size, total_frames)
+                print(f">>> Decoding frames {vae_start}-{vae_end}...", flush=True)
+
+                chunk = latent_visual[vae_start:vae_end]
+                images = chunk.reshape(
+                    1,
+                    -1,
+                    chunk.shape[-3],
+                    chunk.shape[-2],
+                    chunk.shape[-1],
+                )
+                images = images.to(device=vae_device)
+                images = (images / vae.config.scaling_factor).permute(0, 4, 1, 2, 3)
+                images = vae.decode(images).sample
+                images = ((images.clamp(-1.0, 1.0) + 1.0) * 127.5).to(torch.uint8)
+
+                decoded_chunks.append(images.cpu())
+                torch.cuda.empty_cache()
+
+            # Concatenate all decoded chunks along temporal dimension
+            # Each chunk is [1, C, T, H, W]
+            final_images = torch.cat(decoded_chunks, dim=2)
 
     log_vram_usage("AFTER VAE DECODE, BEFORE OFFLOAD (DENOISE)", dit=dit, vae=vae, text_embedder=None)
 
@@ -2158,7 +2240,7 @@ def generate_sample_denoise(
         vae = vae.to('cpu', non_blocking=True)
     torch.cuda.empty_cache()
 
-    return images
+    return final_images
 
 
 def generate_sample_i2v_from_checkpoint(
