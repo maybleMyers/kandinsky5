@@ -1919,7 +1919,7 @@ def generate_denoise(
         device: Device to use
         latents: Clean latents to denoise [frames, H, W, C]
         start_timestep: Starting timestep (0.0-1.0), lower = less noise added
-        num_steps: Total number of denoising steps (will be proportionally reduced)
+        num_steps: Number of denoising steps to perform
         text_embeds: Text embeddings
         null_text_embeds: Null text embeddings for CFG
         visual_rope_pos: Visual RoPE positions
@@ -1934,20 +1934,13 @@ def generate_denoise(
     """
     sparse_params = get_sparse_params(conf, {"visual": latents}, device)
 
-    # Generate full timestep schedule
-    full_timesteps = torch.linspace(1, 0, num_steps + 1, device=device)
-    full_timesteps = scheduler_scale * full_timesteps / (1 + (scheduler_scale - 1) * full_timesteps)
+    # Create a schedule from start_timestep to 0 with num_steps steps
+    # This gives us full control over how many steps to use
+    raw_timesteps = torch.linspace(start_timestep, 0, num_steps + 1, device=device)
 
-    # Find the starting index based on start_timestep
-    # We want to start denoising from the timestep closest to start_timestep
-    start_idx = 0
-    for i, t in enumerate(full_timesteps):
-        if t <= start_timestep:
-            start_idx = i
-            break
-
-    # Get timesteps from start_idx onwards
-    timesteps = full_timesteps[start_idx:]
+    # Apply scheduler scaling to warp the timesteps
+    # The formula: scaled_t = scheduler_scale * t / (1 + (scheduler_scale - 1) * t)
+    timesteps = scheduler_scale * raw_timesteps / (1 + (scheduler_scale - 1) * raw_timesteps)
 
     # Generate noise and create noisy latents at start_timestep
     # Flow matching: x_t = (1-t)*x_0 + t*noise
@@ -1955,7 +1948,7 @@ def generate_denoise(
     t = start_timestep
     img = (1 - t) * latents + t * noise
 
-    print(f">>> Denoising from timestep {start_timestep:.3f} ({len(timesteps)-1} steps)", flush=True)
+    print(f">>> Denoising from timestep {start_timestep:.3f} with {num_steps} steps", flush=True)
 
     for i, (timestep, timestep_diff) in enumerate(tqdm(list(zip(timesteps[:-1], torch.diff(timesteps))))):
         time = timestep.unsqueeze(0)
