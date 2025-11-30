@@ -1874,9 +1874,10 @@ def create_interface():
                             info="Number of last frames from input video (or from each video in join mode)"
                         )
 
-                        with gr.Accordion("Video Join Blend Settings", open=False):
+                        with gr.Accordion("Blend Settings (Continuation & Join)", open=False):
                             gr.Markdown("""
-                            Settings to improve transitions at video join points. These help reduce visible jumps/artifacts when joining two videos.
+                            Settings to improve transitions at conditioning boundaries. Works for both video continuation and video joining modes.
+                            Helps reduce visible jumps/artifacts where conditioning meets generated frames.
                             Recommended: Set both blend values to 2-4 for smoother transitions.
                             """)
                             with gr.Row():

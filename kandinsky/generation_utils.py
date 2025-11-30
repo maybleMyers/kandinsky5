@@ -1009,12 +1009,13 @@ def generate_v2v_join(
                     if idx >= num_start_cond_frames:
                         alpha = (b + 1) / (soft_blend_frames + 1)
                         # Only update if not already in start transition zone
-                        if visual_cond_mask[idx] == 0:
+                        current_mask_val = visual_cond_mask[idx, 0, 0, 0].item()
+                        if current_mask_val == 0:
                             visual_cond_mask[idx] = alpha
                             visual_cond[idx] = end_cond_device[0]
                         else:
                             # Blend both transitions if they overlap
-                            visual_cond_mask[idx] = max(visual_cond_mask[idx].item(), alpha)
+                            visual_cond_mask[idx] = max(current_mask_val, alpha)
             else:
                 # Binary mask (original behavior)
                 visual_cond_mask[:num_start_cond_frames] = 1
