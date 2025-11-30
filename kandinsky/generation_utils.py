@@ -903,13 +903,10 @@ def generate_v2v_join(
                 [*img.shape[:-1], 1], dtype=img.dtype, device=img.device
             )
 
-            # FIX #1: Put clean latents in visual_cond (matching training behavior)
-            # During training, visual_cond contains the clean reference frames
             visual_cond[:num_start_cond_frames] = start_cond_device
             visual_cond[-num_end_cond_frames:] = end_cond_device
 
-            # FIX #3: Soft transition masks instead of binary
-            # Create gradient masks for smooth transitions at boundaries
+            # Soft transition masks for smooth transitions at boundaries
             if soft_blend_frames > 0:
                 # Full conditioning for core frames
                 visual_cond_mask[:num_start_cond_frames] = 1
@@ -993,8 +990,7 @@ def generate_v2v_join(
 
         img = img + timestep_diff * pred_velocity
 
-        # FIX #4: Latent blending at join points during denoising
-        # Blend the transition zones instead of hard replacement
+        # Latent blending at join points during denoising
         if latent_blend_frames > 0:
             # Blend start transition zone
             for b in range(latent_blend_frames):
@@ -1043,7 +1039,7 @@ def generate_v2v_join(
     img[:num_start_cond_frames] = start_cond_device
     img[-num_end_cond_frames:] = end_cond_device
 
-    # FIX #5: Optional statistics matching for transition frames
+    # Optional statistics matching for transition frames
     if use_stats_matching:
         img = match_join_statistics(
             img,

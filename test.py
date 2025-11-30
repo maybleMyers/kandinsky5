@@ -444,24 +444,24 @@ def parse_args():
         help="Path to load and decode previously saved latents. Skips generation and only runs VAE decoding."
     )
 
-    # Video joining blend parameters (Fix #3 and #4)
+    # Video joining blend parameters
     parser.add_argument(
         "--soft_blend_frames",
         type=int,
         default=0,
-        help="Number of frames for soft transition masks at join boundaries (Fix #3). Creates gradient conditioning masks instead of binary. 0 = disabled. Recommended: 2-4 frames."
+        help="Number of frames for soft transition masks at join boundaries. Creates gradient conditioning masks instead of binary. 0 = disabled. Recommended: 2-4 frames."
     )
     parser.add_argument(
         "--latent_blend_frames",
         type=int,
         default=0,
-        help="Number of frames for latent blending at join boundaries during denoising (Fix #4). Blends generated content with conditioning at transition zones. 0 = disabled. Recommended: 2-4 frames."
+        help="Number of frames for latent blending at join boundaries during denoising. Blends generated content with conditioning at transition zones. 0 = disabled. Recommended: 2-4 frames."
     )
     parser.add_argument(
         "--use_stats_matching",
         action='store_true',
         default=False,
-        help="Enable statistics matching for transition frames (Fix #5, optional). Matches color/brightness of generated frames to conditioning frames at boundaries."
+        help="Enable statistics matching for transition frames (optional). Matches color/brightness of generated frames to conditioning frames at boundaries."
     )
 
     args = parser.parse_args()
@@ -970,17 +970,8 @@ if __name__ == "__main__":
             print(f">>> Second video: {args.video2}")
             print(f">>> Conditioning frames from each video: {args.num_cond_frames}")
 
-            # Log video joining fixes status
-            fixes_enabled = []
-            fixes_enabled.append("Fix #1: visual_cond placement (always on)")
-            fixes_enabled.append("Fix #2: Batch VAE encoding (always on for multi-frame)")
-            if args.soft_blend_frames > 0:
-                fixes_enabled.append(f"Fix #3: Soft transition masks ({args.soft_blend_frames} frames)")
-            if args.latent_blend_frames > 0:
-                fixes_enabled.append(f"Fix #4: Latent blending ({args.latent_blend_frames} frames)")
-            if args.use_stats_matching:
-                fixes_enabled.append("Fix #5: Statistics matching (enabled)")
-            print(f">>> Video join fixes: {', '.join(fixes_enabled)}")
+            # Log video joining settings
+            print(f">>> Blend settings: soft_blend_frames={args.soft_blend_frames}, latent_blend_frames={args.latent_blend_frames}, stats_matching={args.use_stats_matching}")
 
             alignment = 128 if args.attention_type == "nabla" else 32
 

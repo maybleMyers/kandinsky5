@@ -431,6 +431,9 @@ def generate_v2v_video(
     use_apg: bool,
     apg_momentum: float,
     apg_norm_threshold: float,
+    soft_blend_frames: int,
+    latent_blend_frames: int,
+    use_stats_matching: bool,
 ) -> Generator[Tuple[List[Tuple[str, str]], Optional[str], str, str], None, None]:
     """Generate video from video input (video continuation/v2v mode)."""
     global stop_event, current_process, current_output_filename
@@ -560,6 +563,14 @@ def generate_v2v_video(
             command.append("--use_apg")
             command.extend(["--apg_momentum", str(apg_momentum)])
             command.extend(["--apg_norm_threshold", str(apg_norm_threshold)])
+
+        # Video join blend parameters
+        if soft_blend_frames and int(soft_blend_frames) > 0:
+            command.extend(["--soft_blend_frames", str(int(soft_blend_frames))])
+        if latent_blend_frames and int(latent_blend_frames) > 0:
+            command.extend(["--latent_blend_frames", str(int(latent_blend_frames))])
+        if use_stats_matching:
+            command.append("--use_stats_matching")
 
         if enable_block_swap:
             command.append("--enable_block_swap")
@@ -1863,6 +1874,28 @@ def create_interface():
                             info="Number of last frames from input video (or from each video in join mode)"
                         )
 
+                        with gr.Accordion("Video Join Blend Settings", open=False):
+                            gr.Markdown("""
+                            Settings to improve transitions at video join points. These help reduce visible jumps/artifacts when joining two videos.
+                            Recommended: Set both blend values to 2-4 for smoother transitions.
+                            """)
+                            with gr.Row():
+                                v2v_soft_blend_frames = gr.Slider(
+                                    minimum=0, maximum=8, step=1, value=0,
+                                    label="Soft Mask Blend Frames",
+                                    info="Creates gradient conditioning masks instead of binary. 0 = disabled."
+                                )
+                                v2v_latent_blend_frames = gr.Slider(
+                                    minimum=0, maximum=8, step=1, value=0,
+                                    label="Latent Blend Frames",
+                                    info="Blends latents at boundaries during denoising. 0 = disabled."
+                                )
+                            v2v_use_stats_matching = gr.Checkbox(
+                                label="Enable Statistics Matching",
+                                value=False,
+                                info="Match color/brightness of generated frames to conditioning frames at boundaries"
+                            )
+
                         v2v_mode = gr.Dropdown(
                             label="Mode",
                             choices=["i2v", "t2v"],
@@ -2141,7 +2174,8 @@ def create_interface():
                         v2v_vae_spatial_tile_height, v2v_vae_spatial_tile_width,
                         v2v_use_prompt_expansion, v2v_clip_prompt,
                         v2v_save_latents_checkbox,
-                        v2v_use_apg, v2v_apg_momentum, v2v_apg_norm_threshold
+                        v2v_use_apg, v2v_apg_momentum, v2v_apg_norm_threshold,
+                        v2v_soft_blend_frames, v2v_latent_blend_frames, v2v_use_stats_matching
                     ],
                     outputs=[v2v_output, v2v_preview_output, v2v_batch_progress, v2v_progress_text]
                 )

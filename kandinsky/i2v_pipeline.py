@@ -247,7 +247,7 @@ def get_conditioning_frames_from_two_videos(video1_path, video2_path, num_frames
         vae: VAE model
         device: Device to use
         alignment: Pixel alignment for resizing
-        batch_encode: If True, encode frames as video sequences for temporal coherence (Fix #2)
+        batch_encode: If True, encode frames as video sequences for temporal coherence
 
     Returns:
         Tuple of (start_latents, end_latents, scale_factor)
@@ -273,8 +273,7 @@ def get_conditioning_frames_from_two_videos(video1_path, video2_path, num_frames
     vae_dtype = next(vae.parameters()).dtype
 
     if batch_encode and num_frames > 1:
-        # FIX #2: Batch encode frames as video sequences for temporal coherence
-        # Stack start frames into video tensor [1, C, T, H, W]
+        # Batch encode frames as video sequences for temporal coherence
         start_tensors = []
         for pil_image in pil_frames_start:
             image = F.pil_to_tensor(pil_image).unsqueeze(0).float()
