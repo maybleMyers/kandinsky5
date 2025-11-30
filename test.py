@@ -26,10 +26,13 @@ if _no_compile:
 from kandinsky import get_T2V_pipeline, get_I2V_pipeline, get_I2V_pipeline_with_block_swap, get_T2V_pipeline_with_block_swap, get_T2I_pipeline
 from kandinsky.generation_utils import generate_sample_from_checkpoint, generate_sample_i2v_from_checkpoint, generate_sample_v2v, generate_sample_v2v_join
 from kandinsky.i2v_pipeline import (
-    get_conditioning_frames_from_video, 
+    get_conditioning_frames_from_video,
     get_conditioning_frames_from_two_videos,
-    get_conditioning_latents_from_two_images
+    get_conditioning_latents_from_two_images,
+    encode_video_to_latents,
+    Kandinsky5DenoisePipeline
 )
+from kandinsky.generation_utils import generate_sample_denoise
 try:
     from scripts.latentpreviewer import LatentPreviewer
 except ImportError:
@@ -444,6 +447,20 @@ def parse_args():
         help="Path to load and decode previously saved latents. Skips generation and only runs VAE decoding."
     )
 
+    # Video denoise mode
+    parser.add_argument(
+        "--denoise",
+        action='store_true',
+        default=False,
+        help="Enable video denoise mode. Applies light denoising to smooth video artifacts."
+    )
+    parser.add_argument(
+        "--denoise_strength",
+        type=float,
+        default=0.2,
+        help="Denoise strength (0.1-0.5 typical). Higher = more change. Default: 0.2"
+    )
+
     args = parser.parse_args()
     return args
 
@@ -804,6 +821,76 @@ if __name__ == "__main__":
                  expand_prompts=args.expand_prompt,
                  save_path=args.output_filename,
                  seed=args.seed)
+    elif args.denoise and args.video is not None:
+        # VIDEO DENOISE MODE - applies light denoising to smooth artifacts
+        print(f">>> VIDEO DENOISE MODE")
+        print(f">>> Input video: {args.video}")
+        print(f">>> Denoise strength: {args.denoise_strength}")
+
+        alignment = 128 if args.attention_type == "nabla" else 32
+        force_offload = hasattr(pipe.dit, 'enable_block_swap') and pipe.dit.enable_block_swap
+
+        # Load VAE for encoding
+        if pipe.offload or force_offload:
+            pipe.vae = pipe.vae.to(pipe.device_map["vae"], non_blocking=True)
+
+        # Encode video to latents
+        print(f">>> Encoding video to latent space...", flush=True)
+        video_latents, scale_factor, num_frames = encode_video_to_latents(
+            args.video,
+            pipe.vae,
+            pipe.device_map["vae"],
+            alignment=alignment
+        )
+
+        # Offload VAE after encoding
+        if pipe.offload or force_offload:
+            pipe.vae = pipe.vae.to("cpu", non_blocking=True)
+            torch.cuda.empty_cache()
+
+        print(f">>> Video latents shape: {video_latents.shape}")
+        print(f">>> Total frames: {num_frames}")
+
+        # Load text embedder if needed
+        if pipe.offload or force_offload:
+            pipe.text_embedder = pipe.text_embedder.to(pipe.device_map["text_embedder"])
+
+        # Apply denoising
+        num_steps = args.sample_steps if args.sample_steps else pipe.num_steps
+        guidance = args.guidance_weight if args.guidance_weight else min(pipe.guidance_weight, 4.0)
+
+        x = generate_sample_denoise(
+            video_latents=video_latents,
+            caption=args.prompt,
+            dit=pipe.dit,
+            vae=pipe.vae,
+            conf=pipe.conf,
+            text_embedder=pipe.text_embedder,
+            denoise_strength=args.denoise_strength,
+            num_steps=num_steps,
+            guidance_weight=guidance,
+            scheduler_scale=args.scheduler_scale,
+            negative_caption=args.negative_prompt,
+            clip_prompt=args.clip_prompt,
+            seed=args.seed,
+            device=pipe.device_map["dit"],
+            vae_device=pipe.device_map["vae"],
+            progress=True,
+            offload=pipe.offload,
+            force_offload=force_offload,
+        )
+
+        # Save output
+        if x is not None:
+            import torchvision
+            torchvision.io.write_video(
+                args.output_filename,
+                x[0].float().permute(1, 2, 3, 0).cpu().numpy(),
+                fps=24,
+                options={"crf": "5"},
+            )
+            print(f">>> Saved denoised video to {args.output_filename}")
+
     elif is_i2v:
         if args.image is not None and args.end_image is not None:
             # ============================================================

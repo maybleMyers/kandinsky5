@@ -1892,6 +1892,275 @@ def generate_sample_from_checkpoint(
     return images
 
 
+@torch.no_grad()
+def generate_denoise(
+    model,
+    device,
+    latents,
+    start_timestep,
+    num_steps,
+    text_embeds,
+    null_text_embeds,
+    visual_rope_pos,
+    text_rope_pos,
+    null_text_rope_pos,
+    guidance_weight,
+    scheduler_scale,
+    conf,
+    progress=False,
+    attention_mask=None,
+    null_attention_mask=None,
+):
+    """
+    Denoise latents starting from a given timestep (for v2v img2img style processing).
+
+    Args:
+        model: DiT model
+        device: Device to use
+        latents: Clean latents to denoise [frames, H, W, C]
+        start_timestep: Starting timestep (0.0-1.0), lower = less noise added
+        num_steps: Total number of denoising steps (will be proportionally reduced)
+        text_embeds: Text embeddings
+        null_text_embeds: Null text embeddings for CFG
+        visual_rope_pos: Visual RoPE positions
+        text_rope_pos: Text RoPE positions
+        null_text_rope_pos: Null text RoPE positions
+        guidance_weight: CFG weight
+        scheduler_scale: Scheduler scale
+        conf: Model configuration
+
+    Returns:
+        Denoised latents
+    """
+    sparse_params = get_sparse_params(conf, {"visual": latents}, device)
+
+    # Generate full timestep schedule
+    full_timesteps = torch.linspace(1, 0, num_steps + 1, device=device)
+    full_timesteps = scheduler_scale * full_timesteps / (1 + (scheduler_scale - 1) * full_timesteps)
+
+    # Find the starting index based on start_timestep
+    # We want to start denoising from the timestep closest to start_timestep
+    start_idx = 0
+    for i, t in enumerate(full_timesteps):
+        if t <= start_timestep:
+            start_idx = i
+            break
+
+    # Get timesteps from start_idx onwards
+    timesteps = full_timesteps[start_idx:]
+
+    # Generate noise and create noisy latents at start_timestep
+    # Flow matching: x_t = (1-t)*x_0 + t*noise
+    noise = torch.randn_like(latents)
+    t = start_timestep
+    img = (1 - t) * latents + t * noise
+
+    print(f">>> Denoising from timestep {start_timestep:.3f} ({len(timesteps)-1} steps)", flush=True)
+
+    for i, (timestep, timestep_diff) in enumerate(tqdm(list(zip(timesteps[:-1], torch.diff(timesteps))))):
+        time = timestep.unsqueeze(0)
+
+        if model.visual_cond:
+            visual_cond = torch.zeros_like(img)
+            visual_cond_mask = torch.zeros(
+                [*img.shape[:-1], 1], dtype=img.dtype, device=img.device
+            )
+            model_input = torch.cat([img, visual_cond, visual_cond_mask], dim=-1)
+        else:
+            model_input = img
+
+        with torch._dynamo.utils.disable_cache_limit():
+            pred_velocity = model(
+                model_input,
+                text_embeds["text_embeds"],
+                text_embeds["pooled_embed"],
+                time * 1000,
+                visual_rope_pos,
+                text_rope_pos,
+                scale_factor=conf.metrics.scale_factor,
+                sparse_params=sparse_params,
+                attention_mask=attention_mask,
+            )
+
+            # CFG
+            if abs(guidance_weight - 1.0) > 1e-6:
+                uncond_pred_velocity = model(
+                    model_input,
+                    null_text_embeds["text_embeds"],
+                    null_text_embeds["pooled_embed"],
+                    time * 1000,
+                    visual_rope_pos,
+                    null_text_rope_pos,
+                    scale_factor=conf.metrics.scale_factor,
+                    sparse_params=sparse_params,
+                    attention_mask=null_attention_mask,
+                )
+                pred_velocity = uncond_pred_velocity + guidance_weight * (
+                    pred_velocity - uncond_pred_velocity
+                )
+
+        img = img + timestep_diff * pred_velocity
+
+    return img
+
+
+def generate_sample_denoise(
+    video_latents,
+    caption,
+    dit,
+    vae,
+    conf,
+    text_embedder,
+    denoise_strength=0.2,
+    num_steps=50,
+    guidance_weight=5.0,
+    scheduler_scale=10.0,
+    negative_caption="",
+    clip_prompt=None,
+    seed=6554,
+    device="cuda",
+    vae_device="cuda",
+    progress=True,
+    offload=False,
+    force_offload=False,
+):
+    """
+    Apply light denoising to video latents (v2v img2img style).
+
+    This takes already-encoded video latents, adds a small amount of noise,
+    and denoises them. Useful for smoothing artifacts at video join points.
+
+    Args:
+        video_latents: Pre-encoded video latents [frames, H, W, C]
+        caption: Text prompt describing the video
+        dit: DiT model
+        vae: VAE model
+        conf: Configuration
+        text_embedder: Text embedder
+        denoise_strength: How much to denoise (0.1-0.5 typical). Higher = more change.
+        num_steps: Base number of denoising steps
+        guidance_weight: CFG weight (lower like 2-3 for preservation)
+        scheduler_scale: Scheduler scale
+        ...
+
+    Returns:
+        Denoised video tensor [1, C, frames, H, W] as uint8
+    """
+    text_embedder.embedder.mode = "i2v"
+
+    num_frames = video_latents.shape[0]
+    height, width = video_latents.shape[1:3]
+    dim = video_latents.shape[3]
+
+    type_of_content = "video" if num_frames > 1 else "image"
+
+    with torch.no_grad():
+        clip_texts = [clip_prompt] if clip_prompt else None
+        bs_text_embed, text_cu_seqlens, attention_mask = text_embedder.encode(
+            [caption], type_of_content=type_of_content, clip_texts=clip_texts
+        )
+        bs_null_text_embed, null_text_cu_seqlens, null_attention_mask = text_embedder.encode(
+            [negative_caption], type_of_content=type_of_content
+        )
+
+    # Clean up text embedder
+    if offload or force_offload:
+        text_embedder = text_embedder.to('cpu')
+    del text_embedder.embedder.model
+    del text_embedder.clip_embedder.model
+    del text_embedder
+    torch.cuda.empty_cache()
+    import gc
+    gc.collect()
+
+    for key in bs_text_embed:
+        bs_text_embed[key] = bs_text_embed[key].to(device=device, dtype=torch.bfloat16)
+        bs_null_text_embed[key] = bs_null_text_embed[key].to(device=device, dtype=torch.bfloat16)
+    text_cu_seqlens = text_cu_seqlens.to(device=device)[-1].item()
+    null_text_cu_seqlens = null_text_cu_seqlens.to(device=device)[-1].item()
+    attention_mask = attention_mask.to(device=device)
+    null_attention_mask = null_attention_mask.to(device=device)
+
+    visual_rope_pos = [
+        torch.arange(num_frames),
+        torch.arange(height // conf.model.dit_params.patch_size[1]),
+        torch.arange(width // conf.model.dit_params.patch_size[2]),
+    ]
+    text_rope_pos = torch.arange(text_cu_seqlens)
+    null_text_rope_pos = torch.arange(null_text_cu_seqlens)
+
+    log_vram_usage("BEFORE DiT INFERENCE (DENOISE)", dit=dit, vae=vae, text_embedder=None)
+
+    if offload or force_offload:
+        dit.to(device, non_blocking=True)
+
+    # Set random seed for reproducible noise
+    g = torch.Generator(device=device)
+    g.manual_seed(seed)
+    torch.manual_seed(seed)
+
+    with torch.no_grad():
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            print(f">>> Denoising video with strength {denoise_strength}...", flush=True)
+            latents_device = video_latents.to(device=device, dtype=torch.bfloat16)
+
+            result = generate_denoise(
+                dit,
+                device,
+                latents_device,
+                start_timestep=denoise_strength,
+                num_steps=num_steps,
+                text_embeds=bs_text_embed,
+                null_text_embeds=bs_null_text_embed,
+                visual_rope_pos=visual_rope_pos,
+                text_rope_pos=text_rope_pos,
+                null_text_rope_pos=null_text_rope_pos,
+                guidance_weight=guidance_weight,
+                scheduler_scale=scheduler_scale,
+                conf=conf,
+                progress=progress,
+                attention_mask=attention_mask,
+                null_attention_mask=null_attention_mask,
+            )
+
+    latent_visual = result
+
+    # Offload DiT before VAE decode
+    if hasattr(dit, 'offload_all_blocks'):
+        dit.offload_all_blocks()
+
+    if offload or force_offload:
+        dit = dit.to('cpu', non_blocking=True)
+    torch.cuda.empty_cache()
+
+    log_vram_usage("AFTER DiT OFFLOAD, BEFORE VAE DECODE (DENOISE)", dit=dit, vae=vae, text_embedder=None)
+
+    if offload or force_offload:
+        vae = vae.to(vae_device, non_blocking=True)
+
+    with torch.no_grad():
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            images = latent_visual.reshape(
+                1,
+                -1,
+                latent_visual.shape[-3],
+                latent_visual.shape[-2],
+                latent_visual.shape[-1],
+            )
+            images = images.to(device=vae_device)
+            images = (images / vae.config.scaling_factor).permute(0, 4, 1, 2, 3)
+            images = vae.decode(images).sample
+            images = ((images.clamp(-1.0, 1.0) + 1.0) * 127.5).to(torch.uint8)
+
+    log_vram_usage("AFTER VAE DECODE, BEFORE OFFLOAD (DENOISE)", dit=dit, vae=vae, text_embedder=None)
+
+    if offload or force_offload:
+        vae = vae.to('cpu', non_blocking=True)
+    torch.cuda.empty_cache()
+
+    return images
+
+
 def generate_sample_i2v_from_checkpoint(
     checkpoint_path,
     dit,

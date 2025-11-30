@@ -8,7 +8,7 @@ import torchvision.transforms.functional as F
 from torchvision.transforms import ToPILImage
 from PIL import Image
 
-from .generation_utils import generate_sample_i2v, generate_sample_v2v
+from .generation_utils import generate_sample_i2v, generate_sample_v2v, generate_sample_denoise
 
 torch._dynamo.config.suppress_errors = True
 torch._dynamo.config.verbose = True
@@ -302,6 +302,90 @@ def get_conditioning_frames_from_two_videos(video1_path, video2_path, num_frames
     end_latents = torch.cat(end_latents_list, dim=0)
 
     return start_latents, end_latents, scale_factor
+
+
+def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24, max_frames=None):
+    """
+    Load a video file and encode all frames to latent space.
+
+    Args:
+        video_path: Path to the video file
+        vae: VAE model
+        device: Device to use
+        alignment: Pixel alignment for resizing
+        target_fps: Target FPS for frame extraction
+        max_frames: Maximum number of frames to encode (None = all frames)
+
+    Returns:
+        Tuple of (latents, scale_factor, num_frames)
+        latents: Tensor of shape [num_frames, H, W, C]
+    """
+    import av
+    import numpy as np
+
+    container = av.open(video_path)
+    video_stream = container.streams.video[0]
+
+    # Get video properties
+    video_fps = float(video_stream.average_rate)
+
+    # Calculate frame skip for downsampling to target_fps
+    if video_fps > target_fps:
+        frame_skip = int(video_fps / target_fps)
+    else:
+        frame_skip = 1
+
+    # Decode frames
+    pil_frames = []
+    frame_count = 0
+    for frame in container.decode(video=0):
+        if frame_count % frame_skip == 0:
+            img = frame.to_image()
+            pil_frames.append(img.convert('RGB'))
+            if max_frames is not None and len(pil_frames) >= max_frames:
+                break
+        frame_count += 1
+
+    container.close()
+
+    if len(pil_frames) == 0:
+        raise ValueError(f"No frames extracted from video: {video_path}")
+
+    print(f">>> Extracted {len(pil_frames)} frames from video", flush=True)
+
+    # Determine target size from first frame
+    first_image = F.pil_to_tensor(pil_frames[0]).unsqueeze(0)
+    first_image, scale_factor = resize_image(first_image, max_area=MAX_AREA, alignment=alignment)
+    target_h, target_w = first_image.shape[2], first_image.shape[3]
+
+    # Encode all frames
+    latents_list = []
+    vae_dtype = next(vae.parameters()).dtype
+
+    print(f">>> Encoding {len(pil_frames)} frames to latent space...", flush=True)
+
+    for i, pil_image in enumerate(pil_frames):
+        image = F.pil_to_tensor(pil_image).unsqueeze(0)
+        # Resize to match first frame dimensions
+        import torch.nn.functional as F_torch
+        if image.shape[2] != target_h or image.shape[3] != target_w:
+            image = F_torch.interpolate(image.float(), size=(target_h, target_w), mode='bilinear', align_corners=False)
+        image = image / 127.5 - 1.
+
+        with torch.no_grad():
+            image = image.to(device=device, dtype=vae_dtype).transpose(0, 1).unsqueeze(0)
+            lat_image = vae.encode(image, opt_tiling=False).latent_dist.sample().squeeze(0).permute(1, 2, 3, 0)
+            lat_image = lat_image * vae.config.scaling_factor
+            latents_list.append(lat_image)
+
+        if (i + 1) % 10 == 0:
+            print(f">>> Encoded {i + 1}/{len(pil_frames)} frames", flush=True)
+
+    # Stack latents: [num_frames, H, W, C]
+    latents = torch.cat(latents_list, dim=0)
+    print(f">>> Video encoded to latents: {latents.shape}", flush=True)
+
+    return latents, scale_factor, len(pil_frames)
 
 
 def log_vram_usage(stage_name, dit=None, vae=None, text_embedder=None):
@@ -679,3 +763,193 @@ class Kandinsky5I2VPipeline:
                                 options={"crf": "5"},
                             )
                 return images
+
+
+class Kandinsky5DenoisePipeline:
+    """
+    Pipeline for video-to-video denoising (img2img style for videos).
+
+    Takes an existing video, encodes it to latent space, adds controlled noise,
+    denoises it with the DiT model, and decodes back to video. Useful for:
+    - Smoothing artifacts at video join points
+    - Light style transfer with low denoise strength
+    - Reducing compression artifacts
+    """
+
+    def __init__(
+        self,
+        device_map: Union[str, torch.device, dict],
+        dit,
+        text_embedder,
+        vae,
+        local_dit_rank: int = 0,
+        world_size: int = 1,
+        conf=None,
+        offload: bool = False,
+    ):
+        self.dit = dit
+        self.text_embedder = text_embedder
+        self.vae = vae
+        self.device_map = device_map
+        self.local_dit_rank = local_dit_rank
+        self.world_size = world_size
+        self.conf = conf
+        self.num_steps = conf.model.num_steps
+        self.guidance_weight = conf.model.guidance_weight
+        self.offload = offload
+
+    def __call__(
+        self,
+        text: str,
+        video_path: str,
+        denoise_strength: float = 0.2,
+        seed: int = None,
+        num_steps: int = None,
+        guidance_weight: float = None,
+        scheduler_scale: float = 10.0,
+        negative_caption: str = "",
+        clip_prompt: str = None,
+        save_path: str = None,
+        progress: bool = True,
+        chunk_seconds: float = 5.0,
+        chunk_overlap: int = 4,
+    ):
+        """
+        Denoise a video file.
+
+        Args:
+            text: Text prompt describing the video content
+            video_path: Path to input video file
+            denoise_strength: How much to denoise (0.1-0.5 typical). Higher = more change.
+            seed: Random seed
+            num_steps: Number of denoising steps (scaled by denoise_strength)
+            guidance_weight: CFG weight (2-4 recommended for preservation)
+            scheduler_scale: Scheduler scale
+            negative_caption: Negative prompt
+            clip_prompt: Optional separate CLIP prompt
+            save_path: Path to save output video
+            progress: Show progress bar
+            chunk_seconds: Process video in chunks of this duration
+            chunk_overlap: Number of frames to overlap between chunks
+
+        Returns:
+            Denoised video tensor
+        """
+        num_steps = self.num_steps if num_steps is None else num_steps
+        guidance_weight = self.guidance_weight if guidance_weight is None else guidance_weight
+
+        if seed is None:
+            if self.local_dit_rank == 0:
+                seed = torch.randint(2**32 - 1, (1,)).to(self.local_dit_rank)
+            else:
+                seed = torch.empty((1,), dtype=torch.int64).to(self.local_dit_rank)
+
+            if self.world_size > 1:
+                torch.distributed.broadcast(seed, 0)
+
+            seed = seed.item()
+
+        # Determine alignment based on attention type
+        try:
+            attention_type = self.conf.model.attention.type
+        except (AttributeError, KeyError):
+            attention_type = 'flash'
+        alignment = 128 if attention_type == 'nabla' else 16
+
+        force_offload = hasattr(self.dit, 'enable_block_swap') and self.dit.enable_block_swap
+
+        # Load VAE for encoding
+        log_vram_usage("BEFORE VAE ENCODE (DENOISE)", dit=self.dit, vae=self.vae, text_embedder=self.text_embedder)
+
+        if self.offload or force_offload:
+            self.vae = self.vae.to(self.device_map["vae"], non_blocking=True)
+
+        # Calculate frames per chunk
+        frames_per_chunk = int(chunk_seconds * 24 / 4 + 1)  # Match Kandinsky frame rate
+        print(f">>> Processing video in chunks of ~{chunk_seconds}s ({frames_per_chunk} frames per chunk)", flush=True)
+
+        # Encode full video to latents
+        video_latents, scale_factor, total_frames = encode_video_to_latents(
+            video_path, self.vae, self.device_map["vae"], alignment=alignment
+        )
+
+        # Offload VAE after encoding
+        log_vram_usage("AFTER VAE ENCODE, BEFORE OFFLOAD (DENOISE)", dit=self.dit, vae=self.vae, text_embedder=self.text_embedder)
+
+        if self.offload or force_offload:
+            self.vae = self.vae.to("cpu", non_blocking=True)
+            torch.cuda.empty_cache()
+
+        # Process video in chunks
+        all_outputs = []
+        chunk_start = 0
+
+        while chunk_start < total_frames:
+            chunk_end = min(chunk_start + frames_per_chunk, total_frames)
+            chunk_latents = video_latents[chunk_start:chunk_end]
+
+            print(f"\n>>> Processing chunk: frames {chunk_start}-{chunk_end} ({chunk_latents.shape[0]} frames)", flush=True)
+
+            # Reload text embedder for each chunk (it gets deleted after use)
+            # For now, we only support single chunk processing
+            if chunk_start > 0:
+                print(">>> Warning: Multi-chunk processing requires reloading text embedder", flush=True)
+                break
+
+            # Load text embedder if needed
+            if self.offload or force_offload:
+                self.text_embedder = self.text_embedder.to(self.device_map["text_embedder"])
+
+            # Use lower guidance weight for better preservation
+            effective_guidance = min(guidance_weight, 4.0)
+
+            denoised_images = generate_sample_denoise(
+                video_latents=chunk_latents,
+                caption=text,
+                dit=self.dit,
+                vae=self.vae,
+                conf=self.conf,
+                text_embedder=self.text_embedder,
+                denoise_strength=denoise_strength,
+                num_steps=num_steps,
+                guidance_weight=effective_guidance,
+                scheduler_scale=scheduler_scale,
+                negative_caption=negative_caption,
+                clip_prompt=clip_prompt,
+                seed=seed,
+                device=self.device_map["dit"],
+                vae_device=self.device_map["vae"],
+                progress=progress,
+                offload=self.offload,
+                force_offload=force_offload,
+            )
+
+            all_outputs.append(denoised_images)
+
+            chunk_start = chunk_end - chunk_overlap
+            if chunk_start >= total_frames - chunk_overlap:
+                break
+
+        # Concatenate all chunks
+        if len(all_outputs) == 1:
+            images = all_outputs[0]
+        else:
+            # TODO: Implement proper chunk blending for multi-chunk processing
+            images = torch.cat([out for out in all_outputs], dim=2)
+
+        # Handle rescaling if needed
+        if scale_factor > 16:
+            h, w = images.shape[-2:]
+            images = F.resize(images[0], (int(h / scale_factor / 16), int(w / scale_factor / 16)))
+
+        # Save output
+        if self.local_dit_rank == 0 and save_path is not None:
+            torchvision.io.write_video(
+                save_path,
+                images[0].float().permute(1, 2, 3, 0).cpu().numpy(),
+                fps=24,
+                options={"crf": "5"},
+            )
+            print(f">>> Saved denoised video to {save_path}", flush=True)
+
+        return images
