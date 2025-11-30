@@ -234,7 +234,7 @@ def get_conditioning_frames_from_video(video_path, num_frames, vae, device, alig
     return latents, scale_factor
 
 
-def get_conditioning_frames_from_two_videos(video1_path, video2_path, num_frames, vae, device, alignment=16):
+def get_conditioning_frames_from_two_videos(video1_path, video2_path, num_frames, vae, device, alignment=16, batch_encode=True):
     """
     Load two videos and encode conditioning frames for video joining:
     - Last N frames from video1 (start conditioning)
@@ -247,12 +247,15 @@ def get_conditioning_frames_from_two_videos(video1_path, video2_path, num_frames
         vae: VAE model
         device: Device to use
         alignment: Pixel alignment for resizing
+        batch_encode: If True, encode frames as video sequences for temporal coherence (Fix #2)
 
     Returns:
         Tuple of (start_latents, end_latents, scale_factor)
         start_latents: Tensor of shape [num_frames, H, W, C] from video1
         end_latents: Tensor of shape [num_frames, H, W, C] from video2
     """
+    import torch.nn.functional as F_torch
+
     # Extract last frames from video1 and first frames from video2
     pil_frames_start = extract_last_frames_from_video(video1_path, num_frames)
     pil_frames_end = extract_first_frames_from_video(video2_path, num_frames)
@@ -267,39 +270,80 @@ def get_conditioning_frames_from_two_videos(video1_path, video2_path, num_frames
     first_image, scale_factor = resize_image(first_image, max_area=MAX_AREA, alignment=alignment)
     target_h, target_w = first_image.shape[2], first_image.shape[3]
 
-    # Encode start frames (from video1)
-    start_latents_list = []
-    for i, pil_image in enumerate(pil_frames_start):
-        image = F.pil_to_tensor(pil_image).unsqueeze(0)
-        image, _ = resize_image(image, max_area=MAX_AREA, alignment=alignment)
-        image = image / 127.5 - 1.
+    vae_dtype = next(vae.parameters()).dtype
+
+    if batch_encode and num_frames > 1:
+        # FIX #2: Batch encode frames as video sequences for temporal coherence
+        # Stack start frames into video tensor [1, C, T, H, W]
+        start_tensors = []
+        for pil_image in pil_frames_start:
+            image = F.pil_to_tensor(pil_image).unsqueeze(0).float()
+            image, _ = resize_image(image, max_area=MAX_AREA, alignment=alignment)
+            start_tensors.append(image)
+
+        # Stack: [num_frames, C, H, W] -> [1, C, num_frames, H, W]
+        start_video = torch.stack([t.squeeze(0) for t in start_tensors], dim=1).unsqueeze(0)
+        start_video = start_video / 127.5 - 1.
+
+        # Stack end frames into video tensor
+        end_tensors = []
+        for pil_image in pil_frames_end:
+            image = F.pil_to_tensor(pil_image).unsqueeze(0).float()
+            # Resize to match video1 dimensions
+            image = F_torch.interpolate(image, size=(target_h, target_w), mode='bilinear', align_corners=False)
+            end_tensors.append(image)
+
+        end_video = torch.stack([t.squeeze(0) for t in end_tensors], dim=1).unsqueeze(0)
+        end_video = end_video / 127.5 - 1.
 
         with torch.no_grad():
-            vae_dtype = next(vae.parameters()).dtype
-            image = image.to(device=device, dtype=vae_dtype).transpose(0, 1).unsqueeze(0)
-            lat_image = vae.encode(image, opt_tiling=False).latent_dist.sample().squeeze(0).permute(1, 2, 3, 0)
-            lat_image = lat_image * vae.config.scaling_factor
-            start_latents_list.append(lat_image)
+            # Encode as video sequences for temporal coherence
+            # VAE expects [B, C, T, H, W]
+            start_video = start_video.to(device=device, dtype=vae_dtype)
+            end_video = end_video.to(device=device, dtype=vae_dtype)
 
-    # Encode end frames (from video2) - resize to match video1 dimensions
-    end_latents_list = []
-    for i, pil_image in enumerate(pil_frames_end):
-        image = F.pil_to_tensor(pil_image).unsqueeze(0)
-        # Resize to match video1 dimensions
-        import torch.nn.functional as F_torch
-        image = F_torch.interpolate(image, size=(target_h, target_w), mode='bilinear', align_corners=False)
-        image = image / 127.5 - 1.
+            # Encode with temporal awareness
+            start_latents = vae.encode(start_video, opt_tiling=False).latent_dist.sample()
+            end_latents = vae.encode(end_video, opt_tiling=False).latent_dist.sample()
 
-        with torch.no_grad():
-            vae_dtype = next(vae.parameters()).dtype
-            image = image.to(device=device, dtype=vae_dtype).transpose(0, 1).unsqueeze(0)
-            lat_image = vae.encode(image, opt_tiling=False).latent_dist.sample().squeeze(0).permute(1, 2, 3, 0)
-            lat_image = lat_image * vae.config.scaling_factor
-            end_latents_list.append(lat_image)
+            # VAE output is [B, C, T, H, W] -> permute to [T, H, W, C]
+            # First squeeze B, then permute
+            start_latents = start_latents.squeeze(0).permute(1, 2, 3, 0) * vae.config.scaling_factor
+            end_latents = end_latents.squeeze(0).permute(1, 2, 3, 0) * vae.config.scaling_factor
 
-    # Stack latents: [num_frames, H, W, C]
-    start_latents = torch.cat(start_latents_list, dim=0)
-    end_latents = torch.cat(end_latents_list, dim=0)
+        print(f">>> Batch VAE encoding: start_latents shape={start_latents.shape}, end_latents shape={end_latents.shape}")
+    else:
+        # Original frame-by-frame encoding (fallback for single frame)
+        # Encode start frames (from video1)
+        start_latents_list = []
+        for i, pil_image in enumerate(pil_frames_start):
+            image = F.pil_to_tensor(pil_image).unsqueeze(0)
+            image, _ = resize_image(image, max_area=MAX_AREA, alignment=alignment)
+            image = image / 127.5 - 1.
+
+            with torch.no_grad():
+                image = image.to(device=device, dtype=vae_dtype).transpose(0, 1).unsqueeze(0)
+                lat_image = vae.encode(image, opt_tiling=False).latent_dist.sample().squeeze(0).permute(1, 2, 3, 0)
+                lat_image = lat_image * vae.config.scaling_factor
+                start_latents_list.append(lat_image)
+
+        # Encode end frames (from video2) - resize to match video1 dimensions
+        end_latents_list = []
+        for i, pil_image in enumerate(pil_frames_end):
+            image = F.pil_to_tensor(pil_image).unsqueeze(0)
+            # Resize to match video1 dimensions
+            image = F_torch.interpolate(image.float(), size=(target_h, target_w), mode='bilinear', align_corners=False)
+            image = image / 127.5 - 1.
+
+            with torch.no_grad():
+                image = image.to(device=device, dtype=vae_dtype).transpose(0, 1).unsqueeze(0)
+                lat_image = vae.encode(image, opt_tiling=False).latent_dist.sample().squeeze(0).permute(1, 2, 3, 0)
+                lat_image = lat_image * vae.config.scaling_factor
+                end_latents_list.append(lat_image)
+
+        # Stack latents: [num_frames, H, W, C]
+        start_latents = torch.cat(start_latents_list, dim=0)
+        end_latents = torch.cat(end_latents_list, dim=0)
 
     return start_latents, end_latents, scale_factor
 

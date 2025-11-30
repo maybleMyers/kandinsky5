@@ -838,6 +838,9 @@ def generate_v2v_join(
     use_apg=False,
     apg_momentum=-0.75,
     apg_norm_threshold=55.0,
+    soft_blend_frames=0,
+    latent_blend_frames=0,
+    use_stats_matching=False,
 ):
     """
     Generate video joining with dual conditioning (start and end frames).
@@ -860,6 +863,9 @@ def generate_v2v_join(
         start_cond_latents: Start conditioning latents [num_cond_frames, H, W, C]
         end_cond_latents: End conditioning latents [num_cond_frames, H, W, C]
         conf: Model configuration
+        soft_blend_frames: Number of frames for soft transition masks (0 = disabled)
+        latent_blend_frames: Number of frames for latent blending at boundaries (0 = disabled)
+        use_stats_matching: Whether to match generated frame statistics to conditioning
         ...
 
     Returns:
@@ -867,6 +873,7 @@ def generate_v2v_join(
     """
     num_start_cond_frames = start_cond_latents.shape[0]
     num_end_cond_frames = end_cond_latents.shape[0]
+    total_frames = shape[0]
 
     g = torch.Generator(device="cuda")
     g.manual_seed(seed)
@@ -883,6 +890,10 @@ def generate_v2v_join(
     # Initialize APG momentum buffer if enabled
     momentum_buffer = MomentumBuffer(apg_momentum) if use_apg else None
 
+    # Pre-compute conditioning latents on device
+    start_cond_device = start_cond_latents.to(device=device, dtype=img.dtype)
+    end_cond_device = end_cond_latents.to(device=device, dtype=img.dtype)
+
     for i, (timestep, timestep_diff) in enumerate(tqdm(list(zip(timesteps[:-1], torch.diff(timesteps))))):
         time = timestep.unsqueeze(0)
 
@@ -891,14 +902,44 @@ def generate_v2v_join(
             visual_cond_mask = torch.zeros(
                 [*img.shape[:-1], 1], dtype=img.dtype, device=img.device
             )
-            # Set BOTH start and end conditioning frames
-            start_cond_device = start_cond_latents.to(device=img.device, dtype=img.dtype)
-            end_cond_device = end_cond_latents.to(device=img.device, dtype=img.dtype)
 
-            img[:num_start_cond_frames] = start_cond_device
-            img[-num_end_cond_frames:] = end_cond_device
-            visual_cond_mask[:num_start_cond_frames] = 1
-            visual_cond_mask[-num_end_cond_frames:] = 1
+            # FIX #1: Put clean latents in visual_cond (matching training behavior)
+            # During training, visual_cond contains the clean reference frames
+            visual_cond[:num_start_cond_frames] = start_cond_device
+            visual_cond[-num_end_cond_frames:] = end_cond_device
+
+            # FIX #3: Soft transition masks instead of binary
+            # Create gradient masks for smooth transitions at boundaries
+            if soft_blend_frames > 0:
+                # Full conditioning for core frames
+                visual_cond_mask[:num_start_cond_frames] = 1
+                visual_cond_mask[-num_end_cond_frames:] = 1
+
+                # Gradient transition after start conditioning
+                for b in range(soft_blend_frames):
+                    idx = num_start_cond_frames + b
+                    if idx < total_frames - num_end_cond_frames:
+                        alpha = 1.0 - (b + 1) / (soft_blend_frames + 1)
+                        visual_cond_mask[idx] = alpha
+                        # Also set visual_cond for transition zone (interpolate from last cond frame)
+                        visual_cond[idx] = start_cond_device[-1]
+
+                # Gradient transition before end conditioning
+                for b in range(soft_blend_frames):
+                    idx = total_frames - num_end_cond_frames - soft_blend_frames + b
+                    if idx >= num_start_cond_frames:
+                        alpha = (b + 1) / (soft_blend_frames + 1)
+                        # Only update if not already in start transition zone
+                        if visual_cond_mask[idx] == 0:
+                            visual_cond_mask[idx] = alpha
+                            visual_cond[idx] = end_cond_device[0]
+                        else:
+                            # Blend both transitions if they overlap
+                            visual_cond_mask[idx] = max(visual_cond_mask[idx].item(), alpha)
+            else:
+                # Binary mask (original behavior)
+                visual_cond_mask[:num_start_cond_frames] = 1
+                visual_cond_mask[-num_end_cond_frames:] = 1
 
             model_input = torch.cat([img, visual_cond, visual_cond_mask], dim=-1)
         else:
@@ -952,6 +993,27 @@ def generate_v2v_join(
 
         img = img + timestep_diff * pred_velocity
 
+        # FIX #4: Latent blending at join points during denoising
+        # Blend the transition zones instead of hard replacement
+        if latent_blend_frames > 0:
+            # Blend start transition zone
+            for b in range(latent_blend_frames):
+                idx = num_start_cond_frames + b
+                if idx < total_frames - num_end_cond_frames - latent_blend_frames:
+                    # Gradually decrease influence of conditioning
+                    alpha = (b + 1) / (latent_blend_frames + 1)
+                    # Blend between last conditioning frame and generated
+                    img[idx] = (1 - alpha) * start_cond_device[-1] + alpha * img[idx]
+
+            # Blend end transition zone
+            for b in range(latent_blend_frames):
+                idx = total_frames - num_end_cond_frames - latent_blend_frames + b
+                if idx >= num_start_cond_frames + latent_blend_frames:
+                    # Gradually increase influence of end conditioning
+                    alpha = (b + 1) / (latent_blend_frames + 1)
+                    # Blend between generated and first end conditioning frame
+                    img[idx] = (1 - alpha) * img[idx] + alpha * end_cond_device[0]
+
         # Check for early stop request
         if stop_check is not None:
             action = stop_check()
@@ -978,9 +1040,86 @@ def generate_v2v_join(
                 print(f">>> ERROR during preview generation at step {i + 1}: {e}", flush=True)
 
     # Ensure conditioning frames are exactly preserved in final output
-    img[:num_start_cond_frames] = start_cond_latents.to(device=img.device, dtype=img.dtype)
-    img[-num_end_cond_frames:] = end_cond_latents.to(device=img.device, dtype=img.dtype)
+    img[:num_start_cond_frames] = start_cond_device
+    img[-num_end_cond_frames:] = end_cond_device
+
+    # FIX #5: Optional statistics matching for transition frames
+    if use_stats_matching:
+        img = match_join_statistics(
+            img,
+            start_cond_device,
+            end_cond_device,
+            num_start_cond_frames,
+            num_end_cond_frames,
+            transition_frames=max(4, latent_blend_frames)
+        )
+
     return img
+
+
+def match_join_statistics(latents, start_cond, end_cond, num_start, num_end, transition_frames=4):
+    """
+    Match generated frame statistics to conditioning frames at boundaries.
+    This helps smooth color/brightness transitions at join points.
+
+    Args:
+        latents: Full latent tensor [total_frames, H, W, C]
+        start_cond: Start conditioning latents
+        end_cond: End conditioning latents
+        num_start: Number of start conditioning frames
+        num_end: Number of end conditioning frames
+        transition_frames: Number of generated frames to normalize
+
+    Returns:
+        Normalized latents with smooth transitions
+    """
+    latents = latents.clone()
+    total_frames = latents.shape[0]
+
+    # Get reference statistics from conditioning frames
+    start_ref = start_cond[-1:]  # Last frame of start conditioning
+    end_ref = end_cond[:1]  # First frame of end conditioning
+
+    start_mean = start_ref.mean(dim=(0, 1, 2), keepdim=True)
+    start_std = start_ref.std(dim=(0, 1, 2), keepdim=True) + 1e-6
+    end_mean = end_ref.mean(dim=(0, 1, 2), keepdim=True)
+    end_std = end_ref.std(dim=(0, 1, 2), keepdim=True) + 1e-6
+
+    # Normalize start transition zone
+    for i in range(transition_frames):
+        idx = num_start + i
+        if idx >= total_frames - num_end:
+            break
+
+        weight = 1 - (i + 1) / (transition_frames + 1)
+        frame = latents[idx:idx+1]
+        frame_mean = frame.mean(dim=(0, 1, 2), keepdim=True)
+        frame_std = frame.std(dim=(0, 1, 2), keepdim=True) + 1e-6
+
+        # Normalize and rescale
+        normalized = (frame - frame_mean) / frame_std
+        target_mean = weight * start_mean + (1 - weight) * frame_mean
+        target_std = weight * start_std + (1 - weight) * frame_std
+        latents[idx] = (normalized * target_std + target_mean).squeeze(0)
+
+    # Normalize end transition zone
+    for i in range(transition_frames):
+        idx = total_frames - num_end - transition_frames + i
+        if idx < num_start + transition_frames:
+            continue
+
+        weight = (i + 1) / (transition_frames + 1)
+        frame = latents[idx:idx+1]
+        frame_mean = frame.mean(dim=(0, 1, 2), keepdim=True)
+        frame_std = frame.std(dim=(0, 1, 2), keepdim=True) + 1e-6
+
+        # Normalize and rescale
+        normalized = (frame - frame_mean) / frame_std
+        target_mean = weight * end_mean + (1 - weight) * frame_mean
+        target_std = weight * end_std + (1 - weight) * frame_std
+        latents[idx] = (normalized * target_std + target_mean).squeeze(0)
+
+    return latents
 
 
 def generate_sample_v2v_join(
@@ -1012,6 +1151,9 @@ def generate_sample_v2v_join(
     use_apg=False,
     apg_momentum=-0.75,
     apg_norm_threshold=55.0,
+    soft_blend_frames=0,
+    latent_blend_frames=0,
+    use_stats_matching=False,
 ):
     """
     Generate video joining with dual conditioning (start and end frames).
@@ -1109,6 +1251,9 @@ def generate_sample_v2v_join(
                 use_apg=use_apg,
                 apg_momentum=apg_momentum,
                 apg_norm_threshold=apg_norm_threshold,
+                soft_blend_frames=soft_blend_frames,
+                latent_blend_frames=latent_blend_frames,
+                use_stats_matching=use_stats_matching,
             )
 
     # Handle early stop results
