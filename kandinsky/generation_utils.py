@@ -1,6 +1,7 @@
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "False"
 
+import math
 import torch
 from tqdm import tqdm
 
@@ -188,7 +189,7 @@ def normalize_generated_frames_to_conditioning(latents, num_cond_frames=4, trans
     return samples
 
 
-def normalize_join_frames(latents, num_start_cond=1, num_end_cond=1, transition_frames=4, clump_values=True):
+def normalize_join_frames(latents, num_start_cond=1, num_end_cond=1, transition_frames=4, clump_values=True, gradual_blend=True):
     """
     Normalize generated frames for video joining/image interpolation.
     Handles dual-ended conditioning by normalizing frames near both the start and end.
@@ -199,6 +200,7 @@ def normalize_join_frames(latents, num_start_cond=1, num_end_cond=1, transition_
         num_end_cond: Number of conditioning frames at the end
         transition_frames: Number of frames to normalize at each end
         clump_values: Whether to clamp normalized values to reference range
+        gradual_blend: If True, normalize ALL frames with position-based blending
 
     Returns:
         Normalized latents with smooth transitions at both ends
@@ -214,29 +216,53 @@ def normalize_join_frames(latents, num_start_cond=1, num_end_cond=1, transition_
     if gen_start >= gen_end:
         return latents  # No generated frames to normalize
 
-    # Normalize frames after start conditioning
     start_cond_frames = samples[:num_start_cond]
-    num_start_normalize = min(transition_frames, gen_end - gen_start)
-    if num_start_normalize > 0:
-        start_gen_frames = samples[gen_start:gen_start + num_start_normalize]
-        normalized_start = adaptive_mean_std_normalization(start_gen_frames, start_cond_frames)
-        if clump_values:
-            min_val = start_cond_frames.min()
-            max_val = start_cond_frames.max()
-            normalized_start = torch.clamp(normalized_start, min_val, max_val)
-        samples[gen_start:gen_start + num_start_normalize] = normalized_start
-
-    # Normalize frames before end conditioning
     end_cond_frames = samples[-num_end_cond:] if num_end_cond > 0 else samples[-1:]
-    num_end_normalize = min(transition_frames, gen_end - gen_start)
-    if num_end_normalize > 0:
-        end_gen_frames = samples[gen_end - num_end_normalize:gen_end]
-        normalized_end = adaptive_mean_std_normalization(end_gen_frames, end_cond_frames)
-        if clump_values:
-            min_val = end_cond_frames.min()
-            max_val = end_cond_frames.max()
-            normalized_end = torch.clamp(normalized_end, min_val, max_val)
-        samples[gen_end - num_end_normalize:gen_end] = normalized_end
+
+    if gradual_blend:
+        # Normalize ALL generated frames with position-based weighting
+        # First half uses start reference, second half transitions to end reference
+        for frame_idx in range(gen_start, gen_end):
+            progress = (frame_idx - gen_start) / max(1, (gen_end - gen_start - 1))  # 0 to 1
+            frame = samples[frame_idx:frame_idx+1]  # Keep dimension
+
+            # Normalize to both references
+            norm_to_start = adaptive_mean_std_normalization(frame, start_cond_frames)
+            norm_to_end = adaptive_mean_std_normalization(frame, end_cond_frames)
+
+            # Blend based on position: first half -> start, second half -> end
+            # Smooth transition using cosine
+            blend_weight = 0.5 * (1 - math.cos(progress * math.pi))  # 0 at start, 1 at end
+            normalized = (1 - blend_weight) * norm_to_start + blend_weight * norm_to_end
+
+            if clump_values:
+                # Blend the clamp ranges too
+                min_val = (1 - blend_weight) * start_cond_frames.min() + blend_weight * end_cond_frames.min()
+                max_val = (1 - blend_weight) * start_cond_frames.max() + blend_weight * end_cond_frames.max()
+                normalized = torch.clamp(normalized, min_val, max_val)
+
+            samples[frame_idx] = normalized[0]
+    else:
+        # Original edge-only normalization
+        num_start_normalize = min(transition_frames, gen_end - gen_start)
+        if num_start_normalize > 0:
+            start_gen_frames = samples[gen_start:gen_start + num_start_normalize]
+            normalized_start = adaptive_mean_std_normalization(start_gen_frames, start_cond_frames)
+            if clump_values:
+                min_val = start_cond_frames.min()
+                max_val = start_cond_frames.max()
+                normalized_start = torch.clamp(normalized_start, min_val, max_val)
+            samples[gen_start:gen_start + num_start_normalize] = normalized_start
+
+        num_end_normalize = min(transition_frames, gen_end - gen_start)
+        if num_end_normalize > 0:
+            end_gen_frames = samples[gen_end - num_end_normalize:gen_end]
+            normalized_end = adaptive_mean_std_normalization(end_gen_frames, end_cond_frames)
+            if clump_values:
+                min_val = end_cond_frames.min()
+                max_val = end_cond_frames.max()
+                normalized_end = torch.clamp(normalized_end, min_val, max_val)
+            samples[gen_end - num_end_normalize:gen_end] = normalized_end
 
     return samples
 
@@ -976,6 +1002,40 @@ def generate_v2v_join(
     g.manual_seed(seed)
     # Generate noise for FULL sequence (start_cond + middle + end_cond)
     img = torch.randn(*shape, device=device, generator=g)
+
+    # Initialize middle frames with position-dependent blend of start/end conditioning
+    # This creates a gradual transition: first half uses start image as noise basis,
+    # second half transitions to end image as noise basis
+    total_frames = img.shape[0]
+    start_cond_device = start_cond_latents.to(device=img.device, dtype=img.dtype)
+    end_cond_device = end_cond_latents.to(device=img.device, dtype=img.dtype)
+
+    for frame_idx in range(num_start_cond_frames, total_frames - num_end_cond_frames):
+        # Calculate normalized position in the generated (middle) section
+        gen_start = num_start_cond_frames
+        gen_end = total_frames - num_end_cond_frames
+        progress = (frame_idx - gen_start) / max(1, (gen_end - gen_start - 1))  # 0 to 1
+
+        # Noise amount follows a bell curve: maximum in the middle, minimum at edges
+        # Use cosine for smooth transition: cos(progress * pi) goes from 1 to -1
+        noise_strength = 0.5 + 0.5 * abs(math.cos(progress * math.pi))  # Peaks at center
+
+        # Blend between start and end conditioning based on position
+        if progress < 0.5:
+            # First half: primarily use start conditioning
+            blend = progress * 2  # 0 to 1 over first half
+            base_latent = (1 - blend) * start_cond_device[-1] + blend * (
+                0.5 * start_cond_device[-1] + 0.5 * end_cond_device[0]
+            )
+        else:
+            # Second half: transition to end conditioning
+            blend = (progress - 0.5) * 2  # 0 to 1 over second half
+            base_latent = (1 - blend) * (
+                0.5 * start_cond_device[-1] + 0.5 * end_cond_device[0]
+            ) + blend * end_cond_device[0]
+
+        # Blend between base latent and noise based on noise_strength
+        img[frame_idx] = (1 - noise_strength) * base_latent + noise_strength * img[frame_idx]
 
     # Store original noise for early-stop decode
     original_noise = img.clone()
