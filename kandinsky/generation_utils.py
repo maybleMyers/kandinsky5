@@ -1003,10 +1003,39 @@ def generate_v2v_join(
     # Generate noise for FULL sequence (start_cond + middle + end_cond)
     img = torch.randn(*shape, device=device, generator=g)
 
+    total_frames = img.shape[0]
+
+    # Initialize middle noise with position-based blend toward start/end conditioning
+    # First half: blend noise with start_cond (more noise in middle, less near start)
+    # Second half: blend noise with end_cond (more noise in middle, less near end)
+    start_cond_device = start_cond_latents.to(device=img.device, dtype=img.dtype)
+    end_cond_device = end_cond_latents.to(device=img.device, dtype=img.dtype)
+    gen_start = num_start_cond_frames
+    gen_end = total_frames - num_end_cond_frames
+    num_gen_frames = gen_end - gen_start
+
+    if num_gen_frames > 0:
+        mid_point = gen_start + num_gen_frames // 2
+        for frame_idx in range(gen_start, gen_end):
+            if frame_idx < mid_point:
+                # First half: blend with start_cond
+                # progress: 0 at gen_start, 1 at mid_point
+                progress = (frame_idx - gen_start) / max(1, mid_point - gen_start)
+                # More noise in middle (progress=1), less near start (progress=0)
+                # noise_ratio goes from 0.8 near start to 1.0 at middle
+                noise_ratio = 0.8 + 0.2 * progress
+                img[frame_idx] = noise_ratio * img[frame_idx] + (1 - noise_ratio) * start_cond_device[-1]
+            else:
+                # Second half: blend with end_cond
+                # progress: 0 at mid_point, 1 at gen_end
+                progress = (frame_idx - mid_point) / max(1, gen_end - 1 - mid_point)
+                # More noise in middle (progress=0), less near end (progress=1)
+                # noise_ratio goes from 1.0 at middle to 0.8 near end
+                noise_ratio = 1.0 - 0.2 * progress
+                img[frame_idx] = noise_ratio * img[frame_idx] + (1 - noise_ratio) * end_cond_device[0]
+
     # Store original noise for early-stop decode
     original_noise = img.clone()
-
-    total_frames = img.shape[0]
 
     sparse_params = get_sparse_params(conf, {"visual": img}, device)
     timesteps = torch.linspace(1, 0, num_steps + 1, device=device)
@@ -1031,27 +1060,6 @@ def generate_v2v_join(
             img[-num_end_cond_frames:] = end_cond_device
             visual_cond_mask[:num_start_cond_frames] = 1
             visual_cond_mask[-num_end_cond_frames:] = 1
-
-            # Add gradual conditioning for middle frames
-            # This provides a "hint" to the model about the transition direction
-            gen_start = num_start_cond_frames
-            gen_end = total_frames - num_end_cond_frames
-            if gen_end > gen_start:
-                for frame_idx in range(gen_start, gen_end):
-                    # Progress from 0 (near start) to 1 (near end)
-                    progress = (frame_idx - gen_start) / max(1, (gen_end - gen_start - 1))
-
-                    # Blend conditioning: first half leans toward start, second half toward end
-                    if progress < 0.5:
-                        # First half: use start conditioning as visual_cond hint
-                        visual_cond[frame_idx] = start_cond_device[-1]
-                        # Mask fades from ~0.3 near start to 0 at middle
-                        visual_cond_mask[frame_idx] = 0.3 * (1 - progress * 2)
-                    else:
-                        # Second half: use end conditioning as visual_cond hint
-                        visual_cond[frame_idx] = end_cond_device[0]
-                        # Mask grows from 0 at middle to ~0.3 near end
-                        visual_cond_mask[frame_idx] = 0.3 * ((progress - 0.5) * 2)
 
             model_input = torch.cat([img, visual_cond, visual_cond_mask], dim=-1)
         else:
