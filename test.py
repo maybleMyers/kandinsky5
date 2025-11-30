@@ -1187,6 +1187,7 @@ if __name__ == "__main__":
             print(f">>> VIDEO CONTINUATION MODE")
             print(f">>> Input video: {args.video}")
             print(f">>> Conditioning frames: {args.num_cond_frames}")
+            print(f">>> Blend settings: soft_blend_frames={args.soft_blend_frames}, latent_blend_frames={args.latent_blend_frames}, stats_matching={args.use_stats_matching}")
 
             alignment = 128 if args.attention_type == "nabla" else 32
 
@@ -1293,6 +1294,9 @@ if __name__ == "__main__":
                 use_apg=args.use_apg,
                 apg_momentum=args.apg_momentum,
                 apg_norm_threshold=args.apg_norm_threshold,
+                soft_blend_frames=args.soft_blend_frames,
+                latent_blend_frames=args.latent_blend_frames,
+                use_stats_matching=args.use_stats_matching,
             )
 
             # Concatenate input video with newly generated frames

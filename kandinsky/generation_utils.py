@@ -676,6 +676,9 @@ def generate_v2v(
     use_apg=False,
     apg_momentum=-0.75,
     apg_norm_threshold=55.0,
+    soft_blend_frames=0,
+    latent_blend_frames=0,
+    use_stats_matching=False,
 ):
     """
     Generate video continuation using visual conditioning (like I2V but with multiple frames).
@@ -694,12 +697,16 @@ def generate_v2v(
         scheduler_scale: Scheduler scale
         cond_latents: Conditioning latents [num_cond_frames, H, W, C]
         conf: Model configuration
+        soft_blend_frames: Number of frames for soft transition masks (0 = disabled)
+        latent_blend_frames: Number of frames for latent blending at boundaries (0 = disabled)
+        use_stats_matching: Whether to match generated frame statistics to conditioning
         ...
 
     Returns:
         Generated latents for full sequence
     """
     num_cond_frames = cond_latents.shape[0]
+    total_frames = shape[0]
 
     g = torch.Generator(device="cuda")
     g.manual_seed(seed)
@@ -719,6 +726,9 @@ def generate_v2v(
     # Initialize APG momentum buffer if enabled
     momentum_buffer = MomentumBuffer(apg_momentum) if use_apg else None
 
+    # Pre-compute conditioning latents on device
+    cond_latents_device = cond_latents.to(device=device, dtype=img.dtype)
+
     for i, (timestep, timestep_diff) in enumerate(tqdm(list(zip(timesteps[:-1], torch.diff(timesteps))))):
         time = timestep.unsqueeze(0)
 
@@ -727,9 +737,23 @@ def generate_v2v(
             visual_cond_mask = torch.zeros(
                 [*img.shape[:-1], 1], dtype=img.dtype, device=img.device
             )
-            cond_latents_device = cond_latents.to(device=img.device, dtype=img.dtype)
-            img[:num_cond_frames] = cond_latents_device
-            visual_cond_mask[:num_cond_frames] = 1
+
+            # Put clean latents in visual_cond (matching training behavior)
+            visual_cond[:num_cond_frames] = cond_latents_device
+
+            # Soft transition masks for smooth transitions at boundary
+            if soft_blend_frames > 0:
+                visual_cond_mask[:num_cond_frames] = 1
+
+                # Gradient transition after conditioning frames
+                for b in range(soft_blend_frames):
+                    idx = num_cond_frames + b
+                    if idx < total_frames:
+                        alpha = 1.0 - (b + 1) / (soft_blend_frames + 1)
+                        visual_cond_mask[idx] = alpha
+                        visual_cond[idx] = cond_latents_device[-1]
+            else:
+                visual_cond_mask[:num_cond_frames] = 1
 
             model_input = torch.cat([img, visual_cond, visual_cond_mask], dim=-1)
         else:
@@ -783,6 +807,14 @@ def generate_v2v(
 
         img = img + timestep_diff * pred_velocity
 
+        # Latent blending at transition boundary during denoising
+        if latent_blend_frames > 0:
+            for b in range(latent_blend_frames):
+                idx = num_cond_frames + b
+                if idx < total_frames:
+                    alpha = (b + 1) / (latent_blend_frames + 1)
+                    img[idx] = (1 - alpha) * cond_latents_device[-1] + alpha * img[idx]
+
         # Check for early stop request
         if stop_check is not None:
             action = stop_check()
@@ -808,8 +840,58 @@ def generate_v2v(
                 print(f">>> ERROR during preview generation at step {i + 1}: {e}", flush=True)
 
     # Ensure conditioning frames are exactly preserved in final output
-    img[:num_cond_frames] = cond_latents.to(device=img.device, dtype=img.dtype)
+    img[:num_cond_frames] = cond_latents_device
+
+    # Optional statistics matching for transition frames
+    if use_stats_matching:
+        img = match_continuation_statistics(
+            img,
+            cond_latents_device,
+            num_cond_frames,
+            transition_frames=max(4, latent_blend_frames)
+        )
+
     return img
+
+
+def match_continuation_statistics(latents, cond_latents, num_cond, transition_frames=4):
+    """
+    Match generated frame statistics to conditioning frames at the transition boundary.
+
+    Args:
+        latents: Full latent tensor [total_frames, H, W, C]
+        cond_latents: Conditioning latents
+        num_cond: Number of conditioning frames
+        transition_frames: Number of generated frames to normalize
+
+    Returns:
+        Normalized latents with smooth transition
+    """
+    latents = latents.clone()
+    total_frames = latents.shape[0]
+
+    # Get reference statistics from last conditioning frame
+    ref = cond_latents[-1:]
+    ref_mean = ref.mean(dim=(0, 1, 2), keepdim=True)
+    ref_std = ref.std(dim=(0, 1, 2), keepdim=True) + 1e-6
+
+    # Normalize transition zone
+    for i in range(transition_frames):
+        idx = num_cond + i
+        if idx >= total_frames:
+            break
+
+        weight = 1 - (i + 1) / (transition_frames + 1)
+        frame = latents[idx:idx+1]
+        frame_mean = frame.mean(dim=(0, 1, 2), keepdim=True)
+        frame_std = frame.std(dim=(0, 1, 2), keepdim=True) + 1e-6
+
+        normalized = (frame - frame_mean) / frame_std
+        target_mean = weight * ref_mean + (1 - weight) * frame_mean
+        target_std = weight * ref_std + (1 - weight) * frame_std
+        latents[idx] = (normalized * target_std + target_mean).squeeze(0)
+
+    return latents
 
 
 def generate_v2v_join(
@@ -1368,6 +1450,9 @@ def generate_sample_v2v(
     use_apg=False,
     apg_momentum=-0.75,
     apg_norm_threshold=55.0,
+    soft_blend_frames=0,
+    latent_blend_frames=0,
+    use_stats_matching=False,
 ):
     """
     Generate video continuation from conditioning latents using KV cache.
@@ -1466,6 +1551,9 @@ def generate_sample_v2v(
                 use_apg=use_apg,
                 apg_momentum=apg_momentum,
                 apg_norm_threshold=apg_norm_threshold,
+                soft_blend_frames=soft_blend_frames,
+                latent_blend_frames=latent_blend_frames,
+                use_stats_matching=use_stats_matching,
             )
 
     # Handle early stop results
