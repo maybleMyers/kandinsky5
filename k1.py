@@ -67,6 +67,7 @@ def generate_video(
     prompt: str,
     negative_prompt: str,
     input_image: str,
+    end_image: str,
     mode: str,
     model_config: str,
     dit_checkpoint_path: str,
@@ -217,6 +218,9 @@ def generate_video(
                 yield all_generated_videos, "Error: Input image required for i2v mode.", ""
                 return
             command.extend(["--image", str(input_image)])
+            # Add end image if provided (for image-to-image video generation)
+            if end_image:
+                command.extend(["--end_image", str(end_image)])
             # Pass width and height for i2v mode to resize the input image
             command.extend(["--width", str(int(width))])
             command.extend(["--height", str(int(height))])
@@ -325,6 +329,7 @@ def generate_video(
                     "prompt": prompt,
                     "negative_prompt": negative_prompt,
                     "image_path": os.path.basename(input_image) if input_image else None,
+                    "end_image_path": os.path.basename(end_image) if end_image else None,
                     "width": int(width),
                     "height": int(height),
                     "video_duration": video_duration,
@@ -1121,7 +1126,7 @@ def extract_video_details(video_path: str) -> Tuple[dict, str]:
 def send_to_generation(video_path, metadata):
     """Extract first frame and map metadata to generation inputs using subprocess."""
     if not video_path:
-        return [gr.update()] * 35
+        return [gr.update()] * 36
 
     # 1. Extract First Frame as PIL Image using subprocess
     input_img_pil = None
@@ -1161,6 +1166,7 @@ def send_to_generation(video_path, metadata):
         get("prompt"),                  # prompt
         get("negative_prompt"),         # negative_prompt
         input_img_pil,                  # input_image (First Frame)
+        None,                           # end_image (not populated from video)
         "i2v",                          # mode (Force to i2v)
         get("model_config"),            # model_config
         get("attention_engine"),        # attention_engine
@@ -1499,6 +1505,7 @@ def create_interface():
                 with gr.Row():
                     with gr.Column():
                         input_image = gr.Image(label="Input Image (for i2v mode)", type="filepath")
+                        end_image = gr.Image(label="End Image (optional - for start-to-end video)", type="filepath")
 
                         gr.Markdown("### Generation Parameters")
                         mode = gr.Dropdown(
@@ -1736,7 +1743,7 @@ def create_interface():
                 generate_btn.click(
                     fn=generate_video,
                     inputs=[
-                        prompt, negative_prompt, input_image, mode, model_config, dit_checkpoint_path, attention_engine,
+                        prompt, negative_prompt, input_image, end_image, mode, model_config, dit_checkpoint_path, attention_engine,
                         attention_type, nabla_P, nabla_wT, nabla_wW, nabla_wH,
                         width, height, video_duration, sample_steps,
                         guidance_weight, scheduler_scale, seed,
@@ -2203,37 +2210,38 @@ def create_interface():
                         prompt,                     # 2
                         negative_prompt,            # 3
                         input_image,                # 4
-                        mode,                       # 5
-                        model_config,               # 6
-                        attention_engine,           # 7
-                        attention_type,             # 8
-                        dit_checkpoint_path,        # 9
-                        nabla_P,                    # 10
-                        nabla_wT,                   # 11
-                        nabla_wW,                   # 12
-                        nabla_wH,                   # 13
-                        width,                      # 14
-                        height,                     # 15
-                        video_duration,             # 16
-                        sample_steps,               # 17
-                        guidance_weight,            # 18
-                        scheduler_scale,            # 19
-                        seed,                       # 20
-                        use_mixed_weights,          # 21
-                        use_int8,                   # 22
-                        use_torch_compile,          # 23
-                        use_magcache,               # 24
-                        enable_block_swap,          # 25
-                        blocks_in_memory,           # 26
-                        dtype_select,               # 27
-                        text_encoder_dtype_select,  # 28
-                        vae_dtype_select,           # 29
-                        computation_dtype_select,   # 30
-                        enable_vae_chunking,        # 31
-                        vae_temporal_tile_frames,   # 32
-                        vae_temporal_stride_frames, # 33
-                        vae_spatial_tile_height,    # 34
-                        vae_spatial_tile_width      # 35
+                        end_image,                  # 5
+                        mode,                       # 6
+                        model_config,               # 7
+                        attention_engine,           # 8
+                        attention_type,             # 9
+                        dit_checkpoint_path,        # 10
+                        nabla_P,                    # 11
+                        nabla_wT,                   # 12
+                        nabla_wW,                   # 13
+                        nabla_wH,                   # 14
+                        width,                      # 15
+                        height,                     # 16
+                        video_duration,             # 17
+                        sample_steps,               # 18
+                        guidance_weight,            # 19
+                        scheduler_scale,            # 20
+                        seed,                       # 21
+                        use_mixed_weights,          # 22
+                        use_int8,                   # 23
+                        use_torch_compile,          # 24
+                        use_magcache,               # 25
+                        enable_block_swap,          # 26
+                        blocks_in_memory,           # 27
+                        dtype_select,               # 28
+                        text_encoder_dtype_select,  # 29
+                        vae_dtype_select,           # 30
+                        computation_dtype_select,   # 31
+                        enable_vae_chunking,        # 32
+                        vae_temporal_tile_frames,   # 33
+                        vae_temporal_stride_frames, # 34
+                        vae_spatial_tile_height,    # 35
+                        vae_spatial_tile_width      # 36
                     ]
                 )
 
