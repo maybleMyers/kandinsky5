@@ -514,43 +514,6 @@ if __name__ == "__main__":
     is_t2i = "t2i" in args.config.lower()
     is_i2v = "i2v" in args.config.lower()
     is_t2v_pro = "t2v" in args.config.lower() and ("pro" in args.config.lower() or "20b" in args.config.lower())
-    is_denoise_mode = args.denoise and args.video is not None
-
-    # For denoise mode, encode video BEFORE loading DiT to maximize VRAM for encoding
-    denoise_video_latents = None
-    denoise_scale_factor = None
-    denoise_num_frames = None
-    if is_denoise_mode:
-        print(f">>> VIDEO DENOISE MODE - Pre-encoding video before loading DiT")
-        print(f">>> Input video: {args.video}")
-
-        # Load only VAE for encoding
-        from kandinsky.models.vae import build_vae
-        from omegaconf import OmegaConf
-        conf = OmegaConf.load(args.config)
-
-        vae_conf = conf.model.vae
-
-        print(f">>> Loading VAE for video encoding...")
-        vae = build_vae(vae_conf, dtype=vae_dtype if vae_dtype is not None else torch.bfloat16)
-        vae = vae.to("cuda:0")
-        vae.eval()
-
-        alignment = 128 if args.attention_type == "nabla" else 32
-
-        print(f">>> Encoding video to latent space...")
-        denoise_video_latents, denoise_scale_factor, denoise_num_frames = encode_video_to_latents(
-            args.video,
-            vae,
-            "cuda:0",
-            alignment=alignment
-        )
-        print(f">>> Video encoded: {denoise_num_frames} frames -> {denoise_video_latents.shape[0]} latent frames")
-
-        # Unload VAE to free VRAM for DiT
-        del vae
-        torch.cuda.empty_cache()
-        print(f">>> VAE unloaded, loading full pipeline...")
 
     if is_t2i:
         # Use T2I pipeline for text-to-image generation
@@ -859,15 +822,38 @@ if __name__ == "__main__":
                  save_path=args.output_filename,
                  seed=args.seed)
     elif args.denoise and args.video is not None:
-        # VIDEO DENOISE MODE - uses pre-encoded latents from before DiT loading
+        # VIDEO DENOISE MODE - applies light denoising to smooth artifacts
+        print(f">>> VIDEO DENOISE MODE")
+        print(f">>> Input video: {args.video}")
         print(f">>> Denoise strength: {args.denoise_strength}")
 
+        alignment = 128 if args.attention_type == "nabla" else 32
         force_offload = hasattr(pipe.dit, 'enable_block_swap') and pipe.dit.enable_block_swap
 
-        # Use pre-encoded latents (encoded before DiT was loaded to maximize VRAM)
-        video_latents = denoise_video_latents
-        scale_factor = denoise_scale_factor
-        num_frames = denoise_num_frames
+        # Offload DiT BEFORE VAE encoding to free up VRAM
+        if hasattr(pipe.dit, 'offload_all_blocks'):
+            pipe.dit.offload_all_blocks()
+        if pipe.offload or force_offload:
+            pipe.dit = pipe.dit.to("cpu", non_blocking=True)
+        torch.cuda.empty_cache()
+
+        # Load VAE for encoding
+        if pipe.offload or force_offload:
+            pipe.vae = pipe.vae.to(pipe.device_map["vae"], non_blocking=True)
+
+        # Encode video to latents
+        print(f">>> Encoding video to latent space...", flush=True)
+        video_latents, scale_factor, num_frames = encode_video_to_latents(
+            args.video,
+            pipe.vae,
+            pipe.device_map["vae"],
+            alignment=alignment
+        )
+
+        # Offload VAE after encoding
+        if pipe.offload or force_offload:
+            pipe.vae = pipe.vae.to("cpu", non_blocking=True)
+            torch.cuda.empty_cache()
 
         print(f">>> Video latents shape: {video_latents.shape}")
         print(f">>> Input video frames: {num_frames}, Latent frames: {video_latents.shape[0]}")
@@ -899,7 +885,6 @@ if __name__ == "__main__":
             progress=True,
             offload=pipe.offload,
             force_offload=force_offload,
-            num_cond_frames=args.num_cond_frames,
         )
 
         # Save output

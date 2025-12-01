@@ -1910,7 +1910,6 @@ def generate_denoise(
     progress=False,
     attention_mask=None,
     null_attention_mask=None,
-    num_cond_frames=1,
 ):
     """
     Denoise latents starting from a given timestep (for v2v img2img style processing).
@@ -1929,7 +1928,6 @@ def generate_denoise(
         guidance_weight: CFG weight
         scheduler_scale: Scheduler scale
         conf: Model configuration
-        num_cond_frames: Number of frames to keep clean as conditioning (default 1)
 
     Returns:
         Denoised latents
@@ -1950,40 +1948,17 @@ def generate_denoise(
     t = start_timestep
     img = (1 - t) * latents + t * noise
 
-    # Keep conditioning frames clean (no noise added)
-    # These frames serve as the anchor/reference for the model
-    if num_cond_frames > 0:
-        img[:num_cond_frames] = latents[:num_cond_frames]
-        print(f">>> Keeping first {num_cond_frames} frame(s) clean as conditioning", flush=True)
-
     print(f">>> Denoising from timestep {start_timestep:.3f} with {num_steps} steps", flush=True)
-
-    # Pre-compute visual conditioning (clean first frames as reference)
-    if model.visual_cond and num_cond_frames > 0:
-        # visual_cond contains clean latents for conditioning frames
-        visual_cond_static = torch.zeros_like(latents)
-        visual_cond_static[:num_cond_frames] = latents[:num_cond_frames]
-
-        # Mask indicates which frames are conditioning (1) vs to be denoised (0)
-        visual_cond_mask_static = torch.zeros(
-            [*latents.shape[:-1], 1], dtype=latents.dtype, device=latents.device
-        )
-        visual_cond_mask_static[:num_cond_frames] = 1.0
 
     for i, (timestep, timestep_diff) in enumerate(tqdm(list(zip(timesteps[:-1], torch.diff(timesteps))))):
         time = timestep.unsqueeze(0)
 
         if model.visual_cond:
-            if num_cond_frames > 0:
-                # Use the clean conditioning frames as visual reference
-                model_input = torch.cat([img, visual_cond_static, visual_cond_mask_static], dim=-1)
-            else:
-                # No conditioning - original behavior
-                visual_cond = torch.zeros_like(img)
-                visual_cond_mask = torch.zeros(
-                    [*img.shape[:-1], 1], dtype=img.dtype, device=img.device
-                )
-                model_input = torch.cat([img, visual_cond, visual_cond_mask], dim=-1)
+            visual_cond = torch.zeros_like(img)
+            visual_cond_mask = torch.zeros(
+                [*img.shape[:-1], 1], dtype=img.dtype, device=img.device
+            )
+            model_input = torch.cat([img, visual_cond, visual_cond_mask], dim=-1)
         else:
             model_input = img
 
@@ -2019,10 +1994,6 @@ def generate_denoise(
 
         img = img + timestep_diff * pred_velocity
 
-        # Ensure conditioning frames stay clean (model might have modified them slightly)
-        if num_cond_frames > 0:
-            img[:num_cond_frames] = latents[:num_cond_frames]
-
     return img
 
 
@@ -2047,7 +2018,6 @@ def generate_sample_denoise(
     force_offload=False,
     chunk_frames=31,
     chunk_overlap=4,
-    num_cond_frames=1,
 ):
     """
     Apply light denoising to video latents (v2v img2img style).
@@ -2069,7 +2039,6 @@ def generate_sample_denoise(
         scheduler_scale: Scheduler scale
         chunk_frames: Max frames per chunk (default 31 = 5 seconds)
         chunk_overlap: Overlap frames between chunks for blending (default 4)
-        num_cond_frames: Number of frames to keep clean as conditioning (default 1)
         ...
 
     Returns:
@@ -2122,11 +2091,8 @@ def generate_sample_denoise(
     torch.manual_seed(seed)
 
     # Process video in chunks
-    if total_frames <= chunk_frames:
-        num_chunks = 1
-    else:
-        num_chunks = (total_frames - chunk_overlap - 1) // (chunk_frames - chunk_overlap) + 1
-        num_chunks = max(1, num_chunks)
+    num_chunks = (total_frames + chunk_frames - chunk_overlap - 1) // (chunk_frames - chunk_overlap)
+    num_chunks = max(1, num_chunks)
 
     print(f">>> Denoising video with strength {denoise_strength}...", flush=True)
     print(f">>> Total frames: {total_frames}, processing in {num_chunks} chunk(s) of {chunk_frames} frames", flush=True)
@@ -2157,10 +2123,6 @@ def generate_sample_denoise(
                 ]
 
                 # Denoise this chunk
-                # Only use conditioning frames for the first chunk
-                # Subsequent chunks rely on overlap blending for continuity
-                chunk_cond_frames = num_cond_frames if chunk_start == 0 else 0
-
                 chunk_result = generate_denoise(
                     dit,
                     device,
@@ -2178,7 +2140,6 @@ def generate_sample_denoise(
                     progress=progress,
                     attention_mask=attention_mask,
                     null_attention_mask=null_attention_mask,
-                    num_cond_frames=chunk_cond_frames,
                 )
 
                 # Move result back to CPU to save VRAM

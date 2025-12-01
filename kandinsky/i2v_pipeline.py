@@ -365,42 +365,110 @@ def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24
 
     vae_dtype = next(vae.parameters()).dtype
 
+    # Encode video in small chunks to avoid OOM
+    # Memory-aware chunk sizing (inverse of VAE decode's _get_source_style_tiling)
+    # Decode formula: max_area = free_mem / 256 / 17 / 8
+    # Encode inverse: max_frames = free_mem / 256 / 8 / (h_pix * w_pix)
+    h_pix, w_pix = target_h, target_w
+
+    free_mem = torch.cuda.mem_get_info()[0]
+
+    # Memory constraint: max_frames = free_mem / (256 * 8 * h_pix * w_pix)
+    # This is the inverse of: max_area = free_mem / 256 / frames / 8
+    max_frames_mem = free_mem / (256 * 8 * (h_pix * w_pix))
+
+    # Integer overflow constraint (same as decode's num_vals < 2**31)
+    # num_vals = 256 * frames * (h_pix + 32) * (w_pix + 32) < 2**31
+    max_frames_vals = (2**31) / (256 * (h_pix + 32) * (w_pix + 32))
+
+    # Take the minimum of both constraints
+    max_frames = min(max_frames_mem, max_frames_vals)
+
+    # Convert to integer and apply safety margin (70%)
+    video_chunk_size = int(max_frames * 0.7)
+
+    # Clamp to reasonable range
+    video_chunk_size = max(5, min(video_chunk_size, 121))  # min 5, max 121 (5 seconds)
+
+    # Ensure (frames - 1) is divisible by 4 for clean VAE temporal compression
+    # Valid sizes: 5, 9, 13, 17, 21, 25, ... (1 + 4*n)
+    video_chunk_size = ((video_chunk_size - 1) // 4) * 4 + 1
+
+    latent_chunks = []
+
     print(f">>> Encoding video to latent space (4x temporal compression)...", flush=True)
-    print(f">>> Resolution: {target_w}x{target_h}, {num_video_frames} frames", flush=True)
+    print(f">>> Resolution: {w_pix}x{h_pix}, Free VRAM: {free_mem/1024**3:.1f}GB -> chunk size: {video_chunk_size} frames", flush=True)
 
-    # Convert all PIL frames to tensor
-    frame_tensors = []
-    for pil_image in pil_frames:
-        image = F.pil_to_tensor(pil_image).unsqueeze(0).float()
-        if image.shape[2] != target_h or image.shape[3] != target_w:
-            image = F_torch.interpolate(image, size=(target_h, target_w), mode='bilinear', align_corners=False)
-        image = image / 127.5 - 1.
-        frame_tensors.append(image)
-
-    # Stack frames on CPU: [N, C, H, W] -> [1, C, N, H, W]
-    video_tensor = torch.cat(frame_tensors, dim=0)  # [N, C, H, W]
-    video_tensor = video_tensor.permute(1, 0, 2, 3).unsqueeze(0)  # [1, C, N, H, W]
-    video_tensor = video_tensor.to(dtype=vae_dtype)  # Keep on CPU, just convert dtype
-
-    del frame_tensors
-
-    # Use VAE's built-in encoding with automatic tiling
-    # Keep video on CPU - VAE's temporal tiling will move only tiles to GPU
     with torch.no_grad():
-        latents = vae.encode(video_tensor, opt_tiling=True).latent_dist.sample()
+        chunk_idx = 0
+        for chunk_start in range(0, num_video_frames, video_chunk_size):
+            chunk_end = min(chunk_start + video_chunk_size, num_video_frames)
+            actual_chunk_frames = chunk_end - chunk_start
 
-    del video_tensor
-    torch.cuda.empty_cache()
+            # Skip chunks that are too small (need at least 5 frames for VAE)
+            if actual_chunk_frames < 5:
+                # For the last small chunk, include it with the previous chunk's latents
+                # by encoding frames individually
+                for i in range(chunk_start, chunk_end):
+                    pil_image = pil_frames[i]
+                    image = F.pil_to_tensor(pil_image).unsqueeze(0).float()
+                    if image.shape[2] != target_h or image.shape[3] != target_w:
+                        image = F_torch.interpolate(image, size=(target_h, target_w), mode='bilinear', align_corners=False)
+                    image = image / 127.5 - 1.
 
-    # Convert to [latent_T, latent_H, latent_W, latent_C] format
-    latents = latents.squeeze(0).permute(1, 2, 3, 0)
-    latents = latents * vae.config.scaling_factor
-    latents = latents.cpu()
+                    # Encode single frame: [1, C, H, W] -> [1, C, 1, H, W]
+                    image = image.to(device=device, dtype=vae_dtype)
+                    image = image.unsqueeze(2)  # Add temporal dim
+                    latent = vae.encode(image, opt_tiling=False).latent_dist.sample()
+                    latent = latent.squeeze(0).permute(1, 2, 3, 0) * vae.config.scaling_factor
+                    latent_chunks.append(latent.cpu())
+                    del image, latent
+                    torch.cuda.empty_cache()
+                continue
 
+            # Convert PIL frames to tensor for this chunk only
+            chunk_tensors = []
+            for i in range(chunk_start, chunk_end):
+                pil_image = pil_frames[i]
+                image = F.pil_to_tensor(pil_image).unsqueeze(0).float()
+                if image.shape[2] != target_h or image.shape[3] != target_w:
+                    image = F_torch.interpolate(image, size=(target_h, target_w), mode='bilinear', align_corners=False)
+                image = image / 127.5 - 1.
+                chunk_tensors.append(image)
+
+            # Stack chunk frames: [N, C, H, W] -> [1, C, N, H, W]
+            chunk = torch.cat(chunk_tensors, dim=0)  # [N, C, H, W]
+            chunk = chunk.permute(1, 0, 2, 3).unsqueeze(0)  # [1, C, N, H, W]
+            chunk = chunk.to(device=device, dtype=vae_dtype)
+
+            # Free tensor list
+            del chunk_tensors
+
+            if (chunk_idx % 5 == 0) or chunk_idx == 0:
+                print(f">>> Encoding video frames {chunk_start}-{chunk_end} ({actual_chunk_frames} frames)...", flush=True)
+
+            # Encode chunk
+            latent_chunk = vae.encode(chunk, opt_tiling=False).latent_dist.sample()
+            # Output shape: [1, latent_C, latent_T, latent_H, latent_W]
+
+            # Convert to [latent_T, latent_H, latent_W, latent_C] format
+            latent_chunk = latent_chunk.squeeze(0).permute(1, 2, 3, 0)
+            latent_chunk = latent_chunk * vae.config.scaling_factor
+
+            latent_chunks.append(latent_chunk.cpu())
+
+            # Clear GPU memory
+            del chunk, latent_chunk
+            torch.cuda.empty_cache()
+
+            chunk_idx += 1
+
+    # Concatenate all latent chunks
+    latents = torch.cat(latent_chunks, dim=0)
     num_latent_frames = latents.shape[0]
-    expected_latent_frames = (num_video_frames - 1) // 4 + 1
 
-    print(f">>> Video encoded: {num_video_frames} video frames -> {num_latent_frames} latent frames (expected: {expected_latent_frames})", flush=True)
+    print(f">>> Video encoded: {num_video_frames} video frames -> {num_latent_frames} latent frames", flush=True)
+    print(f">>> Latent shape: {latents.shape}", flush=True)
 
     return latents, scale_factor, num_video_frames
 
