@@ -431,6 +431,8 @@ def generate_v2v_video(
     use_apg: bool,
     apg_momentum: float,
     apg_norm_threshold: float,
+    enable_denoise: bool,
+    denoise_strength: float,
 ) -> Generator[Tuple[List[Tuple[str, str]], Optional[str], str, str], None, None]:
     """Generate video from video input (video continuation/v2v mode)."""
     global stop_event, current_process, current_output_filename
@@ -560,6 +562,11 @@ def generate_v2v_video(
             command.append("--use_apg")
             command.extend(["--apg_momentum", str(apg_momentum)])
             command.extend(["--apg_norm_threshold", str(apg_norm_threshold)])
+
+        # Denoise parameters
+        if enable_denoise:
+            command.append("--denoise")
+            command.extend(["--denoise_strength", str(denoise_strength)])
 
         if enable_block_swap:
             command.append("--enable_block_swap")
@@ -1916,6 +1923,27 @@ def create_interface():
                                     info="Threshold for guidance clipping (default: 55.0)"
                                 )
 
+                        with gr.Accordion("Video Denoise (Post-Processing)", open=False):
+                            gr.Markdown("""
+                            Apply light denoising to smooth video artifacts. Useful for:
+                            - Smoothing glitches at video join points
+                            - Reducing compression artifacts
+                            - Light style consistency pass
+
+                            **Note:** This mode ignores continuation/joining settings and processes the entire input video.
+                            Lower strength = less change, higher strength = more smoothing but may alter content.
+                            """)
+                            v2v_enable_denoise = gr.Checkbox(
+                                label="Enable Video Denoise Mode",
+                                value=False,
+                                info="Process input video with light denoising instead of continuation/joining"
+                            )
+                            v2v_denoise_strength = gr.Slider(
+                                minimum=0.05, maximum=0.5, value=0.2, step=0.05,
+                                label="Denoise Strength",
+                                info="Amount of denoising (0.1-0.3 recommended). Higher = more change."
+                            )
+
                         with gr.Accordion("NABLA Sparse Attention Settings", open=False):
                             gr.Markdown("""
                             Configure NABLA sparse attention for memory-efficient long video generation. Recommended for 10s models.
@@ -2141,7 +2169,8 @@ def create_interface():
                         v2v_vae_spatial_tile_height, v2v_vae_spatial_tile_width,
                         v2v_use_prompt_expansion, v2v_clip_prompt,
                         v2v_save_latents_checkbox,
-                        v2v_use_apg, v2v_apg_momentum, v2v_apg_norm_threshold
+                        v2v_use_apg, v2v_apg_momentum, v2v_apg_norm_threshold,
+                        v2v_enable_denoise, v2v_denoise_strength
                     ],
                     outputs=[v2v_output, v2v_preview_output, v2v_batch_progress, v2v_progress_text]
                 )
