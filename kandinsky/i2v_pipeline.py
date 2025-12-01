@@ -371,7 +371,31 @@ def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24
     print(f">>> Encoding video to latent space (4x temporal compression)...", flush=True)
     print(f">>> Resolution: {target_w}x{target_h}, {num_video_frames} frames -> {expected_latent_frames} latents expected", flush=True)
 
-    # Convert all PIL frames to a single tensor
+    # Try VAE's built-in encoding first, fall back to chunked approach on OOM
+    try:
+        latents = _encode_video_full(pil_frames, num_video_frames, target_h, target_w,
+                                      vae, device, vae_dtype)
+    except torch.cuda.OutOfMemoryError:
+        print(f">>> OOM during full encoding, falling back to chunked encoding...", flush=True)
+        torch.cuda.empty_cache()
+        latents = _encode_video_chunked(pil_frames, num_video_frames, target_h, target_w,
+                                         vae, device, vae_dtype, expected_latent_frames)
+
+    num_latent_frames = latents.shape[0]
+
+    print(f">>> Video encoded: {num_video_frames} video frames -> {num_latent_frames} latent frames (expected: {expected_latent_frames})", flush=True)
+    print(f">>> Latent shape: {latents.shape}", flush=True)
+
+    return latents, scale_factor, num_video_frames
+
+
+def _encode_video_full(pil_frames, num_video_frames, target_h, target_w, vae, device, vae_dtype):
+    """
+    Encode video using VAE's built-in temporal tiled encoding.
+    Works well for lower resolutions or shorter videos.
+    """
+    import torch.nn.functional as F_torch
+
     with torch.no_grad():
         frame_tensors = []
         for i in range(num_video_frames):
@@ -389,7 +413,6 @@ def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24
         del frame_tensors
 
         # Use VAE's built-in tiled encoding (handles temporal chunking with proper blending)
-        # opt_tiling=True lets VAE automatically determine optimal tile sizes
         print(f">>> Using VAE's built-in temporal tiled encoding with blending...", flush=True)
         latents = vae.encode(video_tensor, opt_tiling=True).latent_dist.sample()
         latents = latents.squeeze(0).permute(1, 2, 3, 0)
@@ -399,12 +422,105 @@ def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24
         del video_tensor
         torch.cuda.empty_cache()
 
-    num_latent_frames = latents.shape[0]
+    return latents
 
-    print(f">>> Video encoded: {num_video_frames} video frames -> {num_latent_frames} latent frames (expected: {expected_latent_frames})", flush=True)
-    print(f">>> Latent shape: {latents.shape}", flush=True)
 
-    return latents, scale_factor, num_video_frames
+def _encode_video_chunked(pil_frames, num_video_frames, target_h, target_w, vae, device, vae_dtype, expected_latent_frames):
+    """
+    Encode video in smaller chunks for high-resolution or long videos.
+    Uses VAE's temporal blending approach but processes fewer frames at a time.
+    """
+    import torch.nn.functional as F_torch
+    from tqdm import tqdm
+
+    # Use smaller temporal chunks to reduce memory
+    # VAE's default is 16 frames, we'll use that but load frames on-demand
+    temporal_tile_frames = 17  # 16 + 1 for overlap
+    temporal_stride_frames = 12  # Same as VAE default
+
+    # Calculate number of temporal chunks needed
+    temporal_chunks = list(range(0, num_video_frames - temporal_tile_frames + 1, temporal_stride_frames))
+    if not temporal_chunks or temporal_chunks[-1] + temporal_tile_frames < num_video_frames:
+        # Ensure we cover the end
+        last_start = max(0, num_video_frames - temporal_tile_frames)
+        if not temporal_chunks or temporal_chunks[-1] != last_start:
+            temporal_chunks.append(last_start)
+
+    print(f">>> Chunked encoding: {len(temporal_chunks)} temporal chunks of {temporal_tile_frames} frames each", flush=True)
+
+    latent_rows = []
+    blend_num_frames = (temporal_tile_frames - 1) // 4 - temporal_stride_frames // 4  # Blend region in latent space
+
+    with torch.no_grad():
+        for chunk_idx, start_frame in enumerate(tqdm(temporal_chunks, desc="VAE temporal encoding", unit="chunk")):
+            end_frame = min(start_frame + temporal_tile_frames, num_video_frames)
+            actual_frames = end_frame - start_frame
+
+            # Load only this chunk's frames to GPU
+            chunk_tensors = []
+            for i in range(start_frame, end_frame):
+                pil_image = pil_frames[i]
+                image = F.pil_to_tensor(pil_image).unsqueeze(0).float()
+                if image.shape[2] != target_h or image.shape[3] != target_w:
+                    image = F_torch.interpolate(image, size=(target_h, target_w), mode='bilinear', align_corners=False)
+                image = image / 127.5 - 1.
+                chunk_tensors.append(image)
+
+            # Stack: [N, C, H, W] -> [1, C, N, H, W]
+            chunk = torch.cat(chunk_tensors, dim=0)
+            chunk = chunk.permute(1, 0, 2, 3).unsqueeze(0)
+            chunk = chunk.to(device=device, dtype=vae_dtype)
+            del chunk_tensors
+
+            # Encode this chunk (with spatial tiling if needed)
+            latent_chunk = vae.encode(chunk, opt_tiling=True).latent_dist.sample()
+            latent_chunk = latent_chunk.squeeze(0).permute(1, 2, 3, 0)
+            latent_chunk = latent_chunk * vae.config.scaling_factor
+
+            # Drop first frame for subsequent chunks (like VAE's _temporal_tiled_encode)
+            if chunk_idx > 0:
+                latent_chunk = latent_chunk[1:]
+
+            latent_rows.append(latent_chunk.cpu())
+
+            del chunk, latent_chunk
+            torch.cuda.empty_cache()
+
+    # Blend temporal chunks using VAE's blend_t approach
+    tile_latent_stride = temporal_stride_frames // 4
+
+    result_rows = []
+    for i, tile in enumerate(latent_rows):
+        if i > 0:
+            # Apply temporal blending
+            tile = _blend_t_cpu(latent_rows[i - 1], tile, blend_num_frames)
+            # Take stride portion (except for last chunk)
+            if i == len(latent_rows) - 1:
+                # Last chunk: take all remaining
+                result_rows.append(tile)
+            else:
+                result_rows.append(tile[:tile_latent_stride])
+        else:
+            # First chunk: take stride + 1 frames
+            result_rows.append(tile[:tile_latent_stride + 1])
+
+    latents = torch.cat(result_rows, dim=0)[:expected_latent_frames]
+
+    return latents
+
+
+def _blend_t_cpu(a: torch.Tensor, b: torch.Tensor, blend_extent: int) -> torch.Tensor:
+    """Temporal blending on CPU (mirrors VAE's blend_t but for [T, H, W, C] format)."""
+    blend_extent = min(a.shape[0], b.shape[0], blend_extent)
+    if blend_extent <= 0:
+        return b
+
+    b = b.clone()
+    for t in range(blend_extent):
+        weight = t / blend_extent
+        b[t] = a[-blend_extent + t] * (1 - weight) + b[t] * weight
+
+    return b
 
 
 def log_vram_usage(stage_name, dit=None, vae=None, text_embedder=None):
