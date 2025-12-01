@@ -366,24 +366,40 @@ def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24
     vae_dtype = next(vae.parameters()).dtype
 
     # Encode video in small chunks to avoid OOM
-    # Adaptive chunk size based on resolution (same formula as VAE decode)
+    # Memory-aware chunk sizing (inverse of VAE decode's _get_source_style_tiling)
     # VAE temporal compression: T_latent = (T_video - 1) / 4 + 1
-    total_pixels = target_h * target_w
+    h_pix, w_pix = target_h, target_w
 
-    # Resolution-based adaptive chunk sizing (reverse of decode tiling logic)
-    if total_pixels <= 768 * 512:  # Low-res (e.g., 768x512)
-        video_chunk_size = 17  # ~5 latent frames
-    elif total_pixels <= 960 * 544:  # Medium-res (e.g., 960x544)
-        video_chunk_size = 13  # ~4 latent frames
-    elif total_pixels <= 1280 * 704:  # High-res (e.g., 1024x768, 1280x704)
-        video_chunk_size = 9   # ~3 latent frames
-    else:  # Ultra-high-res (e.g., 1920x1080)
-        video_chunk_size = 5   # ~2 latent frames
+    # Get available GPU memory and calculate max frames (inverse of decode formula)
+    # Decode formula: max_area = free_mem / 256 / 17 / 8
+    # Encode inverse: max_frames = free_mem / 256 / 8 / (h_pix * w_pix) * 17
+    free_mem = torch.cuda.mem_get_info()[0]
+    max_area = free_mem / 256 / 17 / 8
+
+    # Calculate how many frames we can fit based on available memory
+    # Using same logic as decode but solving for frames instead of area
+    if h_pix * w_pix < max_area:
+        # Can fit full resolution, calculate max frames
+        # Inverse: max_frames = max_area / (h_pix * w_pix) * 17
+        video_chunk_size = int((max_area / (h_pix * w_pix)) * 17)
+    else:
+        # Resolution exceeds max_area, need minimal frames
+        video_chunk_size = 5
+
+    # Clamp to reasonable range and ensure valid for VAE
+    video_chunk_size = max(5, min(video_chunk_size, 121))  # min 5, max 121 (5 seconds)
+
+    # Additional safety margin - use 70% of calculated max
+    video_chunk_size = max(5, int(video_chunk_size * 0.7))
+
+    # Ensure (frames - 1) is divisible by 4 for clean VAE temporal compression
+    # Valid sizes: 5, 9, 13, 17, 21, 25, ... (1 + 4*n)
+    video_chunk_size = ((video_chunk_size - 1) // 4) * 4 + 1
 
     latent_chunks = []
 
     print(f">>> Encoding video to latent space (4x temporal compression)...", flush=True)
-    print(f">>> Resolution: {target_w}x{target_h} ({total_pixels} pixels) -> chunk size: {video_chunk_size} frames", flush=True)
+    print(f">>> Resolution: {w_pix}x{h_pix}, Free VRAM: {free_mem/1024**3:.1f}GB -> chunk size: {video_chunk_size} frames", flush=True)
 
     with torch.no_grad():
         chunk_idx = 0

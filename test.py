@@ -830,6 +830,13 @@ if __name__ == "__main__":
         alignment = 128 if args.attention_type == "nabla" else 32
         force_offload = hasattr(pipe.dit, 'enable_block_swap') and pipe.dit.enable_block_swap
 
+        # Offload DiT BEFORE VAE encoding to free up VRAM
+        if hasattr(pipe.dit, 'offload_all_blocks'):
+            pipe.dit.offload_all_blocks()
+        if pipe.offload or force_offload:
+            pipe.dit = pipe.dit.to("cpu", non_blocking=True)
+        torch.cuda.empty_cache()
+
         # Load VAE for encoding
         if pipe.offload or force_offload:
             pipe.vae = pipe.vae.to(pipe.device_map["vae"], non_blocking=True)
