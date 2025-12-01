@@ -396,35 +396,29 @@ def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24
 
     latent_chunks = []
 
+    # Overlap of 4 video frames = 1 latent frame overlap for proper temporal continuity
+    video_overlap = 4
+    video_stride = video_chunk_size - video_overlap
+
     print(f">>> Encoding video to latent space (4x temporal compression)...", flush=True)
-    print(f">>> Resolution: {w_pix}x{h_pix}, Free VRAM: {free_mem/1024**3:.1f}GB -> chunk size: {video_chunk_size} frames", flush=True)
+    print(f">>> Resolution: {w_pix}x{h_pix}, Free VRAM: {free_mem/1024**3:.1f}GB -> chunk size: {video_chunk_size} frames (stride: {video_stride})", flush=True)
+
+    # Calculate expected latent frames for verification
+    expected_latent_frames = (num_video_frames - 1) // 4 + 1
 
     with torch.no_grad():
         chunk_idx = 0
-        for chunk_start in range(0, num_video_frames, video_chunk_size):
+        chunk_start = 0
+
+        while chunk_start < num_video_frames:
             chunk_end = min(chunk_start + video_chunk_size, num_video_frames)
             actual_chunk_frames = chunk_end - chunk_start
 
-            # Skip chunks that are too small (need at least 5 frames for VAE)
-            if actual_chunk_frames < 5:
-                # For the last small chunk, include it with the previous chunk's latents
-                # by encoding frames individually
-                for i in range(chunk_start, chunk_end):
-                    pil_image = pil_frames[i]
-                    image = F.pil_to_tensor(pil_image).unsqueeze(0).float()
-                    if image.shape[2] != target_h or image.shape[3] != target_w:
-                        image = F_torch.interpolate(image, size=(target_h, target_w), mode='bilinear', align_corners=False)
-                    image = image / 127.5 - 1.
-
-                    # Encode single frame: [1, C, H, W] -> [1, C, 1, H, W]
-                    image = image.to(device=device, dtype=vae_dtype)
-                    image = image.unsqueeze(2)  # Add temporal dim
-                    latent = vae.encode(image, opt_tiling=False).latent_dist.sample()
-                    latent = latent.squeeze(0).permute(1, 2, 3, 0) * vae.config.scaling_factor
-                    latent_chunks.append(latent.cpu())
-                    del image, latent
-                    torch.cuda.empty_cache()
-                continue
+            # For the last chunk, if it's too small, extend backwards to get minimum 5 frames
+            if actual_chunk_frames < 5 and chunk_start > 0:
+                # Extend chunk backwards to get at least 5 frames
+                chunk_start = max(0, chunk_end - 5)
+                actual_chunk_frames = chunk_end - chunk_start
 
             # Convert PIL frames to tensor for this chunk only
             chunk_tensors = []
@@ -455,6 +449,11 @@ def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24
             latent_chunk = latent_chunk.squeeze(0).permute(1, 2, 3, 0)
             latent_chunk = latent_chunk * vae.config.scaling_factor
 
+            # Skip overlapping latent frame(s) for chunks after the first
+            if chunk_idx > 0:
+                # Skip the first latent frame (it overlaps with previous chunk's last frame)
+                latent_chunk = latent_chunk[1:]
+
             latent_chunks.append(latent_chunk.cpu())
 
             # Clear GPU memory
@@ -463,11 +462,23 @@ def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24
 
             chunk_idx += 1
 
+            # Move to next chunk with overlap
+            chunk_start += video_stride
+
+            # If we've covered all frames, stop
+            if chunk_end >= num_video_frames:
+                break
+
     # Concatenate all latent chunks
     latents = torch.cat(latent_chunks, dim=0)
     num_latent_frames = latents.shape[0]
 
-    print(f">>> Video encoded: {num_video_frames} video frames -> {num_latent_frames} latent frames", flush=True)
+    # Trim to expected size if we got slightly more due to rounding
+    if num_latent_frames > expected_latent_frames:
+        latents = latents[:expected_latent_frames]
+        num_latent_frames = expected_latent_frames
+
+    print(f">>> Video encoded: {num_video_frames} video frames -> {num_latent_frames} latent frames (expected: {expected_latent_frames})", flush=True)
     print(f">>> Latent shape: {latents.shape}", flush=True)
 
     return latents, scale_factor, num_video_frames

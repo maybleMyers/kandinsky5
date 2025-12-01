@@ -2141,6 +2141,8 @@ def generate_sample_denoise(
                 ]
 
                 # Denoise this chunk
+                # Only preserve the first frame when processing the first chunk (chunk_start == 0)
+                # This ensures the original video's first frame is never noised
                 chunk_result = generate_denoise(
                     dit,
                     device,
@@ -2158,6 +2160,7 @@ def generate_sample_denoise(
                     progress=progress,
                     attention_mask=attention_mask,
                     null_attention_mask=null_attention_mask,
+                    preserve_first_frame=(chunk_start == 0),
                 )
 
                 # Move result back to CPU to save VRAM
