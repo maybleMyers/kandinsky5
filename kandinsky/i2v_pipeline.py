@@ -397,11 +397,13 @@ def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24
     latent_chunks = []
 
     # Overlap of 4 video frames = 1 latent frame overlap for proper temporal continuity
-    video_overlap = 4
+    # But only use overlap if chunk_size is large enough (stride >= 4 to be efficient)
+    # For small chunks, overlap causes too much redundant encoding
+    video_overlap = 4 if video_chunk_size >= 9 else 0
     video_stride = video_chunk_size - video_overlap
 
     print(f">>> Encoding video to latent space (4x temporal compression)...", flush=True)
-    print(f">>> Resolution: {w_pix}x{h_pix}, Free VRAM: {free_mem/1024**3:.1f}GB -> chunk size: {video_chunk_size} frames (stride: {video_stride})", flush=True)
+    print(f">>> Resolution: {w_pix}x{h_pix}, Free VRAM: {free_mem/1024**3:.1f}GB -> chunk size: {video_chunk_size} frames (overlap: {video_overlap})", flush=True)
 
     # Calculate expected latent frames for verification
     expected_latent_frames = (num_video_frames - 1) // 4 + 1
@@ -449,8 +451,8 @@ def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24
             latent_chunk = latent_chunk.squeeze(0).permute(1, 2, 3, 0)
             latent_chunk = latent_chunk * vae.config.scaling_factor
 
-            # Skip overlapping latent frame(s) for chunks after the first
-            if chunk_idx > 0:
+            # Skip overlapping latent frame(s) for chunks after the first (only when using overlap)
+            if chunk_idx > 0 and video_overlap > 0:
                 # Skip the first latent frame (it overlaps with previous chunk's last frame)
                 latent_chunk = latent_chunk[1:]
 

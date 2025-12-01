@@ -2109,8 +2109,12 @@ def generate_sample_denoise(
     torch.manual_seed(seed)
 
     # Process video in chunks
-    num_chunks = (total_frames + chunk_frames - chunk_overlap - 1) // (chunk_frames - chunk_overlap)
-    num_chunks = max(1, num_chunks)
+    # If video fits in one chunk, no need for multiple chunks
+    if total_frames <= chunk_frames:
+        num_chunks = 1
+    else:
+        num_chunks = (total_frames - chunk_overlap - 1) // (chunk_frames - chunk_overlap) + 1
+        num_chunks = max(1, num_chunks)
 
     print(f">>> Denoising video with strength {denoise_strength}...", flush=True)
     print(f">>> Total frames: {total_frames}, processing in {num_chunks} chunk(s) of {chunk_frames} frames", flush=True)
