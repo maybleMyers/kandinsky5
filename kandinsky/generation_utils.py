@@ -1910,6 +1910,7 @@ def generate_denoise(
     progress=False,
     attention_mask=None,
     null_attention_mask=None,
+    preserve_first_frame=True,
 ):
     """
     Denoise latents starting from a given timestep (for v2v img2img style processing).
@@ -1928,6 +1929,7 @@ def generate_denoise(
         guidance_weight: CFG weight
         scheduler_scale: Scheduler scale
         conf: Model configuration
+        preserve_first_frame: If True, don't add noise to first frame (preserves video quality)
 
     Returns:
         Denoised latents
@@ -1942,13 +1944,21 @@ def generate_denoise(
     # The formula: scaled_t = scheduler_scale * t / (1 + (scheduler_scale - 1) * t)
     timesteps = scheduler_scale * raw_timesteps / (1 + (scheduler_scale - 1) * raw_timesteps)
 
+    # Save the clean first frame if we need to preserve it
+    first_frame_clean = latents[0:1].clone() if preserve_first_frame else None
+
     # Generate noise and create noisy latents at start_timestep
     # Flow matching: x_t = (1-t)*x_0 + t*noise
     noise = torch.randn_like(latents)
     t = start_timestep
     img = (1 - t) * latents + t * noise
 
-    print(f">>> Denoising from timestep {start_timestep:.3f} with {num_steps} steps", flush=True)
+    # Restore the first frame to clean (no noise) if preserving
+    if preserve_first_frame:
+        img[0:1] = first_frame_clean
+        print(f">>> Denoising from timestep {start_timestep:.3f} with {num_steps} steps (first frame preserved)", flush=True)
+    else:
+        print(f">>> Denoising from timestep {start_timestep:.3f} with {num_steps} steps", flush=True)
 
     for i, (timestep, timestep_diff) in enumerate(tqdm(list(zip(timesteps[:-1], torch.diff(timesteps))))):
         time = timestep.unsqueeze(0)
@@ -1958,6 +1968,10 @@ def generate_denoise(
             visual_cond_mask = torch.zeros(
                 [*img.shape[:-1], 1], dtype=img.dtype, device=img.device
             )
+            # Use visual conditioning for first frame to preserve it during denoising
+            if preserve_first_frame:
+                img[0:1] = first_frame_clean.to(device=img.device, dtype=img.dtype)
+                visual_cond_mask[0:1] = 1
             model_input = torch.cat([img, visual_cond, visual_cond_mask], dim=-1)
         else:
             model_input = img
@@ -1993,6 +2007,10 @@ def generate_denoise(
                 )
 
         img = img + timestep_diff * pred_velocity
+
+    # Ensure first frame is exactly preserved in final output
+    if preserve_first_frame:
+        img[0:1] = first_frame_clean.to(device=img.device, dtype=img.dtype)
 
     return img
 

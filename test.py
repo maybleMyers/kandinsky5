@@ -866,6 +866,10 @@ if __name__ == "__main__":
         num_steps = args.sample_steps if args.sample_steps else pipe.num_steps
         guidance = args.guidance_weight if args.guidance_weight else min(pipe.guidance_weight, 4.0)
 
+        # Calculate chunk_frames from video_duration setting
+        # This ensures we respect --video_duration for section size
+        chunk_frames = args.video_duration * 24 // 4 + 1  # 5s = 31 frames
+
         x = generate_sample_denoise(
             video_latents=video_latents,
             caption=args.prompt,
@@ -885,6 +889,7 @@ if __name__ == "__main__":
             progress=True,
             offload=pipe.offload,
             force_offload=force_offload,
+            chunk_frames=chunk_frames,
         )
 
         # Save output
