@@ -399,32 +399,26 @@ def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24
     print(f">>> Encoding video to latent space (4x temporal compression)...", flush=True)
     print(f">>> Resolution: {w_pix}x{h_pix}, Free VRAM: {free_mem/1024**3:.1f}GB -> chunk size: {video_chunk_size} frames", flush=True)
 
+    # Pre-calculate chunk boundaries to handle remainder properly
+    # If remainder < 5 frames, extend the last proper chunk to include them
+    chunk_boundaries = []
+    pos = 0
+    while pos < num_video_frames:
+        chunk_end = min(pos + video_chunk_size, num_video_frames)
+        remainder = num_video_frames - chunk_end
+
+        # If remainder is too small (< 5 frames), extend this chunk to include it
+        if 0 < remainder < 5:
+            chunk_end = num_video_frames
+
+        chunk_boundaries.append((pos, chunk_end))
+        pos = chunk_end
+
+    print(f">>> Chunk boundaries: {chunk_boundaries}", flush=True)
+
     with torch.no_grad():
-        chunk_idx = 0
-        for chunk_start in range(0, num_video_frames, video_chunk_size):
-            chunk_end = min(chunk_start + video_chunk_size, num_video_frames)
+        for chunk_idx, (chunk_start, chunk_end) in enumerate(chunk_boundaries):
             actual_chunk_frames = chunk_end - chunk_start
-
-            # Skip chunks that are too small (need at least 5 frames for VAE)
-            if actual_chunk_frames < 5:
-                # For the last small chunk, include it with the previous chunk's latents
-                # by encoding frames individually
-                for i in range(chunk_start, chunk_end):
-                    pil_image = pil_frames[i]
-                    image = F.pil_to_tensor(pil_image).unsqueeze(0).float()
-                    if image.shape[2] != target_h or image.shape[3] != target_w:
-                        image = F_torch.interpolate(image, size=(target_h, target_w), mode='bilinear', align_corners=False)
-                    image = image / 127.5 - 1.
-
-                    # Encode single frame: [1, C, H, W] -> [1, C, 1, H, W]
-                    image = image.to(device=device, dtype=vae_dtype)
-                    image = image.unsqueeze(2)  # Add temporal dim
-                    latent = vae.encode(image, opt_tiling=False).latent_dist.sample()
-                    latent = latent.squeeze(0).permute(1, 2, 3, 0) * vae.config.scaling_factor
-                    latent_chunks.append(latent.cpu())
-                    del image, latent
-                    torch.cuda.empty_cache()
-                continue
 
             # Convert PIL frames to tensor for this chunk only
             chunk_tensors = []
@@ -461,13 +455,18 @@ def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24
             del chunk, latent_chunk
             torch.cuda.empty_cache()
 
-            chunk_idx += 1
-
     # Concatenate all latent chunks
     latents = torch.cat(latent_chunks, dim=0)
     num_latent_frames = latents.shape[0]
 
-    print(f">>> Video encoded: {num_video_frames} video frames -> {num_latent_frames} latent frames", flush=True)
+    # Verify temporal compression is correct
+    # Formula: latent_frames = (video_frames - 1) // 4 + 1
+    expected_latent_frames = (num_video_frames - 1) // 4 + 1
+    if num_latent_frames != expected_latent_frames:
+        print(f">>> WARNING: Latent frame count mismatch! Got {num_latent_frames}, expected {expected_latent_frames}", flush=True)
+        print(f">>> This may cause decoded video to have different duration than input", flush=True)
+
+    print(f">>> Video encoded: {num_video_frames} video frames -> {num_latent_frames} latent frames (expected: {expected_latent_frames})", flush=True)
     print(f">>> Latent shape: {latents.shape}", flush=True)
 
     return latents, scale_factor, num_video_frames

@@ -885,6 +885,7 @@ if __name__ == "__main__":
             progress=True,
             offload=pipe.offload,
             force_offload=force_offload,
+            num_cond_frames=args.num_cond_frames,
         )
 
         # Save output
