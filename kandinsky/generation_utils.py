@@ -1911,6 +1911,9 @@ def generate_denoise(
     attention_mask=None,
     null_attention_mask=None,
     preserve_first_frame=True,
+    previewer=None,
+    preview_interval=None,
+    preview_suffix=None,
 ):
     """
     Denoise latents starting from a given timestep (for v2v img2img style processing).
@@ -2008,6 +2011,24 @@ def generate_denoise(
 
         img = img + timestep_diff * pred_velocity
 
+        # Generate preview if enabled
+        if previewer is not None and preview_interval and (i + 1) % preview_interval == 0 and (i + 1) < num_steps:
+            import sys
+            print(f"\n>>> PREVIEW TRIGGER at step {i + 1}/{num_steps} (interval={preview_interval})", flush=True)
+            sys.stdout.flush()
+            print(f">>> img shape before permute: {img.shape}", flush=True)
+            try:
+                preview_latent = img.permute(3, 0, 1, 2).unsqueeze(0)
+                print(f">>> preview_latent shape after permute+unsqueeze: {preview_latent.shape}", flush=True)
+                previewer.preview(preview_latent.squeeze(0), i, preview_suffix=preview_suffix)
+                print(f">>> Preview completed successfully", flush=True)
+                sys.stdout.flush()
+            except Exception as e:
+                print(f">>> ERROR during preview generation at step {i + 1}: {e}", flush=True)
+                import traceback
+                traceback.print_exc()
+                sys.stdout.flush()
+
     # Ensure first frame is exactly preserved in final output
     if preserve_first_frame:
         img[0:1] = first_frame_clean.to(device=img.device, dtype=img.dtype)
@@ -2036,6 +2057,9 @@ def generate_sample_denoise(
     force_offload=False,
     chunk_frames=31,
     chunk_overlap=4,
+    previewer=None,
+    preview_interval=None,
+    preview_suffix=None,
 ):
     """
     Apply light denoising to video latents (v2v img2img style).
@@ -2165,6 +2189,9 @@ def generate_sample_denoise(
                     attention_mask=attention_mask,
                     null_attention_mask=null_attention_mask,
                     preserve_first_frame=(chunk_start == 0),
+                    previewer=previewer,
+                    preview_interval=preview_interval,
+                    preview_suffix=preview_suffix,
                 )
 
                 # Move result back to CPU to save VRAM

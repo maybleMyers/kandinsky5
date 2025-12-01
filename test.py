@@ -870,6 +870,46 @@ if __name__ == "__main__":
         # This ensures we respect --video_duration for section size
         chunk_frames = args.video_duration * 24 // 4 + 1  # 5s = 31 frames
 
+        # Create previewer for DENOISE mode
+        previewer = None
+        if LatentPreviewer is not None and args.preview is not None and args.preview > 0:
+            print(f"\n>>> DENOISE: Initializing previewer with preview={args.preview}")
+            try:
+                # Use the video latents shape for preview initialization
+                latent_frames = video_latents.shape[0]
+                initial_latent = video_latents.permute(3, 0, 1, 2).to(device=pipe.device_map["dit"], dtype=torch.bfloat16)
+
+                timesteps = torch.linspace(args.denoise_strength, 0, num_steps + 1, device=pipe.device_map["dit"])
+                timesteps = args.scheduler_scale * timesteps / (1 + (args.scheduler_scale - 1) * timesteps)
+                timesteps = timesteps[:-1] * 1000
+
+                class Args:
+                    def __init__(self, save_path, fps):
+                        self.save_path = save_path
+                        self.fps = fps
+
+                args_obj = Args(
+                    save_path=os.path.dirname(args.output_filename) if args.output_filename else './',
+                    fps=24
+                )
+
+                previewer = LatentPreviewer(
+                    args=args_obj,
+                    original_latents=initial_latent,
+                    timesteps=timesteps,
+                    device=pipe.device_map["dit"],
+                    dtype=torch.bfloat16,
+                    model_type="hunyuan"
+                )
+                print(f">>> DENOISE: Previewer initialized successfully, will generate preview every {args.preview} steps")
+            except Exception as e:
+                print(f">>> DENOISE: Failed to initialize previewer: {e}")
+                import traceback
+                traceback.print_exc()
+                previewer = None
+        else:
+            print(f">>> DENOISE: Preview disabled (preview={args.preview})")
+
         x = generate_sample_denoise(
             video_latents=video_latents,
             caption=args.prompt,
@@ -890,6 +930,9 @@ if __name__ == "__main__":
             offload=pipe.offload,
             force_offload=force_offload,
             chunk_frames=chunk_frames,
+            previewer=previewer,
+            preview_interval=args.preview,
+            preview_suffix=args.preview_suffix,
         )
 
         # Save output

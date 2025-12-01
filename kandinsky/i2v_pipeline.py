@@ -365,203 +365,39 @@ def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24
 
     vae_dtype = next(vae.parameters()).dtype
 
-    # Encode video in chunks to avoid OOM
-    # Memory-aware chunk sizing
-    h_pix, w_pix = target_h, target_w
-    free_mem = torch.cuda.mem_get_info()[0]
-
-    # Memory constraint for encoding
-    max_frames_mem = free_mem / (256 * 8 * (h_pix * w_pix))
-    max_frames_vals = (2**31) / (256 * (h_pix + 32) * (w_pix + 32))
-    max_frames_calc = min(max_frames_mem, max_frames_vals)
-
-    # Convert to integer with safety margin
-    video_chunk_size = int(max_frames_calc * 0.7)
-
-    # Ensure chunk size is reasonable (minimum 17 frames for overlap strategy)
-    # 17 frames = 5 latents, allows 2 latent overlap on each side
-    video_chunk_size = max(17, min(video_chunk_size, 121))
-
-    # Round down to ensure clean math: (size - 1) should be divisible by 4
-    # We want sizes like 17, 21, 25, ... (4n + 1)
-    video_chunk_size = ((video_chunk_size - 1) // 4) * 4 + 1
-
     # Calculate expected latent frames for full video
     expected_latent_frames = (num_video_frames - 1) // 4 + 1
 
-    # Overlap strategy: use 8 video frames overlap (= 2 latent frames overlap region)
-    # This gives the VAE more temporal context at boundaries for smoother transitions
-    video_overlap_frames = 8  # 8 video frames = ~2 latent frames of context
-    latent_overlap = 2  # Number of latent frames to blend
-
     print(f">>> Encoding video to latent space (4x temporal compression)...", flush=True)
-    print(f">>> Resolution: {w_pix}x{h_pix}, Free VRAM: {free_mem/1024**3:.1f}GB -> chunk size: {video_chunk_size} frames", flush=True)
-    print(f">>> Using overlapping chunks with {video_overlap_frames} frame overlap for smooth encoding", flush=True)
+    print(f">>> Resolution: {target_w}x{target_h}, {num_video_frames} frames -> {expected_latent_frames} latents expected", flush=True)
 
-    # Check if we can encode in one pass
-    can_encode_full = num_video_frames <= video_chunk_size
-
-    if can_encode_full:
-        # Single pass encoding - no chunking needed
-        print(f">>> Encoding all {num_video_frames} frames in single pass...", flush=True)
-
-        with torch.no_grad():
-            chunk_tensors = []
-            for i in range(num_video_frames):
-                pil_image = pil_frames[i]
-                image = F.pil_to_tensor(pil_image).unsqueeze(0).float()
-                if image.shape[2] != target_h or image.shape[3] != target_w:
-                    image = F_torch.interpolate(image, size=(target_h, target_w), mode='bilinear', align_corners=False)
-                image = image / 127.5 - 1.
-                chunk_tensors.append(image)
-
-            chunk = torch.cat(chunk_tensors, dim=0)
-            chunk = chunk.permute(1, 0, 2, 3).unsqueeze(0)
-            chunk = chunk.to(device=device, dtype=vae_dtype)
-            del chunk_tensors
-
-            latents = vae.encode(chunk, opt_tiling=False).latent_dist.sample()
-            latents = latents.squeeze(0).permute(1, 2, 3, 0)
-            latents = latents * vae.config.scaling_factor
-            latents = latents.cpu()  # Move to CPU for consistency with chunked path
-
-            del chunk
-            torch.cuda.empty_cache()
-
-        num_latent_frames = latents.shape[0]
-        print(f">>> Video encoded: {num_video_frames} video frames -> {num_latent_frames} latent frames (expected: {expected_latent_frames})", flush=True)
-        print(f">>> Latent shape: {latents.shape}", flush=True)
-
-        return latents, scale_factor, num_video_frames
-
-    # Multi-pass encoding with overlap and blending
-    # Strategy: encode overlapping chunks, blend in latent space
-    latent_chunks = []
-    chunk_latent_ranges = []  # Track which latent indices each chunk covers
-
+    # Convert all PIL frames to a single tensor
     with torch.no_grad():
-        chunk_idx = 0
-        chunk_start = 0
-        current_latent_idx = 0
+        frame_tensors = []
+        for i in range(num_video_frames):
+            pil_image = pil_frames[i]
+            image = F.pil_to_tensor(pil_image).unsqueeze(0).float()
+            if image.shape[2] != target_h or image.shape[3] != target_w:
+                image = F_torch.interpolate(image, size=(target_h, target_w), mode='bilinear', align_corners=False)
+            image = image / 127.5 - 1.
+            frame_tensors.append(image)
 
-        while chunk_start < num_video_frames:
-            # Determine chunk end
-            chunk_end = min(chunk_start + video_chunk_size, num_video_frames)
-            actual_chunk_frames = chunk_end - chunk_start
+        # Stack frames: [N, C, H, W] -> [1, C, N, H, W]
+        video_tensor = torch.cat(frame_tensors, dim=0)
+        video_tensor = video_tensor.permute(1, 0, 2, 3).unsqueeze(0)
+        video_tensor = video_tensor.to(device=device, dtype=vae_dtype)
+        del frame_tensors
 
-            # Convert PIL frames to tensor for this chunk
-            chunk_tensors = []
-            for i in range(chunk_start, chunk_end):
-                pil_image = pil_frames[i]
-                image = F.pil_to_tensor(pil_image).unsqueeze(0).float()
-                if image.shape[2] != target_h or image.shape[3] != target_w:
-                    image = F_torch.interpolate(image, size=(target_h, target_w), mode='bilinear', align_corners=False)
-                image = image / 127.5 - 1.
-                chunk_tensors.append(image)
+        # Use VAE's built-in tiled encoding (handles temporal chunking with proper blending)
+        # opt_tiling=True lets VAE automatically determine optimal tile sizes
+        print(f">>> Using VAE's built-in temporal tiled encoding with blending...", flush=True)
+        latents = vae.encode(video_tensor, opt_tiling=True).latent_dist.sample()
+        latents = latents.squeeze(0).permute(1, 2, 3, 0)
+        latents = latents * vae.config.scaling_factor
+        latents = latents.cpu()
 
-            # Stack chunk frames: [N, C, H, W] -> [1, C, N, H, W]
-            chunk = torch.cat(chunk_tensors, dim=0)
-            chunk = chunk.permute(1, 0, 2, 3).unsqueeze(0)
-            chunk = chunk.to(device=device, dtype=vae_dtype)
-            del chunk_tensors
-
-            expected_chunk_latents = (actual_chunk_frames - 1) // 4 + 1
-            print(f">>> Encoding frames {chunk_start}-{chunk_end} ({actual_chunk_frames} frames -> {expected_chunk_latents} latents)...", flush=True)
-
-            # Encode chunk
-            latent_chunk = vae.encode(chunk, opt_tiling=False).latent_dist.sample()
-            latent_chunk = latent_chunk.squeeze(0).permute(1, 2, 3, 0)
-            latent_chunk = latent_chunk * vae.config.scaling_factor
-
-            # Calculate global latent indices this chunk covers
-            chunk_latent_start = chunk_start // 4
-            chunk_latent_end = chunk_latent_start + latent_chunk.shape[0]
-
-            latent_chunks.append(latent_chunk.cpu())
-            chunk_latent_ranges.append((chunk_latent_start, chunk_latent_end, latent_chunk.shape[0]))
-
-            del chunk, latent_chunk
-            torch.cuda.empty_cache()
-
-            chunk_idx += 1
-
-            # Move to next chunk with overlap
-            # Step forward by (chunk_size - overlap) video frames
-            step = video_chunk_size - video_overlap_frames
-
-            # Safety: ensure we always make progress
-            step = max(4, step)  # At least 4 frames (1 latent) progress
-
-            prev_chunk_start = chunk_start
-            chunk_start = chunk_start + step
-
-            # Ensure we capture the end of the video
-            if chunk_start < num_video_frames:
-                remaining = num_video_frames - chunk_start
-                if remaining < video_chunk_size and remaining > 0:
-                    # Adjust to include end frames, backing up if needed
-                    chunk_start = max(prev_chunk_start + 4, num_video_frames - video_chunk_size)
-
-            # Safety: prevent infinite loop
-            if chunk_start <= prev_chunk_start:
-                break
-
-    # Blend overlapping latent regions
-    print(f">>> Blending {len(latent_chunks)} chunks into {expected_latent_frames} latent frames...", flush=True)
-
-    # Create output tensor
-    latents = torch.zeros(expected_latent_frames, latent_chunks[0].shape[1],
-                          latent_chunks[0].shape[2], latent_chunks[0].shape[3],
-                          dtype=latent_chunks[0].dtype)
-    weights = torch.zeros(expected_latent_frames, 1, 1, 1, dtype=torch.float32)
-
-    for chunk_idx, (latent_chunk, (lat_start, lat_end, num_lats)) in enumerate(zip(latent_chunks, chunk_latent_ranges)):
-        # Clamp indices to valid range
-        valid_start = max(0, lat_start)
-        valid_end = min(expected_latent_frames, lat_end)
-
-        # Calculate offset into chunk
-        chunk_offset = valid_start - lat_start
-
-        for i, global_idx in enumerate(range(valid_start, valid_end)):
-            local_idx = chunk_offset + i
-            if local_idx < num_lats:
-                # Linear blending weight based on position in chunk
-                # Give more weight to middle of chunk, less to edges
-                # First and last chunks get full weight at their respective edges
-                is_first_chunk = (chunk_idx == 0)
-                is_last_chunk = (chunk_idx == len(latent_chunks) - 1)
-
-                if num_lats > 2:
-                    # Distance from chunk edges (0 at edge, 1 at center)
-                    dist_from_start = local_idx
-                    dist_from_end = num_lats - 1 - local_idx
-
-                    # First chunk: full weight at start, blend at end
-                    # Last chunk: blend at start, full weight at end
-                    # Middle chunks: blend at both ends
-                    if is_first_chunk:
-                        edge_dist = dist_from_end
-                    elif is_last_chunk:
-                        edge_dist = dist_from_start
-                    else:
-                        edge_dist = min(dist_from_start, dist_from_end)
-
-                    blend_weight = min(1.0, (edge_dist + 1) / max(1, latent_overlap + 1))
-                else:
-                    blend_weight = 1.0
-
-                latents[global_idx] += latent_chunk[local_idx].float() * blend_weight
-                weights[global_idx] += blend_weight
-
-    # Check for any uncovered frames
-    zero_weight_count = (weights.squeeze() < 1e-8).sum().item()
-    if zero_weight_count > 0:
-        print(f">>> WARNING: {zero_weight_count} latent frames have no coverage!", flush=True)
-
-    # Normalize by weights
-    weights = torch.clamp(weights, min=1e-8)
-    latents = (latents / weights).to(latent_chunks[0].dtype)
+        del video_tensor
+        torch.cuda.empty_cache()
 
     num_latent_frames = latents.shape[0]
 
