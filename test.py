@@ -530,11 +530,9 @@ if __name__ == "__main__":
         conf = OmegaConf.load(args.config)
 
         vae_conf = conf.model.vae
-        if vae_dtype is not None:
-            vae_conf.dtype = vae_dtype
 
         print(f">>> Loading VAE for video encoding...")
-        vae = build_vae(vae_conf)
+        vae = build_vae(vae_conf, dtype=vae_dtype if vae_dtype is not None else torch.bfloat16)
         vae = vae.to("cuda:0")
         vae.eval()
 
