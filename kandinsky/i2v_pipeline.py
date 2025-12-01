@@ -377,15 +377,15 @@ def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24
         image = image / 127.5 - 1.
         frame_tensors.append(image)
 
-    # Stack frames: [N, C, H, W] -> [1, C, N, H, W]
+    # Stack frames on CPU: [N, C, H, W] -> [1, C, N, H, W]
     video_tensor = torch.cat(frame_tensors, dim=0)  # [N, C, H, W]
     video_tensor = video_tensor.permute(1, 0, 2, 3).unsqueeze(0)  # [1, C, N, H, W]
-    video_tensor = video_tensor.to(device=device, dtype=vae_dtype)
+    video_tensor = video_tensor.to(dtype=vae_dtype)  # Keep on CPU, just convert dtype
 
     del frame_tensors
-    torch.cuda.empty_cache()
 
-    # Use VAE's built-in encoding with automatic tiling (handles OOM with temporal tiling)
+    # Use VAE's built-in encoding with automatic tiling
+    # Keep video on CPU - VAE's temporal tiling will move only tiles to GPU
     with torch.no_grad():
         latents = vae.encode(video_tensor, opt_tiling=True).latent_dist.sample()
 

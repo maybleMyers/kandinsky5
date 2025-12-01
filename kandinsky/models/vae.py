@@ -751,41 +751,36 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
         return enc
 
     def _encode_conservative(self, x: torch.Tensor) -> torch.Tensor:
-        """Conservative encoding - uses small tiles to avoid OOM."""
+        """
+        Conservative encoding: resolution-based safe tiling.
+        Uses smaller tiles to guarantee memory safety at the cost of speed.
+        """
         _, _, num_frames, height, width = x.shape
-        h_pix, w_pix = height * 8, width * 8
+        tile_latent_min_height = (
+            self.tile_sample_min_height // self.spatial_compression_ratio
+        )
+        tile_latent_min_width = (
+            self.tile_sample_min_width // self.spatial_compression_ratio
+        )
+        tile_latent_min_num_frames = (
+            self.tile_sample_min_num_frames // self.temporal_compression_ratio
+        )
 
-        # Save original settings
-        old_h = self.tile_sample_min_height
-        old_w = self.tile_sample_min_width
-        old_sh = self.tile_sample_stride_height
-        old_sw = self.tile_sample_stride_width
-        old_use_tiling = self.use_tiling
-        old_framewise = self.use_framewise_decoding
+        print(f"\nVAE Conservative Encode: Using {self.tile_sample_min_height}x{self.tile_sample_min_width} tiles")
 
-        try:
-            # Use small conservative tiles
-            self.tile_sample_min_height = min(256, height * 8)
-            self.tile_sample_min_width = min(256, width * 8)
-            self.tile_sample_stride_height = min(192, self.tile_sample_min_height - 64)
-            self.tile_sample_stride_width = min(192, self.tile_sample_min_width - 64)
-            self.use_tiling = True
-            self.use_framewise_decoding = True
+        if self.use_framewise_decoding and num_frames > (
+            tile_latent_min_num_frames + 1
+        ):
+            return self._temporal_tiled_encode(x)
 
-            print(f"VAE Conservative Encode: Using {self.tile_sample_min_height}x{self.tile_sample_min_width} tiles, temporal tiling enabled")
+        if self.use_tiling and (
+            width > tile_latent_min_width or height > tile_latent_min_height
+        ):
+            return self.tiled_encode(x)
 
-            if num_frames > (self.tile_sample_min_num_frames + 1):
-                return self._temporal_tiled_encode(x)
-            else:
-                return self.tiled_encode(x)
-        finally:
-            # Restore original settings
-            self.tile_sample_min_height = old_h
-            self.tile_sample_min_width = old_w
-            self.tile_sample_stride_height = old_sh
-            self.tile_sample_stride_width = old_sw
-            self.use_tiling = old_use_tiling
-            self.use_framewise_decoding = old_framewise
+        x = self.encoder(x)
+        enc = self.quant_conv(x)
+        return enc
 
     @apply_forward_hook
     def encode(
@@ -1184,6 +1179,10 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
         blend_num_frames = tile_latent_min_num_frames - tile_latent_stride_num_frames
 
         row = []
+        # Determine device for encoding (VAE's device)
+        encode_device = next(self.encoder.parameters()).device
+        input_device = x.device
+
         # for i in range(0, num_frames, self.tile_sample_stride_num_frames):
         for i in range(
             0,
@@ -1191,6 +1190,10 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
             self.tile_sample_stride_num_frames,
         ):
             tile = x[:, :, i : i + self.tile_sample_min_num_frames + 1, :, :]
+            # Move tile to encode device if needed (supports CPU input for large videos)
+            if tile.device != encode_device:
+                tile = tile.to(encode_device)
+
             if self.use_tiling and (
                 height > self.tile_sample_min_height
                 or width > self.tile_sample_min_width
@@ -1201,7 +1204,8 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
                 tile = self.quant_conv(tile)
             if i > 0:
                 tile = tile[:, :, 1:, :, :]
-            row.append(tile)
+            # Move result back to CPU to save VRAM
+            row.append(tile.cpu())
 
         result_row = []
         for i, tile in enumerate(row):
