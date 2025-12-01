@@ -365,64 +365,59 @@ def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24
 
     vae_dtype = next(vae.parameters()).dtype
 
-    # Encode video in small chunks to avoid OOM
-    # Memory-aware chunk sizing (inverse of VAE decode's _get_source_style_tiling)
-    # Decode formula: max_area = free_mem / 256 / 17 / 8
-    # Encode inverse: max_frames = free_mem / 256 / 8 / (h_pix * w_pix)
+    # Encode video in chunks to avoid OOM
+    # Memory-aware chunk sizing
     h_pix, w_pix = target_h, target_w
-
     free_mem = torch.cuda.mem_get_info()[0]
 
-    # Memory constraint: max_frames = free_mem / (256 * 8 * h_pix * w_pix)
-    # This is the inverse of: max_area = free_mem / 256 / frames / 8
+    # Memory constraint for encoding
     max_frames_mem = free_mem / (256 * 8 * (h_pix * w_pix))
-
-    # Integer overflow constraint (same as decode's num_vals < 2**31)
-    # num_vals = 256 * frames * (h_pix + 32) * (w_pix + 32) < 2**31
     max_frames_vals = (2**31) / (256 * (h_pix + 32) * (w_pix + 32))
-
-    # Take the minimum of both constraints
     max_frames = min(max_frames_mem, max_frames_vals)
 
-    # Convert to integer and apply safety margin (70%)
+    # Convert to integer with safety margin
     video_chunk_size = int(max_frames * 0.7)
 
-    # Clamp to reasonable range
-    video_chunk_size = max(5, min(video_chunk_size, 121))  # min 5, max 121 (5 seconds)
+    # Use 1-second chunks (24 frames) as the base unit for clean math
+    # Each 24-frame chunk produces 6 latent frames: (24-1)//4 + 1 = 6
+    # First chunk needs +1 frame (25 frames) to produce 7 latents for the +1 in formula
+    base_chunk_frames = 24  # 1 second at 24fps
+    video_chunk_size = max(base_chunk_frames, min(video_chunk_size, 121))
 
-    # Ensure (frames - 1) is divisible by 4 for clean VAE temporal compression
-    # Valid sizes: 5, 9, 13, 17, 21, 25, ... (1 + 4*n)
-    video_chunk_size = ((video_chunk_size - 1) // 4) * 4 + 1
+    # Round down to multiple of base_chunk_frames for clean division
+    video_chunk_size = (video_chunk_size // base_chunk_frames) * base_chunk_frames
+    video_chunk_size = max(base_chunk_frames, video_chunk_size)
 
-    latent_chunks = []
-
-    # Overlap of 4 video frames = 1 latent frame overlap for proper temporal continuity
-    # But only use overlap if chunk_size is large enough (stride >= 4 to be efficient)
-    # For small chunks, overlap causes too much redundant encoding
-    video_overlap = 4 if video_chunk_size >= 9 else 0
-    video_stride = video_chunk_size - video_overlap
+    # Calculate expected latent frames
+    expected_latent_frames = (num_video_frames - 1) // 4 + 1
 
     print(f">>> Encoding video to latent space (4x temporal compression)...", flush=True)
-    print(f">>> Resolution: {w_pix}x{h_pix}, Free VRAM: {free_mem/1024**3:.1f}GB -> chunk size: {video_chunk_size} frames (overlap: {video_overlap})", flush=True)
+    print(f">>> Resolution: {w_pix}x{h_pix}, Free VRAM: {free_mem/1024**3:.1f}GB -> chunk size: {video_chunk_size} frames", flush=True)
 
-    # Calculate expected latent frames for verification
-    expected_latent_frames = (num_video_frames - 1) // 4 + 1
+    latent_chunks = []
 
     with torch.no_grad():
         chunk_idx = 0
         chunk_start = 0
 
         while chunk_start < num_video_frames:
-            chunk_end = min(chunk_start + video_chunk_size, num_video_frames)
+            # First chunk gets +1 frame to account for the +1 in latent formula
+            # Subsequent chunks use exact base_chunk_frames
+            if chunk_idx == 0:
+                chunk_size = min(video_chunk_size + 1, num_video_frames)
+            else:
+                chunk_size = video_chunk_size
+
+            chunk_end = min(chunk_start + chunk_size, num_video_frames)
             actual_chunk_frames = chunk_end - chunk_start
 
-            # For the last chunk, if it's too small, extend backwards to get minimum 5 frames
+            # Handle last chunk - may be smaller
             if actual_chunk_frames < 5 and chunk_start > 0:
-                # Extend chunk backwards to get at least 5 frames
-                chunk_start = max(0, chunk_end - 5)
+                # Extend backwards to get at least 5 frames
+                chunk_start = max(0, chunk_end - max(5, actual_chunk_frames))
                 actual_chunk_frames = chunk_end - chunk_start
 
-            # Convert PIL frames to tensor for this chunk only
+            # Convert PIL frames to tensor for this chunk
             chunk_tensors = []
             for i in range(chunk_start, chunk_end):
                 pil_image = pil_frames[i]
@@ -433,52 +428,30 @@ def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24
                 chunk_tensors.append(image)
 
             # Stack chunk frames: [N, C, H, W] -> [1, C, N, H, W]
-            chunk = torch.cat(chunk_tensors, dim=0)  # [N, C, H, W]
-            chunk = chunk.permute(1, 0, 2, 3).unsqueeze(0)  # [1, C, N, H, W]
+            chunk = torch.cat(chunk_tensors, dim=0)
+            chunk = chunk.permute(1, 0, 2, 3).unsqueeze(0)
             chunk = chunk.to(device=device, dtype=vae_dtype)
-
-            # Free tensor list
             del chunk_tensors
 
-            if (chunk_idx % 5 == 0) or chunk_idx == 0:
-                print(f">>> Encoding video frames {chunk_start}-{chunk_end} ({actual_chunk_frames} frames)...", flush=True)
+            expected_chunk_latents = (actual_chunk_frames - 1) // 4 + 1
+            print(f">>> Encoding frames {chunk_start}-{chunk_end} ({actual_chunk_frames} frames -> {expected_chunk_latents} latents)...", flush=True)
 
             # Encode chunk
             latent_chunk = vae.encode(chunk, opt_tiling=False).latent_dist.sample()
-            # Output shape: [1, latent_C, latent_T, latent_H, latent_W]
-
-            # Convert to [latent_T, latent_H, latent_W, latent_C] format
             latent_chunk = latent_chunk.squeeze(0).permute(1, 2, 3, 0)
             latent_chunk = latent_chunk * vae.config.scaling_factor
 
-            # Skip overlapping latent frame(s) for chunks after the first (only when using overlap)
-            if chunk_idx > 0 and video_overlap > 0:
-                # Skip the first latent frame (it overlaps with previous chunk's last frame)
-                latent_chunk = latent_chunk[1:]
-
             latent_chunks.append(latent_chunk.cpu())
 
-            # Clear GPU memory
             del chunk, latent_chunk
             torch.cuda.empty_cache()
 
             chunk_idx += 1
-
-            # Move to next chunk with overlap
-            chunk_start += video_stride
-
-            # If we've covered all frames, stop
-            if chunk_end >= num_video_frames:
-                break
+            chunk_start = chunk_end
 
     # Concatenate all latent chunks
     latents = torch.cat(latent_chunks, dim=0)
     num_latent_frames = latents.shape[0]
-
-    # Trim to expected size if we got slightly more due to rounding
-    if num_latent_frames > expected_latent_frames:
-        latents = latents[:expected_latent_frames]
-        num_latent_frames = expected_latent_frames
 
     print(f">>> Video encoded: {num_video_frames} video frames -> {num_latent_frames} latent frames (expected: {expected_latent_frames})", flush=True)
     print(f">>> Latent shape: {latents.shape}", flush=True)
