@@ -365,29 +365,22 @@ def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24
 
     vae_dtype = next(vae.parameters()).dtype
 
-    # Encode video in small chunks to avoid OOM
-    # Memory-aware chunk sizing (inverse of VAE decode's _get_source_style_tiling)
-    # Decode formula: max_area = free_mem / 256 / 17 / 8
-    # Encode inverse: max_frames = free_mem / 256 / 8 / (h_pix * w_pix)
+    # Encode video in chunks to avoid OOM
+    # For encoding, we use a simpler memory estimate than decoding
     h_pix, w_pix = target_h, target_w
 
     free_mem = torch.cuda.mem_get_info()[0]
 
-    # Memory constraint: max_frames = free_mem / (256 * 8 * h_pix * w_pix)
-    # This is the inverse of: max_area = free_mem / 256 / frames / 8
-    max_frames_mem = free_mem / (256 * 8 * (h_pix * w_pix))
+    # Memory estimate for VAE encoding: ~4 bytes per pixel per frame for bf16/fp16
+    # Plus intermediate activations (~8x multiplier for safety)
+    bytes_per_frame = h_pix * w_pix * 3 * 4 * 8  # RGB * 4 bytes * 8x safety
+    max_frames_mem = free_mem / bytes_per_frame
 
-    # Integer overflow constraint (same as decode's num_vals < 2**31)
-    # num_vals = 256 * frames * (h_pix + 32) * (w_pix + 32) < 2**31
-    max_frames_vals = (2**31) / (256 * (h_pix + 32) * (w_pix + 32))
+    # Convert to integer and apply safety margin (50%)
+    video_chunk_size = int(max_frames_mem * 0.5)
 
-    # Take the minimum of both constraints
-    max_frames = min(max_frames_mem, max_frames_vals)
-
-    # Convert to integer and apply safety margin (70%)
-    video_chunk_size = int(max_frames * 0.7)
-
-    # Clamp to reasonable range
+    # Clamp to reasonable range - prefer larger chunks to avoid boundary overhead
+    # Each chunk boundary adds ~1 extra latent frame due to (n-1)//4 + 1 formula
     video_chunk_size = max(5, min(video_chunk_size, 121))  # min 5, max 121 (5 seconds)
 
     # Ensure (frames - 1) is divisible by 4 for clean VAE temporal compression
