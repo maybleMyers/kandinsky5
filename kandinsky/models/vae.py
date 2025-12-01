@@ -756,31 +756,41 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
         Uses smaller tiles to guarantee memory safety at the cost of speed.
         """
         _, _, num_frames, height, width = x.shape
-        tile_latent_min_height = (
-            self.tile_sample_min_height // self.spatial_compression_ratio
-        )
-        tile_latent_min_width = (
-            self.tile_sample_min_width // self.spatial_compression_ratio
-        )
-        tile_latent_min_num_frames = (
-            self.tile_sample_min_num_frames // self.temporal_compression_ratio
-        )
+
+        # Reset to small conservative tile sizes (256x256)
+        # This is needed because get_enc_optimal_tiling may have set larger values
+        old_h = self.tile_sample_min_height
+        old_w = self.tile_sample_min_width
+        old_sh = self.tile_sample_stride_height
+        old_sw = self.tile_sample_stride_width
+
+        self.tile_sample_min_height = 256
+        self.tile_sample_min_width = 256
+        self.tile_sample_stride_height = 192
+        self.tile_sample_stride_width = 192
 
         print(f"\nVAE Conservative Encode: Using {self.tile_sample_min_height}x{self.tile_sample_min_width} tiles")
 
-        if self.use_framewise_decoding and num_frames > (
-            tile_latent_min_num_frames + 1
-        ):
-            return self._temporal_tiled_encode(x)
+        try:
+            if self.use_framewise_decoding and num_frames > (
+                self.tile_sample_min_num_frames + 1
+            ):
+                return self._temporal_tiled_encode(x)
 
-        if self.use_tiling and (
-            width > tile_latent_min_width or height > tile_latent_min_height
-        ):
-            return self.tiled_encode(x)
+            if self.use_tiling and (
+                height > self.tile_sample_min_height or width > self.tile_sample_min_width
+            ):
+                return self.tiled_encode(x)
 
-        x = self.encoder(x)
-        enc = self.quant_conv(x)
-        return enc
+            x = self.encoder(x)
+            enc = self.quant_conv(x)
+            return enc
+        finally:
+            # Restore original values
+            self.tile_sample_min_height = old_h
+            self.tile_sample_min_width = old_w
+            self.tile_sample_stride_height = old_sh
+            self.tile_sample_stride_width = old_sw
 
     @apply_forward_hook
     def encode(
