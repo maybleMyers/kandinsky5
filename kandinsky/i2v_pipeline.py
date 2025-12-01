@@ -378,15 +378,14 @@ def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24
     # Convert to integer with safety margin
     video_chunk_size = int(max_frames * 0.7)
 
-    # Use 1-second chunks (24 frames) as the base unit for clean math
-    # Each 24-frame chunk produces 6 latent frames: (24-1)//4 + 1 = 6
-    # First chunk needs +1 frame (25 frames) to produce 7 latents for the +1 in formula
-    base_chunk_frames = 24  # 1 second at 24fps
-    video_chunk_size = max(base_chunk_frames, min(video_chunk_size, 121))
+    # Chunk size must be multiple of 4 for clean latent math
+    # First chunk needs +1 frame (so 5 minimum), subsequent chunks use multiples of 4
+    # 4 frames → 1 latent, 8 frames → 2 latents, etc.
+    video_chunk_size = max(4, min(video_chunk_size, 121))
 
-    # Round down to multiple of base_chunk_frames for clean division
-    video_chunk_size = (video_chunk_size // base_chunk_frames) * base_chunk_frames
-    video_chunk_size = max(base_chunk_frames, video_chunk_size)
+    # Round down to multiple of 4
+    video_chunk_size = (video_chunk_size // 4) * 4
+    video_chunk_size = max(4, video_chunk_size)  # Minimum 4 frames per chunk
 
     # Calculate expected latent frames
     expected_latent_frames = (num_video_frames - 1) // 4 + 1
@@ -402,20 +401,19 @@ def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24
 
         while chunk_start < num_video_frames:
             # First chunk gets +1 frame to account for the +1 in latent formula
-            # Subsequent chunks use exact base_chunk_frames
+            # First chunk: 5 frames minimum (4+1) → 2 latents
+            # Subsequent chunks: multiples of 4 → 1 latent per 4 frames
             if chunk_idx == 0:
-                chunk_size = min(video_chunk_size + 1, num_video_frames)
+                # First chunk needs at least 5 frames (4+1)
+                chunk_size = max(5, min(video_chunk_size + 1, num_video_frames))
             else:
                 chunk_size = video_chunk_size
 
             chunk_end = min(chunk_start + chunk_size, num_video_frames)
             actual_chunk_frames = chunk_end - chunk_start
 
-            # Handle last chunk - may be smaller
-            if actual_chunk_frames < 5 and chunk_start > 0:
-                # Extend backwards to get at least 5 frames
-                chunk_start = max(0, chunk_end - max(5, actual_chunk_frames))
-                actual_chunk_frames = chunk_end - chunk_start
+            # Handle last chunk - may be smaller, that's ok as long as >= 1 frame
+            # Even 1 frame will produce 1 latent
 
             # Convert PIL frames to tensor for this chunk
             chunk_tensors = []
