@@ -367,30 +367,28 @@ def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24
 
     # Encode video in small chunks to avoid OOM
     # Memory-aware chunk sizing (inverse of VAE decode's _get_source_style_tiling)
-    # VAE temporal compression: T_latent = (T_video - 1) / 4 + 1
+    # Decode formula: max_area = free_mem / 256 / 17 / 8
+    # Encode inverse: max_frames = free_mem / 256 / 8 / (h_pix * w_pix)
     h_pix, w_pix = target_h, target_w
 
-    # Get available GPU memory and calculate max frames (inverse of decode formula)
-    # Decode formula: max_area = free_mem / 256 / 17 / 8
-    # Encode inverse: max_frames = free_mem / 256 / 8 / (h_pix * w_pix) * 17
     free_mem = torch.cuda.mem_get_info()[0]
-    max_area = free_mem / 256 / 17 / 8
 
-    # Calculate how many frames we can fit based on available memory
-    # Using same logic as decode but solving for frames instead of area
-    if h_pix * w_pix < max_area:
-        # Can fit full resolution, calculate max frames
-        # Inverse: max_frames = max_area / (h_pix * w_pix) * 17
-        video_chunk_size = int((max_area / (h_pix * w_pix)) * 17)
-    else:
-        # Resolution exceeds max_area, need minimal frames
-        video_chunk_size = 5
+    # Memory constraint: max_frames = free_mem / (256 * 8 * h_pix * w_pix)
+    # This is the inverse of: max_area = free_mem / 256 / frames / 8
+    max_frames_mem = free_mem / (256 * 8 * (h_pix * w_pix))
 
-    # Clamp to reasonable range and ensure valid for VAE
+    # Integer overflow constraint (same as decode's num_vals < 2**31)
+    # num_vals = 256 * frames * (h_pix + 32) * (w_pix + 32) < 2**31
+    max_frames_vals = (2**31) / (256 * (h_pix + 32) * (w_pix + 32))
+
+    # Take the minimum of both constraints
+    max_frames = min(max_frames_mem, max_frames_vals)
+
+    # Convert to integer and apply safety margin (70%)
+    video_chunk_size = int(max_frames * 0.7)
+
+    # Clamp to reasonable range
     video_chunk_size = max(5, min(video_chunk_size, 121))  # min 5, max 121 (5 seconds)
-
-    # Additional safety margin - use 70% of calculated max
-    video_chunk_size = max(5, int(video_chunk_size * 0.7))
 
     # Ensure (frames - 1) is divisible by 4 for clean VAE temporal compression
     # Valid sizes: 5, 9, 13, 17, 21, 25, ... (1 + 4*n)
