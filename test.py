@@ -529,7 +529,7 @@ if __name__ == "__main__":
         from omegaconf import OmegaConf
         conf = OmegaConf.load(args.config)
 
-        vae_conf = conf.model.vae_params
+        vae_conf = conf.model.vae
         if vae_dtype is not None:
             vae_conf.dtype = vae_dtype
 
