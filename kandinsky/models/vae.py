@@ -721,6 +721,19 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
         self._manual_tile_sample_stride_num_frames = None
 
     def _encode(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Encode with automatic fallback strategy.
+        Tries aggressive (larger tiles) first, falls back to conservative on OOM.
+        """
+        try:
+            return self._encode_aggressive(x)
+        except torch.cuda.OutOfMemoryError:
+            print(f"\nOOM during aggressive VAE encode, falling back to conservative tiling...")
+            torch.cuda.empty_cache()
+            return self._encode_conservative(x)
+
+    def _encode_aggressive(self, x: torch.Tensor) -> torch.Tensor:
+        """Aggressive encoding - tries to use larger tiles based on available memory."""
         _, _, num_frames, height, width = x.shape
 
         if self.use_framewise_decoding and num_frames > (
@@ -736,6 +749,43 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
         x = self.encoder(x)
         enc = self.quant_conv(x)
         return enc
+
+    def _encode_conservative(self, x: torch.Tensor) -> torch.Tensor:
+        """Conservative encoding - uses small tiles to avoid OOM."""
+        _, _, num_frames, height, width = x.shape
+        h_pix, w_pix = height * 8, width * 8
+
+        # Save original settings
+        old_h = self.tile_sample_min_height
+        old_w = self.tile_sample_min_width
+        old_sh = self.tile_sample_stride_height
+        old_sw = self.tile_sample_stride_width
+        old_use_tiling = self.use_tiling
+        old_framewise = self.use_framewise_decoding
+
+        try:
+            # Use small conservative tiles
+            self.tile_sample_min_height = min(256, height * 8)
+            self.tile_sample_min_width = min(256, width * 8)
+            self.tile_sample_stride_height = min(192, self.tile_sample_min_height - 64)
+            self.tile_sample_stride_width = min(192, self.tile_sample_min_width - 64)
+            self.use_tiling = True
+            self.use_framewise_decoding = True
+
+            print(f"VAE Conservative Encode: Using {self.tile_sample_min_height}x{self.tile_sample_min_width} tiles, temporal tiling enabled")
+
+            if num_frames > (self.tile_sample_min_num_frames + 1):
+                return self._temporal_tiled_encode(x)
+            else:
+                return self.tiled_encode(x)
+        finally:
+            # Restore original settings
+            self.tile_sample_min_height = old_h
+            self.tile_sample_min_width = old_w
+            self.tile_sample_stride_height = old_sh
+            self.tile_sample_stride_width = old_sw
+            self.use_tiling = old_use_tiling
+            self.use_framewise_decoding = old_framewise
 
     @apply_forward_hook
     def encode(
