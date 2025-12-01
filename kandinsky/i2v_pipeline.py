@@ -366,13 +366,24 @@ def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24
     vae_dtype = next(vae.parameters()).dtype
 
     # Encode video in small chunks to avoid OOM
-    # Use 17 video frames per chunk -> 5 latent frames (keeps VAE memory reasonable)
+    # Adaptive chunk size based on resolution (same formula as VAE decode)
     # VAE temporal compression: T_latent = (T_video - 1) / 4 + 1
-    video_chunk_size = 17  # Small chunk to avoid OOM
+    total_pixels = target_h * target_w
+
+    # Resolution-based adaptive chunk sizing (reverse of decode tiling logic)
+    if total_pixels <= 768 * 512:  # Low-res (e.g., 768x512)
+        video_chunk_size = 17  # ~5 latent frames
+    elif total_pixels <= 960 * 544:  # Medium-res (e.g., 960x544)
+        video_chunk_size = 13  # ~4 latent frames
+    elif total_pixels <= 1280 * 704:  # High-res (e.g., 1024x768, 1280x704)
+        video_chunk_size = 9   # ~3 latent frames
+    else:  # Ultra-high-res (e.g., 1920x1080)
+        video_chunk_size = 5   # ~2 latent frames
+
     latent_chunks = []
 
     print(f">>> Encoding video to latent space (4x temporal compression)...", flush=True)
-    print(f">>> Processing in chunks of {video_chunk_size} video frames", flush=True)
+    print(f">>> Resolution: {target_w}x{target_h} ({total_pixels} pixels) -> chunk size: {video_chunk_size} frames", flush=True)
 
     with torch.no_grad():
         chunk_idx = 0
