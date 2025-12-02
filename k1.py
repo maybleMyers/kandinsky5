@@ -392,6 +392,7 @@ def generate_v2v_video(
     input_video: str,
     input_video2: str,
     num_cond_frames: int,
+    normalize_frames: int,
     model_config: str,
     dit_checkpoint_path: str,
     attention_engine: str,
@@ -555,6 +556,8 @@ def generate_v2v_video(
             command.extend(["--video2", str(input_video2)])
 
         command.extend(["--num_cond_frames", str(int(num_cond_frames))])
+        if normalize_frames and int(normalize_frames) > 0:
+            command.extend(["--normalize_frames", str(int(normalize_frames))])
         command.extend(["--width", str(int(width))])
         command.extend(["--height", str(int(height))])
 
@@ -1874,6 +1877,12 @@ def create_interface():
                             info="Number of last frames from input video (or from each video in join mode)"
                         )
 
+                        v2v_normalize_frames = gr.Slider(
+                            minimum=0, maximum=16, step=1, value=4,
+                            label="Join Normalization Frames",
+                            info="Number of frames to blend at join points (0=off). Smoothly transitions color/brightness to reduce flash."
+                        )
+
                         v2v_mode = gr.Dropdown(
                             label="Mode",
                             choices=["i2v", "t2v"],
@@ -2160,7 +2169,7 @@ def create_interface():
                     fn=generate_v2v_video,
                     inputs=[
                         v2v_prompt, v2v_negative_prompt, v2v_input_video, v2v_input_video2, v2v_num_cond_frames,
-                        v2v_model_config, v2v_dit_checkpoint_path, v2v_attention_engine,
+                        v2v_normalize_frames, v2v_model_config, v2v_dit_checkpoint_path, v2v_attention_engine,
                         v2v_attention_type, v2v_nabla_P, v2v_nabla_wT, v2v_nabla_wW, v2v_nabla_wH,
                         v2v_width, v2v_height, v2v_video_duration, v2v_sample_steps,
                         v2v_guidance_weight, v2v_scheduler_scale, v2v_seed,

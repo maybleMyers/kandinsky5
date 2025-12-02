@@ -108,6 +108,86 @@ def resize_image_to_resolution(image_path, target_width, target_height, alignmen
         return image_path
 
 
+def normalize_join_frames(video1, video2, num_frames):
+    """
+    Normalize frames at the join point between two videos to reduce flash/discontinuity.
+
+    This function:
+    1. Computes color statistics (mean, std) for boundary regions
+    2. Applies color matching to align the second video's colors with the first
+    3. Applies cross-fade blending in the overlap region
+
+    Args:
+        video1: First video tensor [num_frames, H, W, C] (float, 0-255 range)
+        video2: Second video tensor [num_frames, H, W, C] (float, 0-255 range)
+        num_frames: Number of frames to blend at the boundary
+
+    Returns:
+        video1: Unchanged first video
+        video2: Color-matched and blended second video
+    """
+    if num_frames <= 0:
+        return video1, video2
+
+    # Ensure we have enough frames
+    num_frames = min(num_frames, video1.shape[0], video2.shape[0])
+
+    # Get boundary regions for statistics
+    v1_end = video1[-num_frames:]  # Last N frames of video1
+    v2_start = video2[:num_frames]  # First N frames of video2
+
+    # Compute per-channel statistics for color matching
+    # Using the boundary frames to compute mean and std
+    v1_mean = v1_end.mean(dim=(0, 1, 2), keepdim=True)  # [1, 1, 1, C]
+    v1_std = v1_end.std(dim=(0, 1, 2), keepdim=True) + 1e-6
+    v2_mean = v2_start.mean(dim=(0, 1, 2), keepdim=True)
+    v2_std = v2_start.std(dim=(0, 1, 2), keepdim=True) + 1e-6
+
+    # Apply color matching to entire video2
+    # Transform: (x - mean2) / std2 * std1 + mean1
+    video2_matched = (video2 - v2_mean) / v2_std * v1_std + v1_mean
+    video2_matched = video2_matched.clamp(0, 255)
+
+    # Apply cross-fade blending in the overlap region
+    # Modify the first num_frames of video2 to blend with end of video1
+    for i in range(num_frames):
+        # Alpha goes from 1 (favor video1) to 0 (favor video2)
+        alpha = 1.0 - (i + 1) / (num_frames + 1)
+        video2_matched[i] = alpha * video1[-(num_frames - i)] + (1 - alpha) * video2_matched[i]
+
+    print(f">>> Frame normalization: Applied color matching and {num_frames}-frame cross-fade")
+
+    return video1, video2_matched
+
+
+def normalize_join_frames_triple(video1, middle, video2, num_frames):
+    """
+    Normalize frames at both join points in a three-video concatenation.
+
+    Used for video join mode: video1 + middle + video2
+
+    Args:
+        video1: First video tensor [num_frames, H, W, C]
+        middle: Middle generated video tensor [num_frames, H, W, C]
+        video2: Second video tensor [num_frames, H, W, C]
+        num_frames: Number of frames to blend at each boundary
+
+    Returns:
+        video1, middle, video2: Normalized tensors with smooth transitions
+    """
+    if num_frames <= 0:
+        return video1, middle, video2
+
+    # First junction: video1 -> middle
+    video1, middle = normalize_join_frames(video1, middle, num_frames)
+
+    # Second junction: middle -> video2
+    # For this, we need to normalize video2 to match middle's ending
+    middle, video2 = normalize_join_frames(middle, video2, num_frames)
+
+    return video1, middle, video2
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Generate a video using Kandinsky 5"
@@ -158,6 +238,12 @@ def parse_args():
         type=int,
         default=4,
         help="Number of last frames to use as conditioning for video continuation (or frames from each video in join mode)"
+    )
+    parser.add_argument(
+        "--normalize_frames",
+        type=int,
+        default=0,
+        help="Number of frames to blend at join points (0=disabled). Smoothly transitions color/brightness at video boundaries."
     )
     parser.add_argument(
         "--negative_prompt",
@@ -1279,6 +1365,13 @@ if __name__ == "__main__":
                         align_corners=False
                     ).permute(0, 2, 3, 1)
 
+                # Apply frame normalization if enabled
+                if args.normalize_frames and args.normalize_frames > 0:
+                    print(f">>> Applying frame normalization with {args.normalize_frames} frames at each join point")
+                    input_video1_tensor, middle_frames, input_video2_tensor = normalize_join_frames_triple(
+                        input_video1_tensor, middle_frames, input_video2_tensor, args.normalize_frames
+                    )
+
                 # Concatenate: full video1 + middle + full video2
                 final_video = torch.cat([input_video1_tensor, middle_frames, input_video2_tensor], dim=0)
 
@@ -1459,6 +1552,13 @@ if __name__ == "__main__":
                         mode='bilinear',
                         align_corners=False
                     ).permute(0, 2, 3, 1)  # [N, H, W, C]
+
+                # Apply frame normalization if enabled
+                if args.normalize_frames and args.normalize_frames > 0:
+                    print(f">>> Applying frame normalization with {args.normalize_frames} frames at join point")
+                    input_video_tensor, new_frames = normalize_join_frames(
+                        input_video_tensor, new_frames, args.normalize_frames
+                    )
 
                 # Concatenate: input video + new generated frames
                 final_video = torch.cat([input_video_tensor, new_frames], dim=0)
