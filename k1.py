@@ -361,6 +361,7 @@ def generate_video(
                     "vae_temporal_stride_frames": int(vae_temporal_stride_frames) if enable_vae_chunking and vae_temporal_stride_frames else None,
                     "vae_spatial_tile_height": int(vae_spatial_tile_height) if enable_vae_chunking and vae_spatial_tile_height else None,
                     "vae_spatial_tile_width": int(vae_spatial_tile_width) if enable_vae_chunking and vae_spatial_tile_width else None,
+                    "clip_prompt": clip_prompt if clip_prompt and clip_prompt.strip() else None,
                 }
                 try:
                     add_metadata_to_video(output_filename, params_for_meta)
@@ -705,6 +706,7 @@ def generate_v2v_video(
                     "use_apg": use_apg,
                     "apg_momentum": apg_momentum if use_apg else None,
                     "apg_norm_threshold": apg_norm_threshold if use_apg else None,
+                    "clip_prompt": clip_prompt if clip_prompt and clip_prompt.strip() else None,
                 }
                 try:
                     add_metadata_to_video(output_filename, params_for_meta)
@@ -1133,7 +1135,7 @@ def extract_video_details(video_path: str) -> Tuple[dict, str]:
 def send_to_generation(video_path, metadata):
     """Extract first frame and map metadata to generation inputs using subprocess."""
     if not video_path:
-        return [gr.update()] * 36
+        return [gr.update()] * 37
 
     # 1. Extract First Frame as PIL Image using subprocess
     input_img_pil = None
@@ -1204,13 +1206,14 @@ def send_to_generation(video_path, metadata):
         get_num("vae_temporal_tile_frames"),   # vae_temporal_tile_frames
         get_num("vae_temporal_stride_frames"), # vae_temporal_stride_frames
         get_num("vae_spatial_tile_height"),    # vae_spatial_tile_height
-        get_num("vae_spatial_tile_width")      # vae_spatial_tile_width
+        get_num("vae_spatial_tile_width"),     # vae_spatial_tile_width
+        get("clip_prompt"),                    # clip_prompt
     )
 
 def send_to_v2v(video_path, metadata):
     """Send video and metadata to V2V tab for continuation."""
     if not video_path:
-        return [gr.update()] * 36
+        return [gr.update()] * 37
 
     # Parse Metadata
     meta = metadata if isinstance(metadata, dict) else {}
@@ -1259,6 +1262,7 @@ def send_to_v2v(video_path, metadata):
         get_num("vae_spatial_tile_height"),    # v2v_vae_spatial_tile_height
         get_num("vae_spatial_tile_width"),     # v2v_vae_spatial_tile_width
         get_num("num_cond_frames", 4),  # v2v_num_cond_frames (default 4 if not in metadata)
+        get("clip_prompt"),             # v2v_clip_prompt
     )
 
 def calculate_width_from_height(height, original_dims):
@@ -2270,7 +2274,8 @@ def create_interface():
                         vae_temporal_tile_frames,   # 33
                         vae_temporal_stride_frames, # 34
                         vae_spatial_tile_height,    # 35
-                        vae_spatial_tile_width      # 36
+                        vae_spatial_tile_width,     # 36
+                        clip_prompt                 # 37
                     ]
                 )
 
@@ -2312,7 +2317,8 @@ def create_interface():
                         v2v_vae_temporal_stride_frames, # 32
                         v2v_vae_spatial_tile_height,    # 33
                         v2v_vae_spatial_tile_width,     # 34
-                        v2v_num_cond_frames             # 35
+                        v2v_num_cond_frames,            # 35
+                        v2v_clip_prompt                 # 36
                     ]
                 )
 
