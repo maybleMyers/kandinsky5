@@ -61,8 +61,9 @@ def adaptive_projected_guidance(
 
 
 def adaptive_mean_std_normalization(source, reference, clump_mean_low=0.3, clump_mean_high=0.35, clump_std_low=0.35, clump_std_high=0.5):
-    source_mean = source.mean(dim=(1, 3, 4), keepdim=True)  # mean over C, H, W
-    source_std = source.std(dim=(1, 3, 4), keepdim=True)    # std over C, H, W
+    # source shape is [frames, H, W, C] - 4D tensor
+    source_mean = source.mean(dim=(1, 2, 3), keepdim=True)  # mean over H, W, C
+    source_std = source.std(dim=(1, 2, 3), keepdim=True)    # std over H, W, C
 
     reference_mean = torch.clamp(reference.mean(), source_mean - clump_mean_low, source_mean + clump_mean_high)
     reference_std = torch.clamp(reference.std(), source_std - clump_std_low, source_std + clump_std_high)
