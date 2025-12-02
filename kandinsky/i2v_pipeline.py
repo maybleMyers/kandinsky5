@@ -449,15 +449,17 @@ def _encode_video_chunked(pil_frames, num_video_frames, target_h, target_w, vae,
     tile_sample_stride_num_frames = vae.tile_sample_stride_num_frames  # Default: 12
 
     # For high res, use smaller temporal chunks to reduce peak memory
+    # IMPORTANT: stride must be >= 4 to produce at least 1 latent frame per stride
     pixels_per_frame = target_h * target_w
     if pixels_per_frame >= 1024 * 768:
-        # High res (1024x768 or larger) - use much smaller temporal tiles
-        tile_sample_min_num_frames = 4
-        tile_sample_stride_num_frames = 3
+        # High res (1024x768 or larger) - use smaller temporal tiles
+        # 9 pixel frames → 3 latent frames, stride 4 → 1 latent frame
+        tile_sample_min_num_frames = 8
+        tile_sample_stride_num_frames = 4
     elif pixels_per_frame > 768 * 512:
         # Medium-high res - use smaller temporal tiles
-        tile_sample_min_num_frames = 8
-        tile_sample_stride_num_frames = 6
+        tile_sample_min_num_frames = 12
+        tile_sample_stride_num_frames = 8
 
     # For high res, also force spatial tiling by temporarily setting smaller tile dimensions
     # This ensures VAE's _encode triggers tiled_encode instead of direct encoding
