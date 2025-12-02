@@ -448,12 +448,33 @@ def _encode_video_chunked(pil_frames, num_video_frames, target_h, target_w, vae,
     tile_sample_min_num_frames = vae.tile_sample_min_num_frames  # Default: 16
     tile_sample_stride_num_frames = vae.tile_sample_stride_num_frames  # Default: 12
 
-    # For very high res, use smaller temporal chunks to reduce peak memory
+    # For high res, use smaller temporal chunks to reduce peak memory
     pixels_per_frame = target_h * target_w
-    if pixels_per_frame > 1024 * 768:
-        # Very high res - use smaller temporal tiles
+    if pixels_per_frame >= 1024 * 768:
+        # High res (1024x768 or larger) - use much smaller temporal tiles
+        tile_sample_min_num_frames = 4
+        tile_sample_stride_num_frames = 3
+    elif pixels_per_frame > 768 * 512:
+        # Medium-high res - use smaller temporal tiles
         tile_sample_min_num_frames = 8
         tile_sample_stride_num_frames = 6
+
+    # For high res, also force spatial tiling by temporarily setting smaller tile dimensions
+    # This ensures VAE's _encode triggers tiled_encode instead of direct encoding
+    force_spatial_tiling = pixels_per_frame >= 768 * 512
+    if force_spatial_tiling:
+        old_tile_h = vae.tile_sample_min_height
+        old_tile_w = vae.tile_sample_min_width
+        old_stride_h = vae.tile_sample_stride_height
+        old_stride_w = vae.tile_sample_stride_width
+        old_use_tiling = vae.use_tiling
+        # Use 256x256 tiles with overlap
+        vae.tile_sample_min_height = 256
+        vae.tile_sample_min_width = 256
+        vae.tile_sample_stride_height = 192
+        vae.tile_sample_stride_width = 192
+        vae.use_tiling = True  # Ensure tiling is enabled
+        print(f">>> Forcing spatial tiling: 256x256 tiles for {target_w}x{target_h} resolution", flush=True)
 
     temporal_tile_frames = tile_sample_min_num_frames + 1  # +1 for overlap (same as VAE)
     temporal_stride_frames = tile_sample_stride_num_frames
@@ -477,41 +498,50 @@ def _encode_video_chunked(pil_frames, num_video_frames, target_h, target_w, vae,
 
     latent_rows = []
 
-    with torch.no_grad():
-        for chunk_idx, start_frame in enumerate(tqdm(temporal_chunks, desc="VAE temporal encoding", unit="chunk")):
-            # Same frame selection as VAE: i : i + tile_sample_min_num_frames + 1
-            end_frame = min(start_frame + temporal_tile_frames, num_video_frames)
+    try:
+        with torch.no_grad():
+            for chunk_idx, start_frame in enumerate(tqdm(temporal_chunks, desc="VAE temporal encoding", unit="chunk")):
+                # Same frame selection as VAE: i : i + tile_sample_min_num_frames + 1
+                end_frame = min(start_frame + temporal_tile_frames, num_video_frames)
 
-            # Load only this chunk's frames to GPU (memory efficient)
-            chunk_tensors = []
-            for i in range(start_frame, end_frame):
-                pil_image = pil_frames[i]
-                image = F.pil_to_tensor(pil_image).unsqueeze(0).float()
-                if image.shape[2] != target_h or image.shape[3] != target_w:
-                    image = F_torch.interpolate(image, size=(target_h, target_w), mode='bilinear', align_corners=False)
-                image = image / 127.5 - 1.
-                chunk_tensors.append(image)
+                # Load only this chunk's frames to GPU (memory efficient)
+                chunk_tensors = []
+                for i in range(start_frame, end_frame):
+                    pil_image = pil_frames[i]
+                    image = F.pil_to_tensor(pil_image).unsqueeze(0).float()
+                    if image.shape[2] != target_h or image.shape[3] != target_w:
+                        image = F_torch.interpolate(image, size=(target_h, target_w), mode='bilinear', align_corners=False)
+                    image = image / 127.5 - 1.
+                    chunk_tensors.append(image)
 
-            # Stack: [N, C, H, W] -> [1, C, N, H, W]
-            chunk = torch.cat(chunk_tensors, dim=0)
-            chunk = chunk.permute(1, 0, 2, 3).unsqueeze(0)
-            chunk = chunk.to(device=device, dtype=vae_dtype)
-            del chunk_tensors
+                # Stack: [N, C, H, W] -> [1, C, N, H, W]
+                chunk = torch.cat(chunk_tensors, dim=0)
+                chunk = chunk.permute(1, 0, 2, 3).unsqueeze(0)
+                chunk = chunk.to(device=device, dtype=vae_dtype)
+                del chunk_tensors
 
-            # Encode this chunk - VAE will apply spatial tiling if needed
-            # Using opt_tiling=True so VAE handles spatial tiling automatically
-            latent_chunk = vae.encode(chunk, opt_tiling=True).latent_dist.sample()
-            latent_chunk = latent_chunk * vae.config.scaling_factor
+                # Encode this chunk - VAE will apply spatial tiling based on our settings
+                # Using opt_tiling=False to use our manually set tile dimensions
+                latent_chunk = vae.encode(chunk, opt_tiling=False).latent_dist.sample()
+                latent_chunk = latent_chunk * vae.config.scaling_factor
 
-            # Drop first latent frame for subsequent chunks (same as VAE: tile[:, :, 1:, :, :])
-            if chunk_idx > 0:
-                latent_chunk = latent_chunk[:, :, 1:, :, :]
+                # Drop first latent frame for subsequent chunks (same as VAE: tile[:, :, 1:, :, :])
+                if chunk_idx > 0:
+                    latent_chunk = latent_chunk[:, :, 1:, :, :]
 
-            # Keep in VAE's format [B, C, T, H, W] for blending, move to CPU
-            latent_rows.append(latent_chunk.cpu())
+                # Keep in VAE's format [B, C, T, H, W] for blending, move to CPU
+                latent_rows.append(latent_chunk.cpu())
 
-            del chunk, latent_chunk
-            torch.cuda.empty_cache()
+                del chunk, latent_chunk
+                torch.cuda.empty_cache()
+    finally:
+        # Restore VAE's original tile settings
+        if force_spatial_tiling:
+            vae.tile_sample_min_height = old_tile_h
+            vae.tile_sample_min_width = old_tile_w
+            vae.tile_sample_stride_height = old_stride_h
+            vae.tile_sample_stride_width = old_stride_w
+            vae.use_tiling = old_use_tiling
 
     # Blend temporal chunks using VAE's blend_t approach (same logic as _temporal_tiled_encode)
     result_rows = []
