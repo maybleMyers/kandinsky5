@@ -547,6 +547,38 @@ def parse_args():
         help="Denoise strength (0.1-0.5 typical). Higher = more change. Default: 0.2"
     )
 
+    # UltraViCo: Attention decay for long video extrapolation
+    parser.add_argument(
+        "--ultravico",
+        action='store_true',
+        default=False,
+        help="Enable UltraViCo attention decay for long video generation. Helps prevent quality degradation and content repetition when generating videos longer than training length."
+    )
+    parser.add_argument(
+        "--ultravico_alpha",
+        type=float,
+        default=0.9,
+        help="UltraViCo: Decay factor for out-of-window attention (0.85-0.95 recommended). Lower = stronger decay. Default: 0.9"
+    )
+    parser.add_argument(
+        "--ultravico_training_frames",
+        type=int,
+        default=None,
+        help="UltraViCo: Training window in latent frames. Auto-detected from config if not set (5s=31, 10s=61)."
+    )
+    parser.add_argument(
+        "--ultravico_suppress_harmonics",
+        action='store_true',
+        default=False,
+        help="UltraViCo: Enable stronger suppression at harmonic positions. Use if you see content repetition/looping."
+    )
+    parser.add_argument(
+        "--ultravico_beta",
+        type=float,
+        default=0.6,
+        help="UltraViCo: Decay factor for harmonic risk positions (only with --ultravico_suppress_harmonics). Default: 0.6"
+    )
+
     args = parser.parse_args()
     return args
 
@@ -595,6 +627,30 @@ if __name__ == "__main__":
                 "add_sta": args.nabla_add_sta,
                 "method": args.nabla_method,
             })
+
+    # Initialize UltraViCo if enabled (for long video extrapolation)
+    if args.ultravico:
+        from kandinsky.models.ultravico import UltraViCoConfig, set_ultravico_config
+
+        # Auto-detect training frames from config name if not specified
+        training_frames = args.ultravico_training_frames
+        if training_frames is None:
+            if "10s" in args.config:
+                training_frames = 61  # 10s = 61 latent frames
+            else:
+                training_frames = 31  # 5s = 31 latent frames (default)
+
+        ultravico_config = UltraViCoConfig(
+            enabled=True,
+            training_frames=training_frames,
+            alpha=args.ultravico_alpha,
+            beta=args.ultravico_beta,
+            suppress_harmonics=args.ultravico_suppress_harmonics,
+            gamma=4,
+        )
+        set_ultravico_config(ultravico_config)
+        print(f"UltraViCo enabled: training_frames={training_frames}, alpha={args.ultravico_alpha}, "
+              f"suppress_harmonics={args.ultravico_suppress_harmonics}")
 
     # Determine model type from config filename
     is_t2i = "t2i" in args.config.lower()

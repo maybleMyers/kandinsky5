@@ -271,10 +271,28 @@ class MultiheadSelfAttentionDec(nn.Module):
 
     @maybe_compile()
     def attention(self, query, key, value):
-        out = self.attn_engine.get_attention()(
-            q=query.unsqueeze(0),
-            k=key.unsqueeze(0),
-            v=value.unsqueeze(0))[0].flatten(-2, -1)
+        # Check if UltraViCo is enabled (lazy import to avoid overhead when disabled)
+        ultravico_bias = None
+        try:
+            from .ultravico import get_ultravico_bias_auto
+            ultravico_bias = get_ultravico_bias_auto(query.shape[0], query.device, torch.float32)
+        except ImportError:
+            pass
+
+        if ultravico_bias is not None:
+            # Use SDPA with UltraViCo attention bias for long video extrapolation
+            q = query.unsqueeze(0).transpose(1, 2).contiguous()
+            k = key.unsqueeze(0).transpose(1, 2).contiguous()
+            v = value.unsqueeze(0).transpose(1, 2).contiguous()
+            bias = ultravico_bias.unsqueeze(0).unsqueeze(0)  # [1, 1, seq, seq]
+            out = F.scaled_dot_product_attention(q, k, v, attn_mask=bias)
+            out = out.transpose(1, 2).squeeze(0).contiguous().flatten(-2, -1)
+        else:
+            # Original path - no changes
+            out = self.attn_engine.get_attention()(
+                q=query.unsqueeze(0),
+                k=key.unsqueeze(0),
+                v=value.unsqueeze(0))[0].flatten(-2, -1)
         return out
 
     @maybe_compile(mode="max-autotune-no-cudagraphs", dynamic=True)

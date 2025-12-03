@@ -106,6 +106,10 @@ def generate_video(
     use_prompt_expansion: bool,
     clip_prompt: str,
     save_latents: bool,
+    enable_ultravico: bool = False,
+    ultravico_alpha: float = 0.9,
+    ultravico_suppress_harmonics: bool = False,
+    ultravico_beta: float = 0.6,
 ) -> Generator[Tuple[List[Tuple[str, str]], Optional[str], str, str], None, None]:
     global stop_event, current_process, current_output_filename
     stop_event.clear()
@@ -258,6 +262,14 @@ def generate_video(
         if save_latents:
             latents_filename = os.path.join(save_path, f"k1_{mode}_{timestamp}_{current_seed}_latents.pt")
             command.extend(["--save_latents", latents_filename])
+
+        # Add UltraViCo options if enabled
+        if enable_ultravico:
+            command.append("--ultravico")
+            command.extend(["--ultravico_alpha", str(ultravico_alpha)])
+            if ultravico_suppress_harmonics:
+                command.append("--ultravico_suppress_harmonics")
+                command.extend(["--ultravico_beta", str(ultravico_beta)])
 
         # Print the command for debugging/transparency
         print("\n" + "="*80)
@@ -435,6 +447,10 @@ def generate_v2v_video(
     apg_norm_threshold: float,
     enable_denoise: bool,
     denoise_strength: float,
+    enable_ultravico: bool = False,
+    ultravico_alpha: float = 0.9,
+    ultravico_suppress_harmonics: bool = False,
+    ultravico_beta: float = 0.6,
 ) -> Generator[Tuple[List[Tuple[str, str]], Optional[str], str, str], None, None]:
     """Generate video from video input (video continuation/v2v mode)."""
     global stop_event, current_process, current_output_filename
@@ -602,6 +618,14 @@ def generate_v2v_video(
         if save_latents:
             latents_filename = os.path.join(save_path, f"k1_v2v_{timestamp}_{current_seed}_latents.pt")
             command.extend(["--save_latents", latents_filename])
+
+        # Add UltraViCo options if enabled
+        if enable_ultravico:
+            command.append("--ultravico")
+            command.extend(["--ultravico_alpha", str(ultravico_alpha)])
+            if ultravico_suppress_harmonics:
+                command.append("--ultravico_suppress_harmonics")
+                command.extend(["--ultravico_beta", str(ultravico_beta)])
 
         # Print the command for debugging/transparency
         print("\n" + "="*80)
@@ -1708,6 +1732,40 @@ def create_interface():
                                 info="Spatial chunk width (reduce if high resolution causes OOM)"
                             )
 
+                    with gr.Accordion("UltraViCo: Long Video Extrapolation", open=False):
+                        gr.Markdown("""
+                        **UltraViCo helps prevent quality degradation and content repetition when generating videos longer than the model's training length.**
+
+                        Based on the paper "UltraViCo: Breaking Extrapolation Limits in Video Diffusion Transformers".
+
+                        - **Enable UltraViCo**: Activates attention decay for out-of-training-window tokens
+                        - **Alpha**: Decay factor (0.85-0.95). Lower = stronger decay, better quality but may reduce temporal consistency
+                        - **Suppress Harmonics**: Enable if you see content looping/repeating. Applies stronger decay at harmonic positions
+
+                        Recommended for videos longer than 5s (Lite) or 10s (Pro) models.
+                        """)
+                        enable_ultravico = gr.Checkbox(
+                            label="Enable UltraViCo",
+                            value=False,
+                            info="Enable attention decay for long video generation"
+                        )
+                        with gr.Row():
+                            ultravico_alpha = gr.Slider(
+                                minimum=0.7, maximum=1.0, value=0.9, step=0.05,
+                                label="Alpha (Decay Factor)",
+                                info="Out-of-window decay (0.85-0.95 recommended)"
+                            )
+                            ultravico_suppress_harmonics = gr.Checkbox(
+                                label="Suppress Harmonics",
+                                value=False,
+                                info="Stronger decay at harmonic positions (use if content loops)"
+                            )
+                            ultravico_beta = gr.Slider(
+                                minimum=0.3, maximum=0.9, value=0.6, step=0.1,
+                                label="Beta (Harmonic Decay)",
+                                info="Decay at harmonic positions (only if suppress harmonics enabled)"
+                            )
+
                     save_path = gr.Textbox(label="Save Path", value="outputs")
 
                 random_seed_btn.click(
@@ -1768,7 +1826,8 @@ def create_interface():
                         enable_vae_chunking, vae_temporal_tile_frames, vae_temporal_stride_frames,
                         vae_spatial_tile_height, vae_spatial_tile_width,
                         use_prompt_expansion, clip_prompt,
-                        save_latents_checkbox
+                        save_latents_checkbox,
+                        enable_ultravico, ultravico_alpha, ultravico_suppress_harmonics, ultravico_beta
                     ],
                     outputs=[output, preview_output, batch_progress, progress_text]
                 )
@@ -2112,6 +2171,40 @@ def create_interface():
                                 info="Spatial chunk width (reduce if high resolution causes OOM)"
                             )
 
+                    with gr.Accordion("UltraViCo: Long Video Extrapolation", open=False):
+                        gr.Markdown("""
+                        **UltraViCo helps prevent quality degradation and content repetition when generating videos longer than the model's training length.**
+
+                        Based on the paper "UltraViCo: Breaking Extrapolation Limits in Video Diffusion Transformers".
+
+                        - **Enable UltraViCo**: Activates attention decay for out-of-training-window tokens
+                        - **Alpha**: Decay factor (0.85-0.95). Lower = stronger decay, better quality but may reduce temporal consistency
+                        - **Suppress Harmonics**: Enable if you see content looping/repeating. Applies stronger decay at harmonic positions
+
+                        Recommended for videos longer than 5s (Lite) or 10s (Pro) models.
+                        """)
+                        v2v_enable_ultravico = gr.Checkbox(
+                            label="Enable UltraViCo",
+                            value=False,
+                            info="Enable attention decay for long video generation"
+                        )
+                        with gr.Row():
+                            v2v_ultravico_alpha = gr.Slider(
+                                minimum=0.7, maximum=1.0, value=0.9, step=0.05,
+                                label="Alpha (Decay Factor)",
+                                info="Out-of-window decay (0.85-0.95 recommended)"
+                            )
+                            v2v_ultravico_suppress_harmonics = gr.Checkbox(
+                                label="Suppress Harmonics",
+                                value=False,
+                                info="Stronger decay at harmonic positions (use if content loops)"
+                            )
+                            v2v_ultravico_beta = gr.Slider(
+                                minimum=0.3, maximum=0.9, value=0.6, step=0.1,
+                                label="Beta (Harmonic Decay)",
+                                info="Decay at harmonic positions (only if suppress harmonics enabled)"
+                            )
+
                     v2v_save_path = gr.Textbox(label="Save Path", value="outputs")
 
                 v2v_random_seed_btn.click(
@@ -2183,7 +2276,8 @@ def create_interface():
                         v2v_use_prompt_expansion, v2v_clip_prompt,
                         v2v_save_latents_checkbox,
                         v2v_use_apg, v2v_apg_momentum, v2v_apg_norm_threshold,
-                        v2v_enable_denoise, v2v_denoise_strength
+                        v2v_enable_denoise, v2v_denoise_strength,
+                        v2v_enable_ultravico, v2v_ultravico_alpha, v2v_ultravico_suppress_harmonics, v2v_ultravico_beta
                     ],
                     outputs=[v2v_output, v2v_preview_output, v2v_batch_progress, v2v_progress_text]
                 )
