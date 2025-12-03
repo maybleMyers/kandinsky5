@@ -29,12 +29,18 @@ Windows install is hard, I would recommend activating linux before trying to run
 
 I added support to save latents and continue from saved latents checkpoint because some of the hd generations take a long time.  
 
+## v2v
+
+denoise videos is still a wip. Video joining seems to work ok with 1-2 conditional frames and 2 normalizations.  
+
 ## To use lite i2v 
 download https://huggingface.co/kandinskylab/Kandinsky-5.0-I2V-Lite-5s/blob/main/model/kandinsky5lite_i2v_5s.safetensors that model and put it in the lite_checkpoints subfolder. You need to have the full i2v pro diffusers cloned in the root directory. Select mode - i2v and model configuration 5s Lite (I2V) .  Either mess with the vae config or set 1 block swapped for now to offload before vae decoding.  
 
 Discord for help etc. https://discord.gg/wDaEfNGuCX
 
 Changlog:  
+  12/3/2025  
+    Add ultravico for long video generation, some v2v supports.  
   11/21/2025  
     Add mag cache, token counter, some other bugs. You need to pip install tiktoken or reinstall requirements.    
   11/20/2025  

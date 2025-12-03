@@ -60,14 +60,10 @@ def adaptive_projected_guidance(
     return diff_orthogonal
 
 
-def adaptive_mean_std_normalization(source, reference):
-    source_mean = source.mean(dim=(1,2,3),keepdim=True)
-    source_std = source.std(dim=(1,2,3),keepdim=True)
-    #magic constants - limit changes in latents
-    clump_mean_low = 0.05
-    clump_mean_high = 0.1
-    clump_std_low = 0.1
-    clump_std_high = 0.25
+def adaptive_mean_std_normalization(source, reference, clump_mean_low=0.3, clump_mean_high=0.35, clump_std_low=0.35, clump_std_high=0.5):
+    # source shape is [frames, H, W, C] - 4D tensor
+    source_mean = source.mean(dim=(1, 2, 3), keepdim=True)  # mean over H, W, C
+    source_std = source.std(dim=(1, 2, 3), keepdim=True)    # std over H, W, C
 
     reference_mean = torch.clamp(reference.mean(), source_mean - clump_mean_low, source_mean + clump_mean_high)
     reference_std = torch.clamp(reference.std(), source_std - clump_std_low, source_std + clump_std_high)

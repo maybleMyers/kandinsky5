@@ -106,6 +106,10 @@ def generate_video(
     use_prompt_expansion: bool,
     clip_prompt: str,
     save_latents: bool,
+    enable_ultravico: bool = False,
+    ultravico_alpha: float = 0.9,
+    ultravico_suppress_harmonics: bool = False,
+    ultravico_beta: float = 0.6,
 ) -> Generator[Tuple[List[Tuple[str, str]], Optional[str], str, str], None, None]:
     global stop_event, current_process, current_output_filename
     stop_event.clear()
@@ -259,6 +263,14 @@ def generate_video(
             latents_filename = os.path.join(save_path, f"k1_{mode}_{timestamp}_{current_seed}_latents.pt")
             command.extend(["--save_latents", latents_filename])
 
+        # Add UltraViCo options if enabled
+        if enable_ultravico:
+            command.append("--ultravico")
+            command.extend(["--ultravico_alpha", str(ultravico_alpha)])
+            if ultravico_suppress_harmonics:
+                command.append("--ultravico_suppress_harmonics")
+                command.extend(["--ultravico_beta", str(ultravico_beta)])
+
         # Print the command for debugging/transparency
         print("\n" + "="*80)
         print(f"LAUNCHING COMMAND (Batch {i+1}/{batch_size}):")
@@ -361,6 +373,7 @@ def generate_video(
                     "vae_temporal_stride_frames": int(vae_temporal_stride_frames) if enable_vae_chunking and vae_temporal_stride_frames else None,
                     "vae_spatial_tile_height": int(vae_spatial_tile_height) if enable_vae_chunking and vae_spatial_tile_height else None,
                     "vae_spatial_tile_width": int(vae_spatial_tile_width) if enable_vae_chunking and vae_spatial_tile_width else None,
+                    "clip_prompt": clip_prompt if clip_prompt and clip_prompt.strip() else None,
                 }
                 try:
                     add_metadata_to_video(output_filename, params_for_meta)
@@ -391,6 +404,7 @@ def generate_v2v_video(
     input_video: str,
     input_video2: str,
     num_cond_frames: int,
+    normalize_frames: int,
     model_config: str,
     dit_checkpoint_path: str,
     attention_engine: str,
@@ -433,6 +447,10 @@ def generate_v2v_video(
     apg_norm_threshold: float,
     enable_denoise: bool,
     denoise_strength: float,
+    enable_ultravico: bool = False,
+    ultravico_alpha: float = 0.9,
+    ultravico_suppress_harmonics: bool = False,
+    ultravico_beta: float = 0.6,
 ) -> Generator[Tuple[List[Tuple[str, str]], Optional[str], str, str], None, None]:
     """Generate video from video input (video continuation/v2v mode)."""
     global stop_event, current_process, current_output_filename
@@ -554,6 +572,8 @@ def generate_v2v_video(
             command.extend(["--video2", str(input_video2)])
 
         command.extend(["--num_cond_frames", str(int(num_cond_frames))])
+        if normalize_frames and int(normalize_frames) > 0:
+            command.extend(["--normalize_frames", str(int(normalize_frames))])
         command.extend(["--width", str(int(width))])
         command.extend(["--height", str(int(height))])
 
@@ -598,6 +618,14 @@ def generate_v2v_video(
         if save_latents:
             latents_filename = os.path.join(save_path, f"k1_v2v_{timestamp}_{current_seed}_latents.pt")
             command.extend(["--save_latents", latents_filename])
+
+        # Add UltraViCo options if enabled
+        if enable_ultravico:
+            command.append("--ultravico")
+            command.extend(["--ultravico_alpha", str(ultravico_alpha)])
+            if ultravico_suppress_harmonics:
+                command.append("--ultravico_suppress_harmonics")
+                command.extend(["--ultravico_beta", str(ultravico_beta)])
 
         # Print the command for debugging/transparency
         print("\n" + "="*80)
@@ -705,6 +733,7 @@ def generate_v2v_video(
                     "use_apg": use_apg,
                     "apg_momentum": apg_momentum if use_apg else None,
                     "apg_norm_threshold": apg_norm_threshold if use_apg else None,
+                    "clip_prompt": clip_prompt if clip_prompt and clip_prompt.strip() else None,
                 }
                 try:
                     add_metadata_to_video(output_filename, params_for_meta)
@@ -1133,7 +1162,7 @@ def extract_video_details(video_path: str) -> Tuple[dict, str]:
 def send_to_generation(video_path, metadata):
     """Extract first frame and map metadata to generation inputs using subprocess."""
     if not video_path:
-        return [gr.update()] * 36
+        return [gr.update()] * 37
 
     # 1. Extract First Frame as PIL Image using subprocess
     input_img_pil = None
@@ -1204,13 +1233,14 @@ def send_to_generation(video_path, metadata):
         get_num("vae_temporal_tile_frames"),   # vae_temporal_tile_frames
         get_num("vae_temporal_stride_frames"), # vae_temporal_stride_frames
         get_num("vae_spatial_tile_height"),    # vae_spatial_tile_height
-        get_num("vae_spatial_tile_width")      # vae_spatial_tile_width
+        get_num("vae_spatial_tile_width"),     # vae_spatial_tile_width
+        get("clip_prompt"),                    # clip_prompt
     )
 
 def send_to_v2v(video_path, metadata):
     """Send video and metadata to V2V tab for continuation."""
     if not video_path:
-        return [gr.update()] * 36
+        return [gr.update()] * 37
 
     # Parse Metadata
     meta = metadata if isinstance(metadata, dict) else {}
@@ -1259,6 +1289,7 @@ def send_to_v2v(video_path, metadata):
         get_num("vae_spatial_tile_height"),    # v2v_vae_spatial_tile_height
         get_num("vae_spatial_tile_width"),     # v2v_vae_spatial_tile_width
         get_num("num_cond_frames", 4),  # v2v_num_cond_frames (default 4 if not in metadata)
+        get("clip_prompt"),             # v2v_clip_prompt
     )
 
 def calculate_width_from_height(height, original_dims):
@@ -1701,6 +1732,40 @@ def create_interface():
                                 info="Spatial chunk width (reduce if high resolution causes OOM)"
                             )
 
+                    with gr.Accordion("UltraViCo: Long Video Extrapolation", open=False):
+                        gr.Markdown("""
+                        **UltraViCo helps prevent quality degradation and content repetition when generating videos longer than the model's training length.**
+
+                        Based on the paper "UltraViCo: Breaking Extrapolation Limits in Video Diffusion Transformers".
+
+                        - **Enable UltraViCo**: Activates attention decay for out-of-training-window tokens
+                        - **Alpha**: Decay factor (0.85-0.95). Lower = stronger decay, better quality but may reduce temporal consistency
+                        - **Suppress Harmonics**: Enable if you see content looping/repeating. Applies stronger decay at harmonic positions
+
+                        Recommended for videos longer than 5s (Lite) or 10s (Pro) models.
+                        """)
+                        enable_ultravico = gr.Checkbox(
+                            label="Enable UltraViCo",
+                            value=False,
+                            info="Enable attention decay for long video generation"
+                        )
+                        with gr.Row():
+                            ultravico_alpha = gr.Slider(
+                                minimum=0.7, maximum=1.0, value=0.9, step=0.05,
+                                label="Alpha (Decay Factor)",
+                                info="Out-of-window decay (0.85-0.95 recommended)"
+                            )
+                            ultravico_suppress_harmonics = gr.Checkbox(
+                                label="Suppress Harmonics",
+                                value=False,
+                                info="Stronger decay at harmonic positions (use if content loops)"
+                            )
+                            ultravico_beta = gr.Slider(
+                                minimum=0.3, maximum=0.9, value=0.6, step=0.1,
+                                label="Beta (Harmonic Decay)",
+                                info="Decay at harmonic positions (only if suppress harmonics enabled)"
+                            )
+
                     save_path = gr.Textbox(label="Save Path", value="outputs")
 
                 random_seed_btn.click(
@@ -1761,7 +1826,8 @@ def create_interface():
                         enable_vae_chunking, vae_temporal_tile_frames, vae_temporal_stride_frames,
                         vae_spatial_tile_height, vae_spatial_tile_width,
                         use_prompt_expansion, clip_prompt,
-                        save_latents_checkbox
+                        save_latents_checkbox,
+                        enable_ultravico, ultravico_alpha, ultravico_suppress_harmonics, ultravico_beta
                     ],
                     outputs=[output, preview_output, batch_progress, progress_text]
                 )
@@ -1868,6 +1934,12 @@ def create_interface():
                             minimum=1, maximum=10, step=1, value=4,
                             label="Conditioning Frames",
                             info="Number of last frames from input video (or from each video in join mode)"
+                        )
+
+                        v2v_normalize_frames = gr.Slider(
+                            minimum=0, maximum=16, step=1, value=4,
+                            label="Join Normalization Frames",
+                            info="Number of frames to blend at join points (0=off). Smoothly transitions color/brightness to reduce flash."
                         )
 
                         v2v_mode = gr.Dropdown(
@@ -2099,6 +2171,40 @@ def create_interface():
                                 info="Spatial chunk width (reduce if high resolution causes OOM)"
                             )
 
+                    with gr.Accordion("UltraViCo: Long Video Extrapolation", open=False):
+                        gr.Markdown("""
+                        **UltraViCo helps prevent quality degradation and content repetition when generating videos longer than the model's training length.**
+
+                        Based on the paper "UltraViCo: Breaking Extrapolation Limits in Video Diffusion Transformers".
+
+                        - **Enable UltraViCo**: Activates attention decay for out-of-training-window tokens
+                        - **Alpha**: Decay factor (0.85-0.95). Lower = stronger decay, better quality but may reduce temporal consistency
+                        - **Suppress Harmonics**: Enable if you see content looping/repeating. Applies stronger decay at harmonic positions
+
+                        Recommended for videos longer than 5s (Lite) or 10s (Pro) models.
+                        """)
+                        v2v_enable_ultravico = gr.Checkbox(
+                            label="Enable UltraViCo",
+                            value=False,
+                            info="Enable attention decay for long video generation"
+                        )
+                        with gr.Row():
+                            v2v_ultravico_alpha = gr.Slider(
+                                minimum=0.7, maximum=1.0, value=0.9, step=0.05,
+                                label="Alpha (Decay Factor)",
+                                info="Out-of-window decay (0.85-0.95 recommended)"
+                            )
+                            v2v_ultravico_suppress_harmonics = gr.Checkbox(
+                                label="Suppress Harmonics",
+                                value=False,
+                                info="Stronger decay at harmonic positions (use if content loops)"
+                            )
+                            v2v_ultravico_beta = gr.Slider(
+                                minimum=0.3, maximum=0.9, value=0.6, step=0.1,
+                                label="Beta (Harmonic Decay)",
+                                info="Decay at harmonic positions (only if suppress harmonics enabled)"
+                            )
+
                     v2v_save_path = gr.Textbox(label="Save Path", value="outputs")
 
                 v2v_random_seed_btn.click(
@@ -2156,7 +2262,7 @@ def create_interface():
                     fn=generate_v2v_video,
                     inputs=[
                         v2v_prompt, v2v_negative_prompt, v2v_input_video, v2v_input_video2, v2v_num_cond_frames,
-                        v2v_model_config, v2v_dit_checkpoint_path, v2v_attention_engine,
+                        v2v_normalize_frames, v2v_model_config, v2v_dit_checkpoint_path, v2v_attention_engine,
                         v2v_attention_type, v2v_nabla_P, v2v_nabla_wT, v2v_nabla_wW, v2v_nabla_wH,
                         v2v_width, v2v_height, v2v_video_duration, v2v_sample_steps,
                         v2v_guidance_weight, v2v_scheduler_scale, v2v_seed,
@@ -2170,7 +2276,8 @@ def create_interface():
                         v2v_use_prompt_expansion, v2v_clip_prompt,
                         v2v_save_latents_checkbox,
                         v2v_use_apg, v2v_apg_momentum, v2v_apg_norm_threshold,
-                        v2v_enable_denoise, v2v_denoise_strength
+                        v2v_enable_denoise, v2v_denoise_strength,
+                        v2v_enable_ultravico, v2v_ultravico_alpha, v2v_ultravico_suppress_harmonics, v2v_ultravico_beta
                     ],
                     outputs=[v2v_output, v2v_preview_output, v2v_batch_progress, v2v_progress_text]
                 )
@@ -2270,7 +2377,8 @@ def create_interface():
                         vae_temporal_tile_frames,   # 33
                         vae_temporal_stride_frames, # 34
                         vae_spatial_tile_height,    # 35
-                        vae_spatial_tile_width      # 36
+                        vae_spatial_tile_width,     # 36
+                        clip_prompt                 # 37
                     ]
                 )
 
@@ -2312,7 +2420,8 @@ def create_interface():
                         v2v_vae_temporal_stride_frames, # 32
                         v2v_vae_spatial_tile_height,    # 33
                         v2v_vae_spatial_tile_width,     # 34
-                        v2v_num_cond_frames             # 35
+                        v2v_num_cond_frames,            # 35
+                        v2v_clip_prompt                 # 36
                     ]
                 )
 

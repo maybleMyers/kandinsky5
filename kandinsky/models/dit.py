@@ -204,6 +204,15 @@ class DiffusionTransformer3D(nn.Module):
         to_fractal = sparse_params["to_fractal"] if sparse_params is not None else False
         visual_embed, visual_rope = fractal_flatten(visual_embed, visual_rope, visual_shape,
                                                     block_mask=to_fractal)
+
+        # Set visual shape for UltraViCo if enabled (lazy import to avoid overhead when disabled)
+        try:
+            from .ultravico import is_ultravico_enabled, set_current_visual_shape
+            if is_ultravico_enabled():
+                set_current_visual_shape(visual_shape)
+        except ImportError:
+            pass
+
         return visual_embed, visual_shape, to_fractal, visual_rope
 
     def after_blocks(self, visual_embed, visual_shape, to_fractal, text_embed, time_embed):
