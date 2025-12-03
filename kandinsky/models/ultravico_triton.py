@@ -1,7 +1,12 @@
 """
 UltraViCo Triton Kernel - Memory-efficient attention with temporal decay.
 
+Based on "UltraViCo: Breaking Extrapolation Limits in Video Diffusion Transformers"
+
 Computes attention with UltraViCo decay on-the-fly without materializing bias matrix.
+Supports:
+- Alpha decay: Applied to all out-of-window positions
+- Beta decay: Stronger decay at harmonic positions (for repetition suppression)
 """
 
 import math
@@ -19,9 +24,13 @@ def _ultravico_attn_fwd_kernel(
     stride_vb, stride_vh, stride_vn, stride_vk,
     stride_ob, stride_oh, stride_om, stride_ok,
     # UltraViCo params
-    hw: tl.constexpr,  # height * width (spatial size per frame)
-    window_radius: tl.constexpr,  # training_frames // 2
-    log_alpha: tl.constexpr,  # log(alpha) for out-of-window decay
+    hw,  # height * width (spatial size per frame)
+    window_radius,  # training_frames // 2
+    log_alpha,  # log(alpha) for out-of-window decay
+    log_beta,  # log(beta) for harmonic positions (stronger decay)
+    suppress_harmonics: tl.constexpr,  # whether to apply harmonic suppression
+    gamma,  # window around harmonic centers
+    period,  # harmonic period in frames
     # Attention params
     seq_len,
     head_dim: tl.constexpr,
@@ -31,11 +40,12 @@ def _ultravico_attn_fwd_kernel(
     BLOCK_K: tl.constexpr,
 ):
     """
-    UltraViCo attention forward kernel.
+    UltraViCo attention forward kernel with full paper implementation.
 
     Applies temporal decay to attention scores on-the-fly:
-    - Tokens within training window: no decay
-    - Tokens outside window: multiply by alpha (add log_alpha to logits)
+    - Tokens within training window: no decay (λ = 1)
+    - Tokens outside window: decay by alpha (λ = α)
+    - Tokens at harmonic positions: stronger decay by beta (λ = β < α)
     """
     # Program IDs
     pid_b = tl.program_id(0)  # batch
@@ -77,15 +87,53 @@ def _ultravico_attn_fwd_kernel(
         scores = tl.dot(q, k) * scale  # [BLOCK_M, BLOCK_N]
 
         # Compute temporal positions of key tokens
-        t_kv = curr_offs_n
+        t_kv = curr_offs_n // hw
 
-        # Compute temporal distance and apply UltraViCo decay
-        t_kv_broadcast = t_kv[None, :] // hw
-        t_dist = tl.abs(t_q[:, None] - t_kv_broadcast)
+        # Compute temporal distance
+        t_dist = tl.abs(t_q[:, None] - t_kv[None, :])
+
+        # Check if out of training window
         out_of_window = t_dist > window_radius
 
-        # Apply decay: add log_alpha where out of window
+        # Start with alpha decay for out-of-window
         decay = tl.where(out_of_window, log_alpha, 0.0)
+
+        # Apply beta decay at harmonic positions if enabled
+        if suppress_harmonics:
+            # Check harmonics 1 through 10
+            # A position is near harmonic m if |t_dist - m*period| <= gamma
+            near_harmonic = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.int1)
+
+            # Harmonic 1
+            dist_to_h1 = tl.abs(t_dist - period)
+            near_h1 = dist_to_h1 <= gamma
+            near_harmonic = near_harmonic | near_h1
+
+            # Harmonic 2
+            dist_to_h2 = tl.abs(t_dist - 2 * period)
+            near_h2 = dist_to_h2 <= gamma
+            near_harmonic = near_harmonic | near_h2
+
+            # Harmonic 3
+            dist_to_h3 = tl.abs(t_dist - 3 * period)
+            near_h3 = dist_to_h3 <= gamma
+            near_harmonic = near_harmonic | near_h3
+
+            # Harmonic 4
+            dist_to_h4 = tl.abs(t_dist - 4 * period)
+            near_h4 = dist_to_h4 <= gamma
+            near_harmonic = near_harmonic | near_h4
+
+            # Harmonic 5
+            dist_to_h5 = tl.abs(t_dist - 5 * period)
+            near_h5 = dist_to_h5 <= gamma
+            near_harmonic = near_harmonic | near_h5
+
+            # Apply beta where both out_of_window AND near_harmonic
+            harmonic_risk = out_of_window & near_harmonic
+            decay = tl.where(harmonic_risk, log_beta, decay)
+
+        # Apply decay to scores
         scores = scores + decay
 
         # Mask invalid positions
@@ -129,6 +177,10 @@ def ultravico_attention(
     hw: int,
     window_radius: int,
     log_alpha: float,
+    log_beta: float = None,
+    suppress_harmonics: bool = False,
+    gamma: int = 4,
+    period: int = 31,
 ) -> torch.Tensor:
     """
     UltraViCo attention with temporal decay.
@@ -140,11 +192,19 @@ def ultravico_attention(
         hw: Spatial size (height * width after patching)
         window_radius: Training window radius (training_frames // 2)
         log_alpha: Log of decay factor for out-of-window attention
+        log_beta: Log of decay factor for harmonic positions (optional, stronger decay)
+        suppress_harmonics: Whether to apply harmonic suppression
+        gamma: Window around harmonic centers (in frames)
+        period: Harmonic period (typically = training_frames)
 
     Returns:
         Output tensor [batch, heads, seq_len, head_dim]
     """
     batch, heads, seq_len, head_dim = q.shape
+
+    # Default log_beta to log_alpha if not specified
+    if log_beta is None:
+        log_beta = log_alpha
 
     # Ensure contiguous
     q = q.contiguous()
@@ -157,7 +217,7 @@ def ultravico_attention(
     # Scale factor
     scale = 1.0 / math.sqrt(head_dim)
 
-    # Block sizes
+    # Block sizes - adjust based on head_dim
     BLOCK_M = 64
     BLOCK_N = 64
     BLOCK_K = head_dim
@@ -175,6 +235,10 @@ def ultravico_attention(
         hw=hw,
         window_radius=window_radius,
         log_alpha=log_alpha,
+        log_beta=log_beta,
+        suppress_harmonics=suppress_harmonics,
+        gamma=gamma,
+        period=period,
         seq_len=seq_len,
         head_dim=BLOCK_K,
         scale=scale,
@@ -197,9 +261,18 @@ class UltraViCoAttention(torch.nn.Module):
         super().__init__()
         self._params = None
 
-    def set_params(self, hw: int, window_radius: int, log_alpha: float):
+    def set_params(
+        self,
+        hw: int,
+        window_radius: int,
+        log_alpha: float,
+        log_beta: float = None,
+        suppress_harmonics: bool = False,
+        gamma: int = 4,
+        period: int = 31,
+    ):
         """Set UltraViCo parameters."""
-        self._params = (hw, window_radius, log_alpha)
+        self._params = (hw, window_radius, log_alpha, log_beta, suppress_harmonics, gamma, period)
 
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         """
@@ -215,7 +288,7 @@ class UltraViCoAttention(torch.nn.Module):
             # Fall back to standard attention if params not set
             return torch.nn.functional.scaled_dot_product_attention(q, k, v)
 
-        hw, window_radius, log_alpha = self._params
+        hw, window_radius, log_alpha, log_beta, suppress_harmonics, gamma, period = self._params
 
         # Handle different input formats
         needs_transpose = q.shape[2] != q.shape[1]  # [B, S, H, D] vs [B, H, S, D]
@@ -224,7 +297,13 @@ class UltraViCoAttention(torch.nn.Module):
             k = k.transpose(1, 2)
             v = v.transpose(1, 2)
 
-        out = ultravico_attention(q, k, v, hw, window_radius, log_alpha)
+        out = ultravico_attention(
+            q, k, v, hw, window_radius, log_alpha,
+            log_beta=log_beta,
+            suppress_harmonics=suppress_harmonics,
+            gamma=gamma,
+            period=period,
+        )
 
         if needs_transpose:
             out = out.transpose(1, 2)
@@ -244,10 +323,18 @@ def get_ultravico_triton_attention() -> UltraViCoAttention:
     return _ultravico_attn
 
 
-def setup_ultravico_triton(hw: int, window_radius: int, alpha: float):
+def setup_ultravico_triton(
+    hw: int,
+    window_radius: int,
+    alpha: float,
+    beta: float = None,
+    suppress_harmonics: bool = False,
+    gamma: int = 4,
+    period: int = 31,
+):
     """Setup UltraViCo Triton attention with given parameters."""
-    import math
     attn = get_ultravico_triton_attention()
     log_alpha = math.log(alpha) if alpha < 1.0 else 0.0
-    attn.set_params(hw, window_radius, log_alpha)
+    log_beta = math.log(beta) if beta is not None and beta < 1.0 else log_alpha
+    attn.set_params(hw, window_radius, log_alpha, log_beta, suppress_harmonics, gamma, period)
     return attn

@@ -325,7 +325,13 @@ class MultiheadSelfAttentionDec(nn.Module):
             q = query.unsqueeze(0).transpose(1, 2).contiguous()
             k = key.unsqueeze(0).transpose(1, 2).contiguous()
             v = value.unsqueeze(0).transpose(1, 2).contiguous()
-            out = ultravico_attention(q, k, v, hw, window_radius, log_alpha)
+            out = ultravico_attention(
+                q, k, v, hw, window_radius, log_alpha,
+                log_beta=log_beta,
+                suppress_harmonics=suppress_harmonics,
+                gamma=gamma,
+                period=period,
+            )
             out = out.transpose(1, 2).squeeze(0).contiguous().flatten(-2, -1)
         else:
             # Original path - no changes

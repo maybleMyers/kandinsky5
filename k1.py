@@ -374,6 +374,10 @@ def generate_video(
                     "vae_spatial_tile_height": int(vae_spatial_tile_height) if enable_vae_chunking and vae_spatial_tile_height else None,
                     "vae_spatial_tile_width": int(vae_spatial_tile_width) if enable_vae_chunking and vae_spatial_tile_width else None,
                     "clip_prompt": clip_prompt if clip_prompt and clip_prompt.strip() else None,
+                    "ultravico_enabled": enable_ultravico,
+                    "ultravico_alpha": ultravico_alpha if enable_ultravico else None,
+                    "ultravico_suppress_harmonics": ultravico_suppress_harmonics if enable_ultravico else None,
+                    "ultravico_beta": ultravico_beta if enable_ultravico and ultravico_suppress_harmonics else None,
                 }
                 try:
                     add_metadata_to_video(output_filename, params_for_meta)
@@ -734,6 +738,10 @@ def generate_v2v_video(
                     "apg_momentum": apg_momentum if use_apg else None,
                     "apg_norm_threshold": apg_norm_threshold if use_apg else None,
                     "clip_prompt": clip_prompt if clip_prompt and clip_prompt.strip() else None,
+                    "ultravico_enabled": enable_ultravico,
+                    "ultravico_alpha": ultravico_alpha if enable_ultravico else None,
+                    "ultravico_suppress_harmonics": ultravico_suppress_harmonics if enable_ultravico else None,
+                    "ultravico_beta": ultravico_beta if enable_ultravico and ultravico_suppress_harmonics else None,
                 }
                 try:
                     add_metadata_to_video(output_filename, params_for_meta)
