@@ -463,29 +463,29 @@ class MultiheadSelfAttentionDec(nn.Module):
 
 
 class MultiheadCrossAttention(nn.Module):
-    def __init__(self, num_channels, head_dim, use_int8=False, int8_block_size=128, dtype=torch.bfloat16):
+    def __init__(self, num_channels, head_dim, use_int8=False, int8_block_size=128, dtype=torch.bfloat16, use_sdnq=False):
         super().__init__()
         assert num_channels % head_dim == 0
         self.num_heads = num_channels // head_dim
 
-        self.to_query = create_int8_linear(
+        self.to_query = create_linear(
             num_channels, num_channels, bias=True,
-            block_size=int8_block_size, dtype=dtype, use_int8=use_int8
+            block_size=int8_block_size, dtype=dtype, use_int8=use_int8, use_sdnq=use_sdnq
         )
-        self.to_key = create_int8_linear(
+        self.to_key = create_linear(
             num_channels, num_channels, bias=True,
-            block_size=int8_block_size, dtype=dtype, use_int8=use_int8
+            block_size=int8_block_size, dtype=dtype, use_int8=use_int8, use_sdnq=use_sdnq
         )
-        self.to_value = create_int8_linear(
+        self.to_value = create_linear(
             num_channels, num_channels, bias=True,
-            block_size=int8_block_size, dtype=dtype, use_int8=use_int8
+            block_size=int8_block_size, dtype=dtype, use_int8=use_int8, use_sdnq=use_sdnq
         )
         self.query_norm = nn.RMSNorm(head_dim)
         self.key_norm = nn.RMSNorm(head_dim)
 
-        self.out_layer = create_int8_linear(
+        self.out_layer = create_linear(
             num_channels, num_channels, bias=True,
-            block_size=int8_block_size, dtype=dtype, use_int8=use_int8
+            block_size=int8_block_size, dtype=dtype, use_int8=use_int8, use_sdnq=use_sdnq
         )
 
         self.attn_engine = SelfAttentionEngine("sdpa")
@@ -532,20 +532,22 @@ class MultiheadCrossAttention(nn.Module):
 
 
 class FeedForward(nn.Module):
-    def __init__(self, dim, ff_dim, use_int8=False, int8_block_size=128, dtype=torch.bfloat16):
+    def __init__(self, dim, ff_dim, use_int8=False, int8_block_size=128, dtype=torch.bfloat16, use_sdnq=False):
         super().__init__()
-        self.in_layer = create_int8_linear(
+        self.in_layer = create_linear(
             dim, ff_dim, bias=False,
             block_size=int8_block_size,
             dtype=dtype,
-            use_int8=use_int8
+            use_int8=use_int8,
+            use_sdnq=use_sdnq
         )
         self.activation = nn.GELU()
-        self.out_layer = create_int8_linear(
+        self.out_layer = create_linear(
             ff_dim, dim, bias=False,
             block_size=int8_block_size,
             dtype=dtype,
-            use_int8=use_int8
+            use_int8=use_int8,
+            use_sdnq=use_sdnq
         )
 
     @maybe_compile()

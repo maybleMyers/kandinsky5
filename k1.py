@@ -89,6 +89,7 @@ def generate_video(
     use_torch_compile: bool,
     use_magcache: bool,
     enable_block_swap: bool,
+    offload_inactive: bool,
     blocks_in_memory: int,
     dtype_str: str,
     text_encoder_dtype_str: str,
@@ -110,6 +111,8 @@ def generate_video(
     ultravico_alpha: float = 0.9,
     ultravico_suppress_harmonics: bool = False,
     ultravico_beta: float = 0.6,
+    use_sdnq: bool = False,
+    sdnq_weights_dtype: str = "int8",
 ) -> Generator[Tuple[List[Tuple[str, str]], Optional[str], str, str], None, None]:
     global stop_event, current_process, current_output_filename
     stop_event.clear()
@@ -236,6 +239,9 @@ def generate_video(
             command.append("--enable_block_swap")
             command.extend(["--blocks_in_memory", str(int(blocks_in_memory))])
 
+        if offload_inactive or enable_block_swap:
+            command.append("--offload")
+
         if enable_preview and preview_steps > 0:
             command.extend(["--preview", str(preview_steps)])
             command.extend(["--preview_suffix", unique_preview_suffix])
@@ -270,6 +276,11 @@ def generate_video(
             if ultravico_suppress_harmonics:
                 command.append("--ultravico_suppress_harmonics")
                 command.extend(["--ultravico_beta", str(ultravico_beta)])
+
+        # Add SDNQ quantization options if enabled
+        if use_sdnq:
+            command.append("--use_sdnq")
+            command.extend(["--sdnq_weights_dtype", sdnq_weights_dtype])
 
         # Print the command for debugging/transparency
         print("\n" + "="*80)
@@ -378,6 +389,8 @@ def generate_video(
                     "ultravico_alpha": ultravico_alpha if enable_ultravico else None,
                     "ultravico_suppress_harmonics": ultravico_suppress_harmonics if enable_ultravico else None,
                     "ultravico_beta": ultravico_beta if enable_ultravico and ultravico_suppress_harmonics else None,
+                    "use_sdnq": use_sdnq,
+                    "sdnq_weights_dtype": sdnq_weights_dtype if use_sdnq else None,
                 }
                 try:
                     add_metadata_to_video(output_filename, params_for_meta)
@@ -429,6 +442,7 @@ def generate_v2v_video(
     use_torch_compile: bool,
     use_magcache: bool,
     enable_block_swap: bool,
+    offload_inactive: bool,
     blocks_in_memory: int,
     dtype_str: str,
     text_encoder_dtype_str: str,
@@ -455,6 +469,8 @@ def generate_v2v_video(
     ultravico_alpha: float = 0.9,
     ultravico_suppress_harmonics: bool = False,
     ultravico_beta: float = 0.6,
+    use_sdnq: bool = False,
+    sdnq_weights_dtype: str = "int8",
 ) -> Generator[Tuple[List[Tuple[str, str]], Optional[str], str, str], None, None]:
     """Generate video from video input (video continuation/v2v mode)."""
     global stop_event, current_process, current_output_filename
@@ -596,6 +612,9 @@ def generate_v2v_video(
             command.append("--enable_block_swap")
             command.extend(["--blocks_in_memory", str(int(blocks_in_memory))])
 
+        if offload_inactive or enable_block_swap:
+            command.append("--offload")
+
         if enable_preview and preview_steps > 0:
             command.extend(["--preview", str(preview_steps)])
             command.extend(["--preview_suffix", unique_preview_suffix])
@@ -630,6 +649,11 @@ def generate_v2v_video(
             if ultravico_suppress_harmonics:
                 command.append("--ultravico_suppress_harmonics")
                 command.extend(["--ultravico_beta", str(ultravico_beta)])
+
+        # Add SDNQ quantization options if enabled
+        if use_sdnq:
+            command.append("--use_sdnq")
+            command.extend(["--sdnq_weights_dtype", sdnq_weights_dtype])
 
         # Print the command for debugging/transparency
         print("\n" + "="*80)
@@ -742,6 +766,8 @@ def generate_v2v_video(
                     "ultravico_alpha": ultravico_alpha if enable_ultravico else None,
                     "ultravico_suppress_harmonics": ultravico_suppress_harmonics if enable_ultravico else None,
                     "ultravico_beta": ultravico_beta if enable_ultravico and ultravico_suppress_harmonics else None,
+                    "use_sdnq": use_sdnq,
+                    "sdnq_weights_dtype": sdnq_weights_dtype if use_sdnq else None,
                 }
                 try:
                     add_metadata_to_video(output_filename, params_for_meta)
@@ -1685,11 +1711,15 @@ def create_interface():
                 with gr.Accordion("Model Settings & Performance", open=True):
                     with gr.Row():
                         use_mixed_weights = gr.Checkbox(label="Use Mixed Weights", value=False, info="Preserve fp32 for critical layers (norms, embeddings)")
-                        use_int8 = gr.Checkbox(label="Use int8 matmul", value=False, info="enable int8 quantization")
+                        use_int8 = gr.Checkbox(label="Use int8 matmul (legacy)", value=False, info="Legacy INT8 quantization")
                         use_torch_compile = gr.Checkbox(label="Use torch.compile", value=False, info="Slower startup (2-5 min) but faster inference")
                         use_magcache = gr.Checkbox(label="Use MagCache", value=False, info="Skip redundant computations (50-step models only)")
                     with gr.Row():
+                        use_sdnq = gr.Checkbox(label="Use SDNQ (recommended)", value=False, info="20-40% faster than legacy INT8 with auto-tuned Triton kernels")
+                        sdnq_weights_dtype = gr.Radio(choices=["int8", "fp8", "int4"], label="SDNQ Weights", value="int8", info="int8=best balance, fp8=H100+, int4=experimental")
+                    with gr.Row():
                         enable_block_swap = gr.Checkbox(label="Enable Block Swap", value=True, info="Required for 24GB GPUs")
+                        offload_inactive = gr.Checkbox(label="Offload Inactive Models", value=False, info="Offload text encoder & VAE to CPU when not in use (auto-enabled with block swap)")
                         blocks_in_memory = gr.Slider(minimum=1, maximum=60, step=1, label="Blocks in Memory", value=2, info="Number of transformer blocks to keep in GPU memory")
                     with gr.Row():
                         dtype_select = gr.Radio(choices=["bfloat16", "float16", "float32", "fp8_scaled"], label="Default Data Type", value="bfloat16", info="Used for all components if specific dtypes not set. fp8_scaled provides ~50% memory savings.")
@@ -1827,7 +1857,7 @@ def create_interface():
                         attention_type, nabla_P, nabla_wT, nabla_wW, nabla_wH,
                         width, height, video_duration, sample_steps,
                         guidance_weight, scheduler_scale, seed,
-                        use_mixed_weights, use_int8, use_torch_compile, use_magcache, enable_block_swap, blocks_in_memory, dtype_select,
+                        use_mixed_weights, use_int8, use_torch_compile, use_magcache, enable_block_swap, offload_inactive, blocks_in_memory, dtype_select,
                         text_encoder_dtype_select, vae_dtype_select, computation_dtype_select,
                         save_path, batch_size,
                         enable_preview, preview_steps,
@@ -1835,7 +1865,8 @@ def create_interface():
                         vae_spatial_tile_height, vae_spatial_tile_width,
                         use_prompt_expansion, clip_prompt,
                         save_latents_checkbox,
-                        enable_ultravico, ultravico_alpha, ultravico_suppress_harmonics, ultravico_beta
+                        enable_ultravico, ultravico_alpha, ultravico_suppress_harmonics, ultravico_beta,
+                        use_sdnq, sdnq_weights_dtype
                     ],
                     outputs=[output, preview_output, batch_progress, progress_text]
                 )
@@ -2124,11 +2155,15 @@ def create_interface():
                 with gr.Accordion("Model Settings & Performance", open=True):
                     with gr.Row():
                         v2v_use_mixed_weights = gr.Checkbox(label="Use Mixed Weights", value=False, info="Preserve fp32 for critical layers (norms, embeddings)")
-                        v2v_use_int8 = gr.Checkbox(label="Use int8 matmul", value=False, info="enable int8 quantization")
+                        v2v_use_int8 = gr.Checkbox(label="Use int8 matmul (legacy)", value=False, info="Legacy INT8 quantization")
                         v2v_use_torch_compile = gr.Checkbox(label="Use torch.compile", value=False, info="Slower startup (2-5 min) but faster inference")
                         v2v_use_magcache = gr.Checkbox(label="Use MagCache", value=False, info="Skip redundant computations (50-step models only)")
                     with gr.Row():
+                        v2v_use_sdnq = gr.Checkbox(label="Use SDNQ (recommended)", value=False, info="20-40% faster than legacy INT8 with auto-tuned Triton kernels")
+                        v2v_sdnq_weights_dtype = gr.Radio(choices=["int8", "fp8", "int4"], label="SDNQ Weights", value="int8", info="int8=best balance, fp8=H100+, int4=experimental")
+                    with gr.Row():
                         v2v_enable_block_swap = gr.Checkbox(label="Enable Block Swap", value=True, info="Required for 24GB GPUs")
+                        v2v_offload_inactive = gr.Checkbox(label="Offload Inactive Models", value=False, info="Offload text encoder & VAE to CPU when not in use (auto-enabled with block swap)")
                         v2v_blocks_in_memory = gr.Slider(minimum=1, maximum=60, step=1, label="Blocks in Memory", value=2, info="Number of transformer blocks to keep in GPU memory")
                     with gr.Row():
                         v2v_dtype_select = gr.Radio(choices=["bfloat16", "float16", "float32", "fp8_scaled"], label="Default Data Type", value="bfloat16", info="Used for all components if specific dtypes not set. fp8_scaled provides ~50% memory savings.")
@@ -2275,7 +2310,7 @@ def create_interface():
                         v2v_width, v2v_height, v2v_video_duration, v2v_sample_steps,
                         v2v_guidance_weight, v2v_scheduler_scale, v2v_seed,
                         v2v_use_mixed_weights, v2v_use_int8, v2v_use_torch_compile, v2v_use_magcache,
-                        v2v_enable_block_swap, v2v_blocks_in_memory, v2v_dtype_select,
+                        v2v_enable_block_swap, v2v_offload_inactive, v2v_blocks_in_memory, v2v_dtype_select,
                         v2v_text_encoder_dtype_select, v2v_vae_dtype_select, v2v_computation_dtype_select,
                         v2v_save_path, v2v_batch_size,
                         v2v_enable_preview, v2v_preview_steps,
@@ -2285,7 +2320,8 @@ def create_interface():
                         v2v_save_latents_checkbox,
                         v2v_use_apg, v2v_apg_momentum, v2v_apg_norm_threshold,
                         v2v_enable_denoise, v2v_denoise_strength,
-                        v2v_enable_ultravico, v2v_ultravico_alpha, v2v_ultravico_suppress_harmonics, v2v_ultravico_beta
+                        v2v_enable_ultravico, v2v_ultravico_alpha, v2v_ultravico_suppress_harmonics, v2v_ultravico_beta,
+                        v2v_use_sdnq, v2v_sdnq_weights_dtype
                     ],
                     outputs=[v2v_output, v2v_preview_output, v2v_batch_progress, v2v_progress_text]
                 )

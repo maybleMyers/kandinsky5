@@ -390,18 +390,45 @@ def parse_args():
         help="Override DiT model checkpoint path from config. Provide path to your .safetensors file."
     )
 
-    # INT8 quantization configuration
+    # INT8 quantization configuration (legacy)
     parser.add_argument(
         "--use_int8",
         action='store_true',
         default=False,
-        help="Use INT8 quantization for linear layers (40-60%% memory reduction, 1.5-2x faster inference)"
+        help="Use legacy INT8 quantization for linear layers. Consider --use_sdnq for better performance."
     )
     parser.add_argument(
         "--int8_block_size",
         type=int,
         default=128,
-        help="Block size for INT8 quantization (must be 128 for Triton kernels, default: 128)"
+        help="Block size for legacy INT8 quantization (must be 128 for Triton kernels, default: 128)"
+    )
+
+    # SDNQ quantization configuration (recommended)
+    parser.add_argument(
+        "--use_sdnq",
+        action='store_true',
+        default=False,
+        help="Use SDNQ quantization with auto-tuned Triton kernels (20-40%% faster than legacy INT8)"
+    )
+    parser.add_argument(
+        "--sdnq_weights_dtype",
+        type=str,
+        default="int8",
+        choices=["int8", "fp8", "int4"],
+        help="SDNQ weight storage dtype (default: int8). int8=best balance, fp8=H100+, int4=experimental"
+    )
+    parser.add_argument(
+        "--sdnq_use_quantized_matmul",
+        action='store_true',
+        default=True,
+        help="Use accelerated quantized matmul (default: True). Disable for debugging."
+    )
+    parser.add_argument(
+        "--no_sdnq_quantized_matmul",
+        action='store_true',
+        default=False,
+        help="Disable SDNQ quantized matmul (forces dequantize+fp matmul path)"
     )
 
     # NABLA sparse attention configuration
@@ -601,6 +628,19 @@ if __name__ == "__main__":
     use_fp8_vae = args.vae_dtype == "fp8_scaled" if args.vae_dtype else use_fp8
     use_fp8_computation = args.computation_dtype == "fp8_scaled" if args.computation_dtype else use_fp8
 
+    # SDNQ quantization settings
+    use_sdnq = args.use_sdnq
+    sdnq_weights_dtype = args.sdnq_weights_dtype
+    sdnq_use_quantized_matmul = args.sdnq_use_quantized_matmul and not args.no_sdnq_quantized_matmul
+
+    # If SDNQ is enabled, disable legacy INT8 and FP8 (they are mutually exclusive)
+    if use_sdnq:
+        if args.use_int8:
+            print("Note: --use_sdnq takes priority over --use_int8. Legacy INT8 disabled.")
+        if use_fp8_computation:
+            print("Note: --use_sdnq takes priority over fp8_scaled. Legacy FP8 disabled.")
+        use_fp8_computation = False
+
     model_dtype = dtype_map[args.dtype]
 
     # Set individual component dtypes (fall back to model_dtype if not specified)
@@ -691,6 +731,9 @@ if __name__ == "__main__":
                 use_int8=args.use_int8,
                 int8_block_size=args.int8_block_size,
                 use_fp8=use_fp8_computation,
+                use_sdnq=use_sdnq,
+                sdnq_weights_dtype=sdnq_weights_dtype,
+                sdnq_use_quantized_matmul=sdnq_use_quantized_matmul,
                 vae_temporal_tile_frames=args.vae_temporal_tile_frames,
                 vae_temporal_stride_frames=args.vae_temporal_stride_frames,
                 vae_spatial_tile_height=args.vae_spatial_tile_height,
@@ -716,6 +759,9 @@ if __name__ == "__main__":
                 use_int8=args.use_int8,
                 int8_block_size=args.int8_block_size,
                 use_fp8=use_fp8_computation,
+                use_sdnq=use_sdnq,
+                sdnq_weights_dtype=sdnq_weights_dtype,
+                sdnq_use_quantized_matmul=sdnq_use_quantized_matmul,
                 vae_temporal_tile_frames=args.vae_temporal_tile_frames,
                 vae_temporal_stride_frames=args.vae_temporal_stride_frames,
                 vae_spatial_tile_height=args.vae_spatial_tile_height,
@@ -745,6 +791,9 @@ if __name__ == "__main__":
                 use_int8=args.use_int8,
                 int8_block_size=args.int8_block_size,
                 use_fp8=use_fp8_computation,
+                use_sdnq=use_sdnq,
+                sdnq_weights_dtype=sdnq_weights_dtype,
+                sdnq_use_quantized_matmul=sdnq_use_quantized_matmul,
                 vae_temporal_tile_frames=args.vae_temporal_tile_frames,
                 vae_temporal_stride_frames=args.vae_temporal_stride_frames,
                 vae_spatial_tile_height=args.vae_spatial_tile_height,
@@ -770,6 +819,9 @@ if __name__ == "__main__":
                 use_int8=args.use_int8,
                 int8_block_size=args.int8_block_size,
                 use_fp8=use_fp8_computation,
+                use_sdnq=use_sdnq,
+                sdnq_weights_dtype=sdnq_weights_dtype,
+                sdnq_use_quantized_matmul=sdnq_use_quantized_matmul,
                 vae_temporal_tile_frames=args.vae_temporal_tile_frames,
                 vae_temporal_stride_frames=args.vae_temporal_stride_frames,
                 vae_spatial_tile_height=args.vae_spatial_tile_height,
