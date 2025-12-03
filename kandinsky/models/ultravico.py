@@ -257,3 +257,110 @@ def identify_harmonic_period(
     k = diffs.index(min(diffs))
 
     return k, periods[k]
+
+
+# ============================================================================
+# SDPA Support - Creates bias matrix for scaled_dot_product_attention
+# ============================================================================
+
+_cached_sdpa_bias: Optional[torch.Tensor] = None
+_cached_sdpa_shape: Optional[Tuple[int, int, int]] = None
+
+
+def create_ultravico_bias_for_sdpa(
+    shape: Tuple[int, int, int],
+    config: UltraViCoConfig,
+    device: torch.device,
+    dtype: torch.dtype = torch.bfloat16
+) -> torch.Tensor:
+    """
+    Create UltraViCo bias matrix for SDPA.
+
+    Uses bfloat16 by default to reduce memory (4GB instead of 8GB for long videos).
+
+    Args:
+        shape: Visual shape (T, H, W) after patching
+        config: UltraViCo configuration
+        device: Device for tensor
+        dtype: Data type (bfloat16 recommended for memory efficiency)
+
+    Returns:
+        Attention bias tensor of shape [1, 1, seq_len, seq_len] for SDPA
+    """
+    duration, height, width = shape
+    seq_len = duration * height * width
+    hw = height * width
+
+    # Compute temporal positions
+    idx = torch.arange(seq_len, device=device)
+    t_pos = idx // hw
+
+    # Compute temporal distance matrix
+    t_dist = torch.abs(t_pos.unsqueeze(1) - t_pos.unsqueeze(0))
+
+    # Training window radius
+    window_radius = config.training_frames // 2
+
+    # Create bias (0 = no change, negative = decay)
+    log_alpha = math.log(config.alpha) if config.alpha < 1.0 else 0.0
+    out_of_window = t_dist > window_radius
+    bias = torch.where(out_of_window, log_alpha, 0.0).to(dtype)
+
+    # Apply harmonic suppression if enabled
+    if config.suppress_harmonics:
+        log_beta = math.log(config.beta) if config.beta < 1.0 else 0.0
+        period = config.harmonic_period if config.harmonic_period else config.training_frames
+        gamma = config.gamma
+
+        if log_beta < log_alpha:
+            near_harmonic = torch.zeros_like(out_of_window)
+            max_harmonics = min(10, (t_dist.max().item() // period) + 2)
+            for m in range(1, int(max_harmonics)):
+                harmonic_center = m * period
+                near_this = (t_dist >= harmonic_center - gamma) & (t_dist <= harmonic_center + gamma)
+                near_harmonic = near_harmonic | near_this
+
+            harmonic_risk = near_harmonic & out_of_window
+            bias = torch.where(harmonic_risk, torch.tensor(log_beta, dtype=dtype, device=device), bias)
+
+    # Add batch and head dimensions for SDPA: [1, 1, seq, seq]
+    return bias.unsqueeze(0).unsqueeze(0)
+
+
+def get_ultravico_sdpa_bias(
+    seq_len: int,
+    device: torch.device,
+    dtype: torch.dtype = torch.bfloat16
+) -> Optional[torch.Tensor]:
+    """
+    Get cached UltraViCo bias for SDPA.
+
+    Returns None if UltraViCo is disabled or shape doesn't match.
+    """
+    global _cached_sdpa_bias, _cached_sdpa_shape
+
+    if not is_ultravico_enabled():
+        return None
+
+    shape = _current_visual_shape
+    if shape is None:
+        return None
+
+    # Verify sequence length matches
+    expected_len = shape[0] * shape[1] * shape[2]
+    if seq_len != expected_len:
+        return None
+
+    config = _ultravico_config
+
+    # Check cache
+    if _cached_sdpa_bias is not None and _cached_sdpa_shape == shape:
+        if _cached_sdpa_bias.device == device:
+            return _cached_sdpa_bias.to(dtype)
+
+    # Create new bias
+    print(f"[UltraViCo] Creating SDPA bias for shape {shape}, seq_len={seq_len}")
+    _cached_sdpa_bias = create_ultravico_bias_for_sdpa(shape, config, device, dtype)
+    _cached_sdpa_shape = shape
+
+    return _cached_sdpa_bias

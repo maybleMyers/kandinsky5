@@ -310,20 +310,22 @@ class MultiheadSelfAttentionDec(nn.Module):
     @maybe_compile()
     def attention(self, query, key, value):
         # Check if UltraViCo is enabled (lazy import to avoid overhead when disabled)
-        ultravico_score_mod = None
+        ultravico_params = None
         try:
-            from .ultravico import is_ultravico_enabled, get_ultravico_score_mod
+            from .ultravico import is_ultravico_enabled, get_ultravico_params
             if is_ultravico_enabled():
-                ultravico_score_mod = get_ultravico_score_mod()
+                ultravico_params = get_ultravico_params()
         except ImportError:
             pass
 
-        if ultravico_score_mod is not None:
-            # Use flex_attention with UltraViCo score_mod (memory efficient - no full matrix)
+        if ultravico_params is not None:
+            # Use custom Triton kernel with UltraViCo decay (memory efficient)
+            from .ultravico_triton import ultravico_attention
+            hw, window_radius, log_alpha, log_beta, suppress_harmonics, gamma, period = ultravico_params
             q = query.unsqueeze(0).transpose(1, 2).contiguous()
             k = key.unsqueeze(0).transpose(1, 2).contiguous()
             v = value.unsqueeze(0).transpose(1, 2).contiguous()
-            out = flex_attention(q, k, v, score_mod=ultravico_score_mod)
+            out = ultravico_attention(q, k, v, hw, window_radius, log_alpha)
             out = out.transpose(1, 2).squeeze(0).contiguous().flatten(-2, -1)
         else:
             # Original path - no changes
