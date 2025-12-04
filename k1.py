@@ -7,12 +7,22 @@ import time
 import random
 import subprocess
 import re
-from typing import Generator, List, Tuple, Optional, Dict
+from typing import Generator, List, Tuple, Optional, Dict, Any
 import threading
 import json
 import io
 from PIL import Image
 import tiktoken
+
+# Session management for reconnect support
+from session_manager import (
+    session_manager,
+    process_registry,
+    write_progress_file,
+    cleanup_progress_file,
+    parse_progress_info,
+    RECONNECT_JS
+)
 
 # Initialize tiktoken encoder for fast token counting
 enc = tiktoken.get_encoding("cl100k_base")
@@ -23,9 +33,12 @@ def count_tokens(text):
         return 0
     return len(enc.encode(text))
 
+# Legacy globals - kept for backward compatibility with stop functions
+# New code should use process_registry instead
 stop_event = threading.Event()
 current_process = None  # Track the currently running process
 current_output_filename = None  # Track current output filename for early stop signals
+current_session_id = None  # Track current session for legacy stop functions
 
 def parse_progress_line(line: str) -> Optional[str]:
     """Parse progress bar lines and extract useful information."""
@@ -64,6 +77,7 @@ def parse_progress_line(line: str) -> Optional[str]:
     return None
 
 def generate_video(
+    session_id: str,  # Session ID for reconnect support
     prompt: str,
     negative_prompt: str,
     input_image: str,
@@ -116,19 +130,97 @@ def generate_video(
     sdnq_triton_mm: bool = True,
     sdnq_compile: bool = True,
 ) -> Generator[Tuple[List[Tuple[str, str]], Optional[str], str, str], None, None]:
-    global stop_event, current_process, current_output_filename
+    global stop_event, current_process, current_output_filename, current_session_id
+
+    # Initialize session tracking
+    if not session_id:
+        session_id = session_manager.create_session()
+
+    current_session_id = session_id
     stop_event.clear()
     current_process = None
     current_output_filename = None
 
+    # Save UI state for recovery
+    ui_params = {
+        'prompt': prompt,
+        'negative_prompt': negative_prompt,
+        'input_image': input_image,
+        'end_image': end_image,
+        'mode': mode,
+        'model_config': model_config,
+        'dit_checkpoint_path': dit_checkpoint_path,
+        'attention_engine': attention_engine,
+        'attention_type': attention_type,
+        'nabla_P': nabla_P,
+        'nabla_wT': nabla_wT,
+        'nabla_wW': nabla_wW,
+        'nabla_wH': nabla_wH,
+        'width': width,
+        'height': height,
+        'video_duration': video_duration,
+        'sample_steps': sample_steps,
+        'guidance_weight': guidance_weight,
+        'scheduler_scale': scheduler_scale,
+        'seed': seed,
+        'use_mixed_weights': use_mixed_weights,
+        'use_int8': use_int8,
+        'use_torch_compile': use_torch_compile,
+        'use_magcache': use_magcache,
+        'enable_block_swap': enable_block_swap,
+        'offload_inactive': offload_inactive,
+        'blocks_in_memory': blocks_in_memory,
+        'dtype_str': dtype_str,
+        'text_encoder_dtype_str': text_encoder_dtype_str,
+        'vae_dtype_str': vae_dtype_str,
+        'computation_dtype_str': computation_dtype_str,
+        'save_path': save_path,
+        'batch_size': batch_size,
+        'enable_preview': enable_preview,
+        'preview_steps': preview_steps,
+        'enable_vae_chunking': enable_vae_chunking,
+        'vae_temporal_tile_frames': vae_temporal_tile_frames,
+        'vae_temporal_stride_frames': vae_temporal_stride_frames,
+        'vae_spatial_tile_height': vae_spatial_tile_height,
+        'vae_spatial_tile_width': vae_spatial_tile_width,
+        'use_prompt_expansion': use_prompt_expansion,
+        'clip_prompt': clip_prompt,
+        'save_latents': save_latents,
+        'enable_ultravico': enable_ultravico,
+        'ultravico_alpha': ultravico_alpha,
+        'ultravico_suppress_harmonics': ultravico_suppress_harmonics,
+        'ultravico_beta': ultravico_beta,
+        'use_sdnq': use_sdnq,
+        'sdnq_weights_dtype': sdnq_weights_dtype,
+        'sdnq_triton_mm': sdnq_triton_mm,
+        'sdnq_compile': sdnq_compile,
+    }
+    session_manager.save_ui_state(session_id, ui_params, tab='gen_tab')
+
+    # Update generation status
+    session_manager.update_generation_status(
+        session_id,
+        state='generating',
+        batch_total=int(batch_size),
+        batch_index=0,
+        started_at=time.time()
+    )
+
     os.makedirs(save_path, exist_ok=True)
-    all_generated_videos = []
+
+    # Get existing video history for this session
+    all_generated_videos = list(session_manager.get_video_history(session_id))
 
     for i in range(int(batch_size)):
-        if stop_event.is_set():
+        # Check both legacy stop_event and session-based stop
+        if stop_event.is_set() or process_registry.is_stopped(session_id):
             current_process = None
+            session_manager.update_generation_status(session_id, state='stopped')
             yield all_generated_videos, None, "Generation stopped by user.", ""
             return
+
+        # Update batch progress in session
+        session_manager.update_generation_status(session_id, batch_index=i, current_step=0)
 
         current_seed = seed
         if seed == -1:
@@ -144,6 +236,9 @@ def generate_video(
         unique_preview_suffix = f"k1_{run_id}"
         output_filename = os.path.join(save_path, f"k1_{mode}_{timestamp}_{current_seed}.mp4")
         current_output_filename = output_filename  # Track for early stop signals
+
+        # Update session with output filename
+        session_manager.update_generation_status(session_id, output_filename=output_filename)
 
         # Select config file based on model_config selection
         config_map = {
@@ -308,6 +403,10 @@ def generate_video(
 
             current_process = process
 
+            # Register process with session for reconnect support
+            process_registry.register(session_id, process, output_filename, ui_params)
+            session_manager.update_generation_status(session_id, subprocess_pid=process.pid)
+
             current_preview_yield_path = None
             last_preview_mtime = 0
             preview_base_dir = os.path.join(save_path, "previews")
@@ -315,13 +414,17 @@ def generate_video(
 
             last_progress = ""
             while True:
-                if stop_event.is_set():
+                # Check both legacy stop_event and session-based stop
+                if stop_event.is_set() or process_registry.is_stopped(session_id):
                     process.terminate()
                     try:
                         process.wait(timeout=5)
                     except subprocess.TimeoutExpired:
                         process.kill()
                     current_process = None
+                    process_registry.unregister(session_id)
+                    session_manager.update_generation_status(session_id, state='stopped')
+                    cleanup_progress_file(output_filename)
                     yield all_generated_videos, None, "Generation stopped by user.", ""
                     return
 
@@ -333,12 +436,34 @@ def generate_video(
                     if parsed_progress:
                         last_progress = parsed_progress
 
+                    # Parse structured progress info for session tracking
+                    progress_info = parse_progress_info(line)
+                    if progress_info:
+                        session_manager.update_generation_status(
+                            session_id,
+                            current_step=progress_info.get('step', 0),
+                            total_steps=progress_info.get('total', 0),
+                            last_progress_text=last_progress
+                        )
+                        # Write progress file for recovery
+                        write_progress_file(output_filename, {
+                            'step': progress_info.get('step', 0),
+                            'total': progress_info.get('total', 0),
+                            'percent': progress_info.get('percent', 0),
+                            'eta': progress_info.get('eta', ''),
+                            'preview_path': current_preview_yield_path,
+                            'batch_index': i,
+                            'batch_total': int(batch_size),
+                            'seed': current_seed
+                        })
+
                 if enable_preview:
                     if os.path.exists(preview_mp4_path):
                         current_mtime = os.path.getmtime(preview_mp4_path)
                         if current_mtime > last_preview_mtime:
                             current_preview_yield_path = preview_mp4_path
                             last_preview_mtime = current_mtime
+                            session_manager.update_generation_status(session_id, preview_path=preview_mp4_path)
 
                 yield all_generated_videos.copy(), current_preview_yield_path, status_text, last_progress
 
@@ -347,7 +472,9 @@ def generate_video(
 
             # Clear current process when done
             current_process = None
+            process_registry.unregister(session_id)
             return_code = process.returncode
+            cleanup_progress_file(output_filename)
 
             elapsed = time.perf_counter() - start_time
 
@@ -408,23 +535,29 @@ def generate_video(
                     print(f"Warning: Failed to add metadata to {output_filename}: {meta_err}")
 
                 all_generated_videos.append((output_filename, f"Seed: {current_seed}"))
+                # Add to session history for reconnect recovery
+                session_manager.add_to_history(session_id, output_filename, f"Seed: {current_seed}")
                 progress_msg = f"Completed {i+1}/{batch_size} in {elapsed:.1f}s"
                 yield all_generated_videos.copy(), None, status_text, progress_msg
             else:
                 error_msg = f"Error: Generation failed with return code {return_code}"
                 current_process = None
+                session_manager.update_generation_status(session_id, state='error', error_message=error_msg)
                 yield all_generated_videos, None, error_msg, ""
                 return
 
         except Exception as e:
             current_process = None
+            session_manager.update_generation_status(session_id, state='error', error_message=str(e))
             yield all_generated_videos, None, f"Error during generation: {str(e)}", ""
             return
 
     current_process = None
+    session_manager.update_generation_status(session_id, state='completed')
     yield all_generated_videos, None, "All generations complete!", ""
 
 def generate_v2v_video(
+    session_id: str,  # Session ID for reconnect support
     prompt: str,
     negative_prompt: str,
     input_video: str,
@@ -484,19 +617,103 @@ def generate_v2v_video(
     sdnq_compile: bool = True,
 ) -> Generator[Tuple[List[Tuple[str, str]], Optional[str], str, str], None, None]:
     """Generate video from video input (video continuation/v2v mode)."""
-    global stop_event, current_process, current_output_filename
+    global stop_event, current_process, current_output_filename, current_session_id
+
+    # Initialize session tracking
+    if not session_id:
+        session_id = session_manager.create_session()
+
+    current_session_id = session_id
     stop_event.clear()
     current_process = None
     current_output_filename = None
 
+    # Save UI state for recovery
+    ui_params = {
+        'prompt': prompt,
+        'negative_prompt': negative_prompt,
+        'input_video': input_video,
+        'input_video2': input_video2,
+        'num_cond_frames': num_cond_frames,
+        'normalize_frames': normalize_frames,
+        'model_config': model_config,
+        'dit_checkpoint_path': dit_checkpoint_path,
+        'attention_engine': attention_engine,
+        'attention_type': attention_type,
+        'nabla_P': nabla_P,
+        'nabla_wT': nabla_wT,
+        'nabla_wW': nabla_wW,
+        'nabla_wH': nabla_wH,
+        'width': width,
+        'height': height,
+        'video_duration': video_duration,
+        'sample_steps': sample_steps,
+        'guidance_weight': guidance_weight,
+        'scheduler_scale': scheduler_scale,
+        'seed': seed,
+        'use_mixed_weights': use_mixed_weights,
+        'use_int8': use_int8,
+        'use_torch_compile': use_torch_compile,
+        'use_magcache': use_magcache,
+        'enable_block_swap': enable_block_swap,
+        'offload_inactive': offload_inactive,
+        'blocks_in_memory': blocks_in_memory,
+        'dtype_str': dtype_str,
+        'text_encoder_dtype_str': text_encoder_dtype_str,
+        'vae_dtype_str': vae_dtype_str,
+        'computation_dtype_str': computation_dtype_str,
+        'save_path': save_path,
+        'batch_size': batch_size,
+        'enable_preview': enable_preview,
+        'preview_steps': preview_steps,
+        'enable_vae_chunking': enable_vae_chunking,
+        'vae_temporal_tile_frames': vae_temporal_tile_frames,
+        'vae_temporal_stride_frames': vae_temporal_stride_frames,
+        'vae_spatial_tile_height': vae_spatial_tile_height,
+        'vae_spatial_tile_width': vae_spatial_tile_width,
+        'use_prompt_expansion': use_prompt_expansion,
+        'clip_prompt': clip_prompt,
+        'save_latents': save_latents,
+        'use_apg': use_apg,
+        'apg_momentum': apg_momentum,
+        'apg_norm_threshold': apg_norm_threshold,
+        'enable_denoise': enable_denoise,
+        'denoise_strength': denoise_strength,
+        'enable_ultravico': enable_ultravico,
+        'ultravico_alpha': ultravico_alpha,
+        'ultravico_suppress_harmonics': ultravico_suppress_harmonics,
+        'ultravico_beta': ultravico_beta,
+        'use_sdnq': use_sdnq,
+        'sdnq_weights_dtype': sdnq_weights_dtype,
+        'sdnq_triton_mm': sdnq_triton_mm,
+        'sdnq_compile': sdnq_compile,
+    }
+    session_manager.save_ui_state(session_id, ui_params, tab='v2v')
+
+    # Update generation status
+    session_manager.update_generation_status(
+        session_id,
+        state='generating',
+        batch_total=int(batch_size),
+        batch_index=0,
+        started_at=time.time()
+    )
+
     os.makedirs(save_path, exist_ok=True)
-    all_generated_videos = []
+
+    # Get existing video history for this session
+    all_generated_videos = list(session_manager.get_video_history(session_id))
 
     for i in range(int(batch_size)):
-        if stop_event.is_set():
+        # Check both legacy stop_event and session-based stop
+        if stop_event.is_set() or process_registry.is_stopped(session_id):
             current_process = None
+            session_manager.update_generation_status(session_id, state='stopped')
             yield all_generated_videos, None, "Generation stopped by user.", ""
             return
+
+        # Update batch progress in session
+        session_manager.update_generation_status(session_id, batch_index=i, current_step=0)
 
         current_seed = seed
         if seed == -1:
@@ -515,6 +732,9 @@ def generate_v2v_video(
         mode_prefix = "join" if input_video2 else "v2v"
         output_filename = os.path.join(save_path, f"k1_{mode_prefix}_{timestamp}_{current_seed}.mp4")
         current_output_filename = output_filename
+
+        # Update session with output filename
+        session_manager.update_generation_status(session_id, output_filename=output_filename)
 
         # V2V supports all configs for experimentation
         config_map = {
@@ -691,6 +911,10 @@ def generate_v2v_video(
 
             current_process = process
 
+            # Register process with session for reconnect support
+            process_registry.register(session_id, process, output_filename, ui_params)
+            session_manager.update_generation_status(session_id, subprocess_pid=process.pid)
+
             current_preview_yield_path = None
             last_preview_mtime = 0
             preview_base_dir = os.path.join(save_path, "previews")
@@ -698,13 +922,17 @@ def generate_v2v_video(
 
             last_progress = ""
             while True:
-                if stop_event.is_set():
+                # Check both legacy stop_event and session-based stop
+                if stop_event.is_set() or process_registry.is_stopped(session_id):
                     process.terminate()
                     try:
                         process.wait(timeout=5)
                     except subprocess.TimeoutExpired:
                         process.kill()
                     current_process = None
+                    process_registry.unregister(session_id)
+                    session_manager.update_generation_status(session_id, state='stopped')
+                    cleanup_progress_file(output_filename)
                     yield all_generated_videos, None, "Generation stopped by user.", ""
                     return
 
@@ -716,12 +944,34 @@ def generate_v2v_video(
                     if parsed_progress:
                         last_progress = parsed_progress
 
+                    # Parse structured progress info for session tracking
+                    progress_info = parse_progress_info(line)
+                    if progress_info:
+                        session_manager.update_generation_status(
+                            session_id,
+                            current_step=progress_info.get('step', 0),
+                            total_steps=progress_info.get('total', 0),
+                            last_progress_text=last_progress
+                        )
+                        # Write progress file for recovery
+                        write_progress_file(output_filename, {
+                            'step': progress_info.get('step', 0),
+                            'total': progress_info.get('total', 0),
+                            'percent': progress_info.get('percent', 0),
+                            'eta': progress_info.get('eta', ''),
+                            'preview_path': current_preview_yield_path,
+                            'batch_index': i,
+                            'batch_total': int(batch_size),
+                            'seed': current_seed
+                        })
+
                 if enable_preview:
                     if os.path.exists(preview_mp4_path):
                         current_mtime = os.path.getmtime(preview_mp4_path)
                         if current_mtime > last_preview_mtime:
                             current_preview_yield_path = preview_mp4_path
                             last_preview_mtime = current_mtime
+                            session_manager.update_generation_status(session_id, preview_path=preview_mp4_path)
 
                 yield all_generated_videos.copy(), current_preview_yield_path, status_text, last_progress
 
@@ -730,7 +980,9 @@ def generate_v2v_video(
 
             # Clear current process when done
             current_process = None
+            process_registry.unregister(session_id)
             return_code = process.returncode
+            cleanup_progress_file(output_filename)
 
             elapsed = time.perf_counter() - start_time
 
@@ -794,27 +1046,44 @@ def generate_v2v_video(
                     print(f"Warning: Failed to add metadata to {output_filename}: {meta_err}")
 
                 all_generated_videos.append((output_filename, f"Seed: {current_seed}"))
+                # Add to session history for reconnect recovery
+                session_manager.add_to_history(session_id, output_filename, f"Seed: {current_seed}")
                 progress_msg = f"Completed {i+1}/{batch_size} in {elapsed:.1f}s"
                 yield all_generated_videos.copy(), None, status_text, progress_msg
             else:
                 error_msg = f"Error: Generation failed with return code {return_code}"
                 current_process = None
+                session_manager.update_generation_status(session_id, state='error', error_message=error_msg)
                 yield all_generated_videos, None, error_msg, ""
                 return
 
         except Exception as e:
             current_process = None
+            session_manager.update_generation_status(session_id, state='error', error_message=str(e))
             yield all_generated_videos, None, f"Error during generation: {str(e)}", ""
             return
 
     current_process = None
+    session_manager.update_generation_status(session_id, state='completed')
     yield all_generated_videos, None, "All generations complete!", ""
 
-def stop_generation():
-    global stop_event, current_process
+def stop_generation(session_id: str = None):
+    """Stop the current generation process.
+
+    Uses session-based process registry if session_id provided,
+    falls back to legacy global process tracking otherwise.
+    """
+    global stop_event, current_process, current_session_id
     stop_event.set()
 
-    # Immediately terminate the current process if it exists
+    # Try session-based stop first
+    sid = session_id or current_session_id
+    if sid:
+        if process_registry.stop(sid):
+            session_manager.update_generation_status(sid, state='stopped')
+            return "Stopping generation..."
+
+    # Fall back to legacy global process
     if current_process is not None:
         try:
             current_process.terminate()
@@ -830,11 +1099,22 @@ def stop_generation():
 
     return "Stopping generation..."
 
-def stop_and_decode():
+def stop_and_decode(session_id: str = None):
     """Signal the generation to stop and decode the current latents."""
-    global current_output_filename
-    if current_output_filename:
-        signal_file = current_output_filename + ".stop_decode"
+    global current_output_filename, current_session_id
+
+    # Try session-based lookup first
+    sid = session_id or current_session_id
+    output_file = None
+    if sid:
+        output_file = process_registry.get_output_filename(sid)
+
+    # Fall back to legacy global
+    if not output_file:
+        output_file = current_output_filename
+
+    if output_file:
+        signal_file = output_file + ".stop_decode"
         try:
             with open(signal_file, 'w') as f:
                 f.write('decode')
@@ -843,11 +1123,22 @@ def stop_and_decode():
             return f"Error creating signal file: {e}"
     return "No active generation to stop"
 
-def stop_and_save():
+def stop_and_save(session_id: str = None):
     """Signal the generation to stop and save the current latents."""
-    global current_output_filename
-    if current_output_filename:
-        signal_file = current_output_filename + ".stop_save"
+    global current_output_filename, current_session_id
+
+    # Try session-based lookup first
+    sid = session_id or current_session_id
+    output_file = None
+    if sid:
+        output_file = process_registry.get_output_filename(sid)
+
+    # Fall back to legacy global
+    if not output_file:
+        output_file = current_output_filename
+
+    if output_file:
+        signal_file = output_file + ".stop_save"
         try:
             with open(signal_file, 'w') as f:
                 f.write('save')
@@ -1504,18 +1795,21 @@ def create_interface():
         }
         """,
     ) as demo:
-        demo.load(None, None, None, js=r"""
+        # Session management components (hidden)
+        session_id_state = gr.State(value=None)
+        session_id_input = gr.Textbox(visible=False, elem_id="session_id_input", value="")
+        recovery_trigger_btn = gr.Button("Recover", visible=False, elem_id="recovery_trigger_btn")
+
+        # Combined JavaScript: title updates + session management + reconnect detection
+        combined_js = r"""
             () => {
                 document.title = 'Kandinsky 5 - K1';
 
+                // --- Title Update Logic ---
                 function updateTitle(text) {
                     if (text && text.trim()) {
-                        // Match k1.py's format: "Generating: XX% (current/total steps) - ETA: HH:MM:SS"
-                        // Also support raw TQDM format: "XX%|...[...<HH:MM:SS"
-                        // Also support h1111 format: "(XX%)" + "ETA: HH:MM:SS"
                         const pattern = /(?:.*?(\d+)%.*?(?:ETA|Remaining):\s*([\d:]+))|(?:(\d+)%\|.*\[.*<([\d:?]+))/;
                         const match = text.match(pattern);
-
                         if (match) {
                             const percentage = match[1] || match[3];
                             const time = match[2] || match[4];
@@ -1541,8 +1835,184 @@ def create_interface():
                         }
                     });
                 }, 1000);
+
+                // --- Session Management Logic ---
+                console.log('[K1] Initializing session management...');
+
+                const SESSION_KEY = 'k1_session_id';
+                let sessionId = localStorage.getItem(SESSION_KEY);
+
+                function setSessionId(id) {
+                    const sessionInput = document.querySelector('#session_id_input input, #session_id_input textarea');
+                    if (sessionInput) {
+                        sessionInput.value = id;
+                        sessionInput.dispatchEvent(new Event('input', {bubbles: true}));
+                        console.log('[K1] Set session ID:', id);
+                    }
+                }
+
+                // Create reconnect banner
+                function createReconnectBanner() {
+                    let banner = document.getElementById('k1-reconnect-banner');
+                    if (!banner) {
+                        banner = document.createElement('div');
+                        banner.id = 'k1-reconnect-banner';
+                        banner.style.cssText = `
+                            position: fixed; top: 0; left: 0; right: 0;
+                            background: linear-gradient(90deg, #ff6b6b, #ee5a5a);
+                            color: white; padding: 12px 20px; text-align: center;
+                            z-index: 99999; font-weight: bold; font-size: 14px;
+                            box-shadow: 0 2px 10px rgba(0,0,0,0.3); display: none;
+                        `;
+                        banner.innerHTML = '&#9888; Connection lost. Attempting to reconnect...';
+                        document.body.prepend(banner);
+                    }
+                    return banner;
+                }
+
+                function showReconnectBanner() {
+                    const banner = createReconnectBanner();
+                    banner.style.display = 'block';
+                }
+
+                function hideReconnectBanner() {
+                    const banner = document.getElementById('k1-reconnect-banner');
+                    if (banner) banner.style.display = 'none';
+                }
+
+                // Session status indicator
+                function createSessionIndicator() {
+                    let indicator = document.getElementById('k1-session-indicator');
+                    if (!indicator) {
+                        indicator = document.createElement('div');
+                        indicator.id = 'k1-session-indicator';
+                        indicator.style.cssText = `
+                            position: fixed; bottom: 10px; right: 10px;
+                            background: rgba(0, 96, 223, 0.9); color: white;
+                            padding: 6px 12px; border-radius: 4px; font-size: 11px;
+                            z-index: 9999; font-family: monospace;
+                        `;
+                        document.body.appendChild(indicator);
+                    }
+                    return indicator;
+                }
+
+                function updateSessionIndicator(id, status) {
+                    const indicator = createSessionIndicator();
+                    indicator.textContent = `Session: ${id || 'new'} [${status}]`;
+                    indicator.style.background = status === 'connected'
+                        ? 'rgba(46, 204, 113, 0.9)'
+                        : 'rgba(255, 107, 107, 0.9)';
+                }
+
+                // WebSocket connection tracking
+                let wsConnected = true;
+                let reconnectAttempts = 0;
+
+                const OriginalWebSocket = window.WebSocket;
+                window.WebSocket = function(url, protocols) {
+                    const ws = new OriginalWebSocket(url, protocols);
+
+                    ws.addEventListener('open', () => {
+                        if (!wsConnected) {
+                            console.log('[K1] WebSocket reconnected');
+                            reconnectAttempts = 0;
+                            hideReconnectBanner();
+                            updateSessionIndicator(sessionId, 'connected');
+
+                            // Trigger state recovery
+                            setTimeout(() => {
+                                const recoveryBtn = document.querySelector('#recovery_trigger_btn');
+                                if (recoveryBtn) {
+                                    console.log('[K1] Triggering state recovery...');
+                                    recoveryBtn.click();
+                                }
+                            }, 500);
+                        }
+                        wsConnected = true;
+                    });
+
+                    ws.addEventListener('close', () => {
+                        wsConnected = false;
+                        reconnectAttempts++;
+                        console.log('[K1] WebSocket disconnected, attempt:', reconnectAttempts);
+                        showReconnectBanner();
+                        updateSessionIndicator(sessionId, 'disconnected');
+                    });
+
+                    return ws;
+                };
+
+                // Set existing session ID from storage
+                if (sessionId) {
+                    console.log('[K1] Found existing session:', sessionId);
+                    setTimeout(() => setSessionId(sessionId), 100);
+                }
+
+                // Update indicator
+                setTimeout(() => updateSessionIndicator(sessionId, 'connected'), 500);
+
+                // Watch for session ID changes and save to localStorage
+                const observer = new MutationObserver(() => {
+                    const sessionInput = document.querySelector('#session_id_input input, #session_id_input textarea');
+                    if (sessionInput && sessionInput.value && sessionInput.value !== sessionId) {
+                        sessionId = sessionInput.value;
+                        localStorage.setItem(SESSION_KEY, sessionId);
+                        console.log('[K1] Saved session ID:', sessionId);
+                        updateSessionIndicator(sessionId, 'connected');
+                    }
+                });
+
+                setTimeout(() => {
+                    const sessionContainer = document.querySelector('#session_id_input');
+                    if (sessionContainer) {
+                        observer.observe(sessionContainer, {
+                            subtree: true, childList: true, characterData: true, attributes: true
+                        });
+                    }
+                }, 1000);
+
+                // Periodic connection check
+                setInterval(() => {
+                    if (!wsConnected && reconnectAttempts > 0) {
+                        showReconnectBanner();
+                    }
+                }, 2000);
+
+                console.log('[K1] Session management initialized');
             }
-            """)
+            """
+
+        demo.load(None, None, None, js=combined_js)
+
+        # Session initialization function
+        def init_session(session_id_from_js):
+            """Initialize or restore session on page load."""
+            if session_id_from_js and session_id_from_js.strip():
+                sid = session_manager.get_or_create_session(session_id_from_js.strip())
+            else:
+                sid = session_manager.create_session()
+            return sid
+
+        # Recovery function for reconnection
+        def recover_session_state(session_id):
+            """Recover session state on reconnect - returns video history."""
+            if not session_id:
+                return []
+
+            session = session_manager.get_session(session_id)
+            if not session:
+                return []
+
+            # Return video history as list of tuples for the gallery
+            return list(session.video_history)
+
+        # Wire up session initialization
+        session_id_input.change(
+            fn=init_session,
+            inputs=[session_id_input],
+            outputs=[session_id_state]
+        )
 
         with gr.Tabs() as tabs:
             with gr.Tab("Generation", id="gen_tab"):
@@ -1873,6 +2343,7 @@ def create_interface():
                 generate_btn.click(
                     fn=generate_video,
                     inputs=[
+                        session_id_state,  # Session ID for reconnect support
                         prompt, negative_prompt, input_image, end_image, mode, model_config, dit_checkpoint_path, attention_engine,
                         attention_type, nabla_P, nabla_wT, nabla_wW, nabla_wH,
                         width, height, video_duration, sample_steps,
@@ -1893,16 +2364,19 @@ def create_interface():
 
                 stop_btn.click(
                     fn=stop_generation,
+                    inputs=[session_id_state],
                     outputs=[batch_progress]
                 )
 
                 stop_decode_btn.click(
                     fn=stop_and_decode,
+                    inputs=[session_id_state],
                     outputs=[batch_progress]
                 )
 
                 stop_save_btn.click(
                     fn=stop_and_save,
+                    inputs=[session_id_state],
                     outputs=[batch_progress]
                 )
 
@@ -2326,6 +2800,7 @@ def create_interface():
                 v2v_generate_btn.click(
                     fn=generate_v2v_video,
                     inputs=[
+                        session_id_state,  # Session ID for reconnect support
                         v2v_prompt, v2v_negative_prompt, v2v_input_video, v2v_input_video2, v2v_num_cond_frames,
                         v2v_normalize_frames, v2v_model_config, v2v_dit_checkpoint_path, v2v_attention_engine,
                         v2v_attention_type, v2v_nabla_P, v2v_nabla_wT, v2v_nabla_wW, v2v_nabla_wH,
@@ -2350,16 +2825,19 @@ def create_interface():
 
                 v2v_stop_btn.click(
                     fn=stop_generation,
+                    inputs=[session_id_state],
                     outputs=[v2v_batch_progress]
                 )
 
                 v2v_stop_decode_btn.click(
                     fn=stop_and_decode,
+                    inputs=[session_id_state],
                     outputs=[v2v_batch_progress]
                 )
 
                 v2v_stop_save_btn.click(
                     fn=stop_and_save,
+                    inputs=[session_id_state],
                     outputs=[v2v_batch_progress]
                 )
 
@@ -2490,6 +2968,13 @@ def create_interface():
                         v2v_clip_prompt                 # 36
                     ]
                 )
+
+        # Recovery button handler - restores video history on reconnect
+        recovery_trigger_btn.click(
+            fn=recover_session_state,
+            inputs=[session_id_state],
+            outputs=[output]  # Restore to Generation tab gallery
+        )
 
     return demo
 
