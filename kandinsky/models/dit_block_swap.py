@@ -34,6 +34,7 @@ class DiffusionTransformer3DBlockSwap(DiffusionTransformer3D):
         use_int8=False,
         int8_block_size=128,
         dtype=torch.bfloat16,
+        use_sdnq=False,
     ):
         # Initialize parent class
         super().__init__(
@@ -53,6 +54,7 @@ class DiffusionTransformer3DBlockSwap(DiffusionTransformer3D):
             use_int8=use_int8,
             int8_block_size=int8_block_size,
             dtype=dtype,
+            use_sdnq=use_sdnq,
         )
 
         self.blocks_in_memory = blocks_in_memory
