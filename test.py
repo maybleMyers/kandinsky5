@@ -568,6 +568,40 @@ def parse_args():
         help="Norm threshold for APG guidance clipping (default: 55.0)"
     )
 
+    # Noise scheduling for image-to-image-video and video join modes
+    parser.add_argument(
+        "--end_noise_schedule",
+        type=str,
+        default="progressive",
+        choices=["progressive", "fixed", "symmetric"],
+        help="Noise schedule for end/target frames. 'progressive': noise decreases from end_noise_start to end_noise_end. 'fixed': constant noise level. 'symmetric': match timestep like middle region."
+    )
+    parser.add_argument(
+        "--end_noise_start",
+        type=float,
+        default=1.0,
+        help="Initial noise level for end frames (1.0 = full noise, 0.0 = clean). Default: 1.0"
+    )
+    parser.add_argument(
+        "--end_noise_end",
+        type=float,
+        default=0.0,
+        help="Final noise level for end frames (only for progressive schedule). Default: 0.0"
+    )
+    parser.add_argument(
+        "--start_noise_schedule",
+        type=str,
+        default="fixed",
+        choices=["fixed", "progressive"],
+        help="Noise schedule for start frames. Usually 'fixed' with level 0.0 for clean anchoring."
+    )
+    parser.add_argument(
+        "--start_noise_level",
+        type=float,
+        default=0.0,
+        help="Noise level for start frames (0.0 = clean anchoring). Default: 0.0"
+    )
+
     # VAE temporal chunking configuration
     parser.add_argument(
         "--vae_temporal_tile_frames",
@@ -1321,6 +1355,12 @@ if __name__ == "__main__":
                 use_apg=args.use_apg,
                 apg_momentum=args.apg_momentum,
                 apg_norm_threshold=args.apg_norm_threshold,
+                # Noise scheduling for end frames
+                end_noise_schedule=args.end_noise_schedule,
+                end_noise_start=args.end_noise_start,
+                end_noise_end=args.end_noise_end,
+                start_noise_schedule=args.start_noise_schedule,
+                start_noise_level=args.start_noise_level,
             )
 
             # Save output video directly (no concatenation needed unlike video join mode)
@@ -1447,6 +1487,12 @@ if __name__ == "__main__":
                 use_apg=args.use_apg,
                 apg_momentum=args.apg_momentum,
                 apg_norm_threshold=args.apg_norm_threshold,
+                # Noise scheduling for end frames
+                end_noise_schedule=args.end_noise_schedule,
+                end_noise_start=args.end_noise_start,
+                end_noise_end=args.end_noise_end,
+                start_noise_schedule=args.start_noise_schedule,
+                start_noise_level=args.start_noise_level,
             )
 
             # Concatenate: video1 + generated middle + video2
