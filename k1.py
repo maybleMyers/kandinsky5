@@ -1943,11 +1943,17 @@ def create_interface():
                     return ws;
                 };
 
-                // Set existing session ID from storage
+                // Set session ID from storage OR trigger new session creation
                 if (sessionId) {
                     console.log('[K1] Found existing session:', sessionId);
-                    setTimeout(() => setSessionId(sessionId), 100);
+                } else {
+                    console.log('[K1] No existing session, will create new one');
                 }
+
+                // Always trigger the input event to initialize session (with existing ID or empty for new)
+                setTimeout(() => {
+                    setSessionId(sessionId || '__new__');
+                }, 100);
 
                 // Update indicator
                 setTimeout(() => updateSessionIndicator(sessionId, 'connected'), 500);
@@ -1957,7 +1963,8 @@ def create_interface():
                     const sessionInput = document.querySelector('#session_id_input input, #session_id_input textarea');
                     if (sessionInput && sessionInput.value && sessionInput.value.trim()) {
                         const newId = sessionInput.value.trim();
-                        if (newId !== sessionId && newId.length > 0) {
+                        // Don't save the __new__ marker, only real session IDs
+                        if (newId !== sessionId && newId.length > 0 && newId !== '__new__') {
                             sessionId = newId;
                             localStorage.setItem(SESSION_KEY, sessionId);
                             console.log('[K1] Saved session ID to localStorage:', sessionId);
@@ -2000,13 +2007,16 @@ def create_interface():
             }
             """
 
-        # Session initialization function
+        # Session initialization function - called when session_id_input changes
         def init_session(session_id_from_js):
             """Initialize or restore session on page load."""
-            if session_id_from_js and session_id_from_js.strip():
+            # Handle empty, __new__, or actual session ID
+            if session_id_from_js and session_id_from_js.strip() and session_id_from_js.strip() != '__new__':
                 sid = session_manager.get_or_create_session(session_id_from_js.strip())
+                print(f"[K1] Restored session: {sid}")
             else:
                 sid = session_manager.create_session()
+                print(f"[K1] Created new session: {sid}")
             # Return to both state (for Python) and input (for JS to save to localStorage)
             return sid, sid
 
@@ -2023,12 +2033,14 @@ def create_interface():
             # Return video history as list of tuples for the gallery
             return list(session.video_history)
 
-        # Initialize session on page load - JS runs first, then Python
-        demo.load(
+        # Run JS first (no Python function) - JS will set session_id_input from localStorage
+        demo.load(None, None, None, js=combined_js)
+
+        # When JS sets the session_id_input, this triggers Python to create/restore session
+        session_id_input.change(
             fn=init_session,
             inputs=[session_id_input],
-            outputs=[session_id_state, session_id_input],
-            js=combined_js
+            outputs=[session_id_state, session_id_input]
         )
 
         with gr.Tabs() as tabs:
