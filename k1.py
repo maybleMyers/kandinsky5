@@ -1953,15 +1953,20 @@ def create_interface():
                 setTimeout(() => updateSessionIndicator(sessionId, 'connected'), 500);
 
                 // Watch for session ID changes and save to localStorage
-                const observer = new MutationObserver(() => {
+                function checkAndSaveSessionId() {
                     const sessionInput = document.querySelector('#session_id_input input, #session_id_input textarea');
-                    if (sessionInput && sessionInput.value && sessionInput.value !== sessionId) {
-                        sessionId = sessionInput.value;
-                        localStorage.setItem(SESSION_KEY, sessionId);
-                        console.log('[K1] Saved session ID:', sessionId);
-                        updateSessionIndicator(sessionId, 'connected');
+                    if (sessionInput && sessionInput.value && sessionInput.value.trim()) {
+                        const newId = sessionInput.value.trim();
+                        if (newId !== sessionId && newId.length > 0) {
+                            sessionId = newId;
+                            localStorage.setItem(SESSION_KEY, sessionId);
+                            console.log('[K1] Saved session ID to localStorage:', sessionId);
+                            updateSessionIndicator(sessionId, 'connected');
+                        }
                     }
-                });
+                }
+
+                const observer = new MutationObserver(checkAndSaveSessionId);
 
                 setTimeout(() => {
                     const sessionContainer = document.querySelector('#session_id_input');
@@ -1969,8 +1974,20 @@ def create_interface():
                         observer.observe(sessionContainer, {
                             subtree: true, childList: true, characterData: true, attributes: true
                         });
+                        // Also check immediately in case value was already set
+                        checkAndSaveSessionId();
                     }
-                }, 1000);
+                }, 500);
+
+                // Periodic check to catch session ID from server
+                let checkCount = 0;
+                const checkInterval = setInterval(() => {
+                    checkAndSaveSessionId();
+                    checkCount++;
+                    if (checkCount > 10 || sessionId) {
+                        clearInterval(checkInterval);
+                    }
+                }, 500);
 
                 // Periodic connection check
                 setInterval(() => {
@@ -1983,8 +2000,6 @@ def create_interface():
             }
             """
 
-        demo.load(None, None, None, js=combined_js)
-
         # Session initialization function
         def init_session(session_id_from_js):
             """Initialize or restore session on page load."""
@@ -1992,7 +2007,8 @@ def create_interface():
                 sid = session_manager.get_or_create_session(session_id_from_js.strip())
             else:
                 sid = session_manager.create_session()
-            return sid
+            # Return to both state (for Python) and input (for JS to save to localStorage)
+            return sid, sid
 
         # Recovery function for reconnection
         def recover_session_state(session_id):
@@ -2007,11 +2023,12 @@ def create_interface():
             # Return video history as list of tuples for the gallery
             return list(session.video_history)
 
-        # Wire up session initialization
-        session_id_input.change(
+        # Initialize session on page load - JS runs first, then Python
+        demo.load(
             fn=init_session,
             inputs=[session_id_input],
-            outputs=[session_id_state]
+            outputs=[session_id_state, session_id_input],
+            js=combined_js
         )
 
         with gr.Tabs() as tabs:
