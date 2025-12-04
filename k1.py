@@ -1797,7 +1797,8 @@ def create_interface():
     ) as demo:
         # Session management components (hidden)
         session_id_state = gr.State(value=None)
-        session_id_input = gr.Textbox(visible=False, elem_id="session_id_input", value="")
+        session_id_input = gr.Textbox(visible=False, elem_id="session_id_input", value="")  # JS writes here
+        session_id_output = gr.Textbox(visible=False, elem_id="session_id_output", value="")  # Python writes here, JS reads
         recovery_trigger_btn = gr.Button("Recover", visible=False, elem_id="recovery_trigger_btn")
 
         # Combined JavaScript: title updates + session management + reconnect detection
@@ -1958,12 +1959,13 @@ def create_interface():
                 // Update indicator
                 setTimeout(() => updateSessionIndicator(sessionId, 'connected'), 500);
 
-                // Watch for session ID changes and save to localStorage
+                // Watch session_id_output for session ID from server and save to localStorage
                 function checkAndSaveSessionId() {
-                    const sessionInput = document.querySelector('#session_id_input input, #session_id_input textarea');
-                    if (sessionInput && sessionInput.value && sessionInput.value.trim()) {
-                        const newId = sessionInput.value.trim();
-                        // Don't save the __new__ marker, only real session IDs
+                    // Read from OUTPUT element (where Python writes)
+                    const sessionOutput = document.querySelector('#session_id_output input, #session_id_output textarea');
+                    if (sessionOutput && sessionOutput.value && sessionOutput.value.trim()) {
+                        const newId = sessionOutput.value.trim();
+                        // Only save real session IDs (not empty, not __new__)
                         if (newId !== sessionId && newId.length > 0 && newId !== '__new__') {
                             sessionId = newId;
                             localStorage.setItem(SESSION_KEY, sessionId);
@@ -1976,9 +1978,10 @@ def create_interface():
                 const observer = new MutationObserver(checkAndSaveSessionId);
 
                 setTimeout(() => {
-                    const sessionContainer = document.querySelector('#session_id_input');
-                    if (sessionContainer) {
-                        observer.observe(sessionContainer, {
+                    // Watch the OUTPUT element for changes from Python
+                    const sessionOutputContainer = document.querySelector('#session_id_output');
+                    if (sessionOutputContainer) {
+                        observer.observe(sessionOutputContainer, {
                             subtree: true, childList: true, characterData: true, attributes: true
                         });
                         // Also check immediately in case value was already set
@@ -1991,10 +1994,10 @@ def create_interface():
                 const checkInterval = setInterval(() => {
                     checkAndSaveSessionId();
                     checkCount++;
-                    if (checkCount > 10 || sessionId) {
+                    if (checkCount > 20 || (sessionId && sessionId !== '__new__')) {
                         clearInterval(checkInterval);
                     }
-                }, 500);
+                }, 300);
 
                 // Periodic connection check
                 setInterval(() => {
@@ -2017,30 +2020,34 @@ def create_interface():
             else:
                 sid = session_manager.create_session()
                 print(f"[K1] Created new session: {sid}")
-            # Return to both state (for Python) and input (for JS to save to localStorage)
+            # Return to state (for Python functions) and output (for JS to save to localStorage)
             return sid, sid
 
         # Recovery function for reconnection
         def recover_session_state(session_id):
             """Recover session state on reconnect - returns video history."""
             if not session_id:
-                return []
+                return [], "No session"
 
             session = session_manager.get_session(session_id)
             if not session:
-                return []
+                return [], f"Session {session_id} not found"
 
             # Return video history as list of tuples for the gallery
-            return list(session.video_history)
+            history = list(session.video_history)
+            status = f"Recovered {len(history)} videos from session {session_id}"
+            print(f"[K1] {status}")
+            return history, status
 
         # Run JS first (no Python function) - JS will set session_id_input from localStorage
         demo.load(None, None, None, js=combined_js)
 
         # When JS sets the session_id_input, this triggers Python to create/restore session
+        # Output goes to session_id_state (for Python) and session_id_output (for JS to save)
         session_id_input.change(
             fn=init_session,
             inputs=[session_id_input],
-            outputs=[session_id_state, session_id_input]
+            outputs=[session_id_state, session_id_output]
         )
 
         with gr.Tabs() as tabs:
@@ -2090,6 +2097,7 @@ def create_interface():
                 with gr.Row():
                     generate_btn = gr.Button("Generate Video", elem_classes="green-btn")
                     stop_btn = gr.Button("Stop Generation", variant="stop")
+                    recover_btn = gr.Button("Recover Session", variant="secondary")
 
                 with gr.Row():
                     with gr.Column():
@@ -2409,6 +2417,12 @@ def create_interface():
                     outputs=[batch_progress]
                 )
 
+                recover_btn.click(
+                    fn=recover_session_state,
+                    inputs=[session_id_state],
+                    outputs=[output, batch_progress]
+                )
+
                 resume_btn.click(
                     fn=resume_from_checkpoint,
                     inputs=[
@@ -2478,6 +2492,7 @@ def create_interface():
                 with gr.Row():
                     v2v_generate_btn = gr.Button("Generate Video", elem_classes="green-btn")
                     v2v_stop_btn = gr.Button("Stop Generation", variant="stop")
+                    v2v_recover_btn = gr.Button("Recover Session", variant="secondary")
 
                 with gr.Row():
                     with gr.Column():
@@ -2870,6 +2885,12 @@ def create_interface():
                     outputs=[v2v_batch_progress]
                 )
 
+                v2v_recover_btn.click(
+                    fn=recover_session_state,
+                    inputs=[session_id_state],
+                    outputs=[v2v_output, v2v_batch_progress]
+                )
+
                 v2v_resume_btn.click(
                     fn=resume_from_checkpoint,
                     inputs=[
@@ -3002,7 +3023,7 @@ def create_interface():
         recovery_trigger_btn.click(
             fn=recover_session_state,
             inputs=[session_id_state],
-            outputs=[output]  # Restore to Generation tab gallery
+            outputs=[output, batch_progress]  # Restore gallery and show status
         )
 
     return demo
