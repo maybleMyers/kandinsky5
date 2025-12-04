@@ -102,6 +102,53 @@ def create_sdnq_linear(
     return nn.Linear(in_features, out_features, bias=bias, dtype=dtype)
 
 
+def get_sdnq_info() -> dict:
+    """Get information about SDNQ availability and capabilities."""
+    info = {
+        "available": SDNQ_AVAILABLE,
+        "version": None,
+        "torch_compile": False,
+        "triton_mm": False,
+        "tensorwise_fp8": True,
+        "int_mm_func": "unknown",
+    }
+
+    if SDNQ_AVAILABLE:
+        try:
+            from sdnq.common import sdnq_version, use_torch_compile, use_triton_mm, use_tensorwise_fp8_matmul
+            info["version"] = sdnq_version
+            info["torch_compile"] = use_torch_compile
+            info["triton_mm"] = use_triton_mm
+            info["tensorwise_fp8"] = use_tensorwise_fp8_matmul
+            # Identify which int_mm implementation is being used
+            info["int_mm_func"] = "triton_mm" if use_triton_mm else "torch._int_mm"
+        except ImportError:
+            pass
+
+    return info
+
+
+def print_sdnq_config():
+    """Print current SDNQ configuration for diagnostics."""
+    info = get_sdnq_info()
+    if not info["available"]:
+        print("SDNQ: Not available")
+        return
+
+    print(f"SDNQ Configuration:")
+    print(f"  Version: {info['version']}")
+    print(f"  torch.compile: {info['torch_compile']}")
+    print(f"  Triton int8 matmul: {info['triton_mm']}")
+    print(f"  int_mm function: {info['int_mm_func']}")
+    print(f"  Tensorwise FP8: {info['tensorwise_fp8']}")
+
+    # Performance recommendation
+    if not info['triton_mm']:
+        print("  WARNING: Triton MM disabled. For optimal 4090/5090 performance, set SDNQ_USE_TRITON_MM=1")
+    if not info['torch_compile']:
+        print("  WARNING: torch.compile disabled. Set SDNQ_USE_TORCH_COMPILE=1 for better throughput")
+
+
 def apply_sdnq_quantization(
     model: nn.Module,
     weights_dtype: str = "int8",
@@ -150,6 +197,9 @@ def apply_sdnq_quantization(
 
     print(f"SDNQ: Applying {weights_dtype} quantization...")
     print(f"SDNQ: use_quantized_matmul={use_quantized_matmul}, group_size={group_size}")
+
+    # Print full SDNQ configuration for diagnostics
+    print_sdnq_config()
 
     # Apply SDNQ quantization
     model = sdnq_post_load_quant(
@@ -219,26 +269,3 @@ class SDNQConfig:
             f"SDNQConfig(enabled={self.enabled}, weights_dtype='{self.weights_dtype}', "
             f"use_quantized_matmul={self.use_quantized_matmul}, group_size={self.group_size})"
         )
-
-
-def get_sdnq_info() -> dict:
-    """Get information about SDNQ availability and capabilities."""
-    info = {
-        "available": SDNQ_AVAILABLE,
-        "version": None,
-        "torch_compile": False,
-        "triton_mm": False,
-        "tensorwise_fp8": True,
-    }
-
-    if SDNQ_AVAILABLE:
-        try:
-            from sdnq.common import sdnq_version, use_torch_compile, use_triton_mm, use_tensorwise_fp8_matmul
-            info["version"] = sdnq_version
-            info["torch_compile"] = use_torch_compile
-            info["triton_mm"] = use_triton_mm
-            info["tensorwise_fp8"] = use_tensorwise_fp8_matmul
-        except ImportError:
-            pass
-
-    return info

@@ -113,6 +113,8 @@ def generate_video(
     ultravico_beta: float = 0.6,
     use_sdnq: bool = False,
     sdnq_weights_dtype: str = "int8",
+    sdnq_triton_mm: bool = True,
+    sdnq_compile: bool = True,
 ) -> Generator[Tuple[List[Tuple[str, str]], Optional[str], str, str], None, None]:
     global stop_event, current_process, current_output_filename
     stop_event.clear()
@@ -281,6 +283,11 @@ def generate_video(
         if use_sdnq:
             command.append("--use_sdnq")
             command.extend(["--sdnq_weights_dtype", sdnq_weights_dtype])
+            # Triton MM and compile are enabled by default, add flags to disable
+            if not sdnq_triton_mm:
+                command.append("--no_sdnq_triton_mm")
+            if not sdnq_compile:
+                command.append("--no_sdnq_compile")
 
         # Print the command for debugging/transparency
         print("\n" + "="*80)
@@ -391,6 +398,8 @@ def generate_video(
                     "ultravico_beta": ultravico_beta if enable_ultravico and ultravico_suppress_harmonics else None,
                     "use_sdnq": use_sdnq,
                     "sdnq_weights_dtype": sdnq_weights_dtype if use_sdnq else None,
+                    "sdnq_triton_mm": sdnq_triton_mm if use_sdnq else None,
+                    "sdnq_compile": sdnq_compile if use_sdnq else None,
                 }
                 try:
                     add_metadata_to_video(output_filename, params_for_meta)
@@ -471,6 +480,8 @@ def generate_v2v_video(
     ultravico_beta: float = 0.6,
     use_sdnq: bool = False,
     sdnq_weights_dtype: str = "int8",
+    sdnq_triton_mm: bool = True,
+    sdnq_compile: bool = True,
 ) -> Generator[Tuple[List[Tuple[str, str]], Optional[str], str, str], None, None]:
     """Generate video from video input (video continuation/v2v mode)."""
     global stop_event, current_process, current_output_filename
@@ -654,6 +665,11 @@ def generate_v2v_video(
         if use_sdnq:
             command.append("--use_sdnq")
             command.extend(["--sdnq_weights_dtype", sdnq_weights_dtype])
+            # Triton MM and compile are enabled by default, add flags to disable
+            if not sdnq_triton_mm:
+                command.append("--no_sdnq_triton_mm")
+            if not sdnq_compile:
+                command.append("--no_sdnq_compile")
 
         # Print the command for debugging/transparency
         print("\n" + "="*80)
@@ -768,6 +784,8 @@ def generate_v2v_video(
                     "ultravico_beta": ultravico_beta if enable_ultravico and ultravico_suppress_harmonics else None,
                     "use_sdnq": use_sdnq,
                     "sdnq_weights_dtype": sdnq_weights_dtype if use_sdnq else None,
+                    "sdnq_triton_mm": sdnq_triton_mm if use_sdnq else None,
+                    "sdnq_compile": sdnq_compile if use_sdnq else None,
                 }
                 try:
                     add_metadata_to_video(output_filename, params_for_meta)
@@ -1717,6 +1735,8 @@ def create_interface():
                     with gr.Row():
                         use_sdnq = gr.Checkbox(label="Use SDNQ (recommended)", value=False, info="20-40% faster than legacy INT8 with auto-tuned Triton kernels")
                         sdnq_weights_dtype = gr.Radio(choices=["int8", "fp8", "int4"], label="SDNQ Weights", value="int8", info="int8=best balance, fp8=H100+, int4=experimental")
+                        sdnq_triton_mm = gr.Checkbox(label="Triton MM", value=True, info="Use Triton int8 kernel (faster on 4090/5090)")
+                        sdnq_compile = gr.Checkbox(label="torch.compile SDNQ", value=True, info="Compile SDNQ kernels (better throughput after warmup)")
                     with gr.Row():
                         enable_block_swap = gr.Checkbox(label="Enable Block Swap", value=True, info="Required for 24GB GPUs")
                         offload_inactive = gr.Checkbox(label="Offload Inactive Models", value=False, info="Offload text encoder & VAE to CPU when not in use (auto-enabled with block swap)")
@@ -1866,7 +1886,7 @@ def create_interface():
                         use_prompt_expansion, clip_prompt,
                         save_latents_checkbox,
                         enable_ultravico, ultravico_alpha, ultravico_suppress_harmonics, ultravico_beta,
-                        use_sdnq, sdnq_weights_dtype
+                        use_sdnq, sdnq_weights_dtype, sdnq_triton_mm, sdnq_compile
                     ],
                     outputs=[output, preview_output, batch_progress, progress_text]
                 )
@@ -2161,6 +2181,8 @@ def create_interface():
                     with gr.Row():
                         v2v_use_sdnq = gr.Checkbox(label="Use SDNQ (recommended)", value=False, info="20-40% faster than legacy INT8 with auto-tuned Triton kernels")
                         v2v_sdnq_weights_dtype = gr.Radio(choices=["int8", "fp8", "int4"], label="SDNQ Weights", value="int8", info="int8=best balance, fp8=H100+, int4=experimental")
+                        v2v_sdnq_triton_mm = gr.Checkbox(label="Triton MM", value=True, info="Use Triton int8 kernel (faster on 4090/5090)")
+                        v2v_sdnq_compile = gr.Checkbox(label="torch.compile SDNQ", value=True, info="Compile SDNQ kernels (better throughput after warmup)")
                     with gr.Row():
                         v2v_enable_block_swap = gr.Checkbox(label="Enable Block Swap", value=True, info="Required for 24GB GPUs")
                         v2v_offload_inactive = gr.Checkbox(label="Offload Inactive Models", value=False, info="Offload text encoder & VAE to CPU when not in use (auto-enabled with block swap)")
@@ -2321,7 +2343,7 @@ def create_interface():
                         v2v_use_apg, v2v_apg_momentum, v2v_apg_norm_threshold,
                         v2v_enable_denoise, v2v_denoise_strength,
                         v2v_enable_ultravico, v2v_ultravico_alpha, v2v_ultravico_suppress_harmonics, v2v_ultravico_beta,
-                        v2v_use_sdnq, v2v_sdnq_weights_dtype
+                        v2v_use_sdnq, v2v_sdnq_weights_dtype, v2v_sdnq_triton_mm, v2v_sdnq_compile
                     ],
                     outputs=[v2v_output, v2v_preview_output, v2v_batch_progress, v2v_progress_text]
                 )

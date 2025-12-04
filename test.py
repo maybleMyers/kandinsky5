@@ -16,6 +16,40 @@ def _early_parse_no_compile():
             return True
     return False
 
+# Early parse SDNQ flags to enable optimal int8 performance BEFORE importing SDNQ
+def _early_parse_sdnq_flags():
+    """Parse SDNQ-related flags early to set env vars before module import.
+
+    CRITICAL: SDNQ module evaluates these environment variables at import time.
+    Setting them after import has no effect.
+    """
+    use_sdnq = '--use_sdnq' in sys.argv
+    no_triton_mm = '--no_sdnq_triton_mm' in sys.argv
+    no_compile = '--no_sdnq_compile' in sys.argv
+
+    if use_sdnq:
+        # Handle Triton int8 matmul kernel setting
+        if no_triton_mm:
+            os.environ["SDNQ_USE_TRITON_MM"] = "0"
+            print("SDNQ: Using torch._int_mm (Triton MM disabled)")
+        elif os.environ.get("SDNQ_USE_TRITON_MM") is None:
+            # Enable Triton int8 matmul kernel for optimal tensor core utilization on CUDA
+            # Default SDNQ only enables Triton MM for RDNA2/ZLUDA, but it's faster on 4090/5090 too
+            os.environ["SDNQ_USE_TRITON_MM"] = "1"
+            print("SDNQ: Enabling Triton int8 matmul kernel for optimal CUDA performance")
+
+        # Handle torch.compile setting
+        if no_compile:
+            os.environ["SDNQ_USE_TORCH_COMPILE"] = "0"
+            print("SDNQ: torch.compile disabled for faster startup")
+        elif os.environ.get("SDNQ_USE_TORCH_COMPILE") is None:
+            # Enable torch.compile for SDNQ dequantization (if Triton is available)
+            os.environ["SDNQ_USE_TORCH_COMPILE"] = "1"
+            print("SDNQ: Enabling torch.compile for dequantization kernels")
+
+# Must be called before any SDNQ-related imports
+_early_parse_sdnq_flags()
+
 # Set global compile flag before importing kandinsky modules
 import kandinsky.models.compile_config as compile_config
 _no_compile = _early_parse_no_compile()
@@ -429,6 +463,30 @@ def parse_args():
         action='store_true',
         default=False,
         help="Disable SDNQ quantized matmul (forces dequantize+fp matmul path)"
+    )
+    parser.add_argument(
+        "--sdnq_triton_mm",
+        action='store_true',
+        default=True,
+        help="Use Triton int8 matmul kernel (default: True for CUDA). Faster on 4090/5090."
+    )
+    parser.add_argument(
+        "--no_sdnq_triton_mm",
+        action='store_true',
+        default=False,
+        help="Disable Triton int8 matmul kernel (fallback to torch._int_mm)"
+    )
+    parser.add_argument(
+        "--sdnq_compile",
+        action='store_true',
+        default=True,
+        help="Enable torch.compile for SDNQ kernels (default: True). Improves performance after warmup."
+    )
+    parser.add_argument(
+        "--no_sdnq_compile",
+        action='store_true',
+        default=False,
+        help="Disable torch.compile for SDNQ kernels (faster startup, slower inference)"
     )
 
     # NABLA sparse attention configuration
