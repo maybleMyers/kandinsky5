@@ -28,6 +28,8 @@ def count_tokens(text):
 
 stop_event = threading.Event()
 current_process = None  # Track the currently running process
+active_job_id = None  # Track current job being polled for unified UI
+active_batch_id = None  # Track current batch being processed
 current_output_filename = None  # Track current output filename for early stop signals
 
 def parse_progress_line(line: str) -> Optional[str]:
@@ -1154,6 +1156,257 @@ def clear_completed_jobs() -> str:
     return f"Removed {removed} completed jobs"
 
 
+# =============================================================================
+# UNIFIED QUEUE-BASED GENERATION (Browser-Independent with Live Updates)
+# =============================================================================
+# These functions provide the same UX as direct generation but use the queue
+# system behind the scenes, allowing generation to continue if browser closes.
+
+def generate_via_queue(
+    prompt: str,
+    negative_prompt: str,
+    input_image: str,
+    end_image: str,
+    mode: str,
+    model_config: str,
+    dit_checkpoint_path: str,
+    attention_engine: str,
+    attention_type: str,
+    nabla_P: float,
+    nabla_wT: int,
+    nabla_wW: int,
+    nabla_wH: int,
+    width: int,
+    height: int,
+    video_duration: int,
+    sample_steps: int,
+    guidance_weight: float,
+    scheduler_scale: float,
+    seed: int,
+    use_mixed_weights: bool,
+    use_int8: bool,
+    use_torch_compile: bool,
+    use_magcache: bool,
+    enable_block_swap: bool,
+    offload_inactive: bool,
+    blocks_in_memory: int,
+    dtype_str: str,
+    text_encoder_dtype_str: str,
+    vae_dtype_str: str,
+    computation_dtype_str: str,
+    save_path: str,
+    batch_size: int,
+    enable_preview: bool,
+    preview_steps: int,
+    enable_vae_chunking: bool,
+    vae_temporal_tile_frames: int,
+    vae_temporal_stride_frames: int,
+    vae_spatial_tile_height: int,
+    vae_spatial_tile_width: int,
+    use_prompt_expansion: bool,
+    clip_prompt: str,
+    save_latents: bool,
+    enable_ultravico: bool = False,
+    ultravico_alpha: float = 0.9,
+    ultravico_suppress_harmonics: bool = False,
+    ultravico_beta: float = 0.6,
+    use_sdnq: bool = False,
+    sdnq_weights_dtype: str = "int8",
+    sdnq_triton_mm: bool = True,
+    sdnq_compile: bool = True,
+    end_noise_schedule: str = "progressive",
+    end_noise_start: float = 1.0,
+    end_noise_end: float = 0.0,
+    start_noise_schedule: str = "fixed",
+    start_noise_level: float = 0.0,
+):
+    """
+    Submit job(s) to queue and return initial state for polling.
+
+    This replaces the generator-based generate_video for browser-independent generation.
+    Returns immediately after queueing, with job/batch IDs for polling.
+
+    Returns:
+        Tuple of (videos, preview, status, progress, job_id, batch_id, timer)
+    """
+    global active_job_id, active_batch_id
+
+    # Submit to queue using existing function logic
+    result = submit_to_queue(
+        prompt, negative_prompt, input_image, end_image, mode,
+        model_config, dit_checkpoint_path, attention_engine,
+        attention_type, nabla_P, nabla_wT, nabla_wW, nabla_wH,
+        width, height, video_duration, sample_steps,
+        guidance_weight, scheduler_scale, seed,
+        use_mixed_weights, use_int8, use_torch_compile, use_magcache,
+        enable_block_swap, offload_inactive, blocks_in_memory,
+        dtype_str, text_encoder_dtype_str, vae_dtype_str, computation_dtype_str,
+        save_path, batch_size,
+        enable_preview, preview_steps,
+        enable_vae_chunking, vae_temporal_tile_frames, vae_temporal_stride_frames,
+        vae_spatial_tile_height, vae_spatial_tile_width,
+        use_prompt_expansion, clip_prompt, save_latents,
+        enable_ultravico, ultravico_alpha, ultravico_suppress_harmonics, ultravico_beta,
+        use_sdnq, sdnq_weights_dtype, sdnq_triton_mm, sdnq_compile,
+        end_noise_schedule, end_noise_start, end_noise_end,
+        start_noise_schedule, start_noise_level,
+    )
+
+    # Parse job/batch IDs from result message
+    # Format: "Job queued: {job_id} (Batch: {batch_id})" or
+    # "Batch queued: {batch_id} ({count} jobs: {id1}, {id2}, ...)"
+    batch_id = None
+    first_job_id = None
+
+    if "Batch queued:" in result:
+        # Multiple jobs
+        match = re.search(r'Batch queued: (\S+) \(\d+ jobs: ([^)]+)\)', result)
+        if match:
+            batch_id = match.group(1)
+            job_ids = match.group(2).split(', ')
+            first_job_id = job_ids[0] if job_ids else None
+    elif "Job queued:" in result:
+        # Single job
+        match = re.search(r'Job queued: (\S+) \(Batch: (\S+)\)', result)
+        if match:
+            first_job_id = match.group(1)
+            batch_id = match.group(2)
+
+    active_job_id = first_job_id
+    active_batch_id = batch_id
+
+    # Return initial state with timer active to start polling
+    return (
+        [],  # videos (empty initially)
+        None,  # preview
+        f"Queued: {result}",  # status
+        "Starting...",  # progress
+        first_job_id or "",  # job_id for state
+        batch_id or "",  # batch_id for state
+        gr.Timer(active=True)  # timer_active - start polling
+    )
+
+
+def poll_active_job(
+    current_job_id: str,
+    current_batch_id: str,
+):
+    """
+    Poll the current job/batch for status updates.
+
+    Called by Timer component to provide live updates.
+
+    Returns:
+        Tuple of (videos, preview, status, progress, job_id, batch_id, timer)
+    """
+    global active_job_id, active_batch_id
+
+    if not current_job_id and not current_batch_id:
+        # No active job to poll
+        return [], None, "No active generation", "", "", "", gr.Timer(active=False)
+
+    queue = get_queue()
+    all_videos = []
+    current_preview = None
+    status_parts = []
+    progress_text = ""
+    timer_active = True  # Keep polling by default
+
+    # Get all jobs in the batch
+    if current_batch_id:
+        jobs = queue.get_batch_jobs(current_batch_id)
+    else:
+        job = queue.get_job(current_job_id)
+        jobs = [job] if job else []
+
+    if not jobs:
+        return [], None, "Jobs not found", "", "", "", gr.Timer(active=False)
+
+    completed_count = 0
+    running_job = None
+
+    for job in jobs:
+        if job.status == JobStatus.COMPLETED.value:
+            completed_count += 1
+            if os.path.exists(job.output_filename):
+                # Extract seed from filename for label
+                seed_match = re.search(r'_(\d+)\.mp4$', job.output_filename)
+                seed_label = f"Seed: {seed_match.group(1)}" if seed_match else ""
+                all_videos.append((job.output_filename, seed_label))
+        elif job.status == JobStatus.RUNNING.value:
+            running_job = job
+        elif job.status == JobStatus.FAILED.value:
+            status_parts.append(f"Job {job.id} failed: {job.error_message}")
+
+    total_jobs = len(jobs)
+
+    # Build status message
+    if running_job:
+        status_parts.insert(0, f"Processing {completed_count + 1}/{total_jobs}")
+        progress_text = running_job.progress_text or f"Generating: {running_job.progress:.0f}%"
+
+        # Get preview if available
+        if running_job.preview_path and os.path.exists(running_job.preview_path):
+            current_preview = running_job.preview_path
+
+        # Update active job ID to track current running job
+        active_job_id = running_job.id
+    elif completed_count == total_jobs:
+        # All jobs complete
+        status_parts.insert(0, f"All {total_jobs} generation(s) complete!")
+        progress_text = "Done"
+        timer_active = False  # Stop polling
+        active_job_id = None
+        active_batch_id = None
+    elif completed_count > 0:
+        # Some complete, waiting for next
+        pending = total_jobs - completed_count
+        status_parts.insert(0, f"Completed {completed_count}/{total_jobs}, {pending} pending")
+        progress_text = "Waiting for worker..."
+    else:
+        # All pending
+        status_parts.insert(0, f"Queued: {total_jobs} job(s) pending")
+        progress_text = "Waiting for worker..."
+
+    status_text = " | ".join(status_parts) if status_parts else "Processing..."
+
+    return (
+        all_videos,
+        current_preview,
+        status_text,
+        progress_text,
+        current_job_id,
+        current_batch_id,
+        gr.Timer(active=timer_active)
+    )
+
+
+def stop_queue_generation(current_batch_id: str) -> Tuple[str, gr.Timer]:
+    """
+    Stop the current queue-based generation by cancelling all jobs in the batch.
+
+    Returns:
+        Tuple of (status_message, timer)
+    """
+    global active_job_id, active_batch_id
+
+    if not current_batch_id:
+        return "No active batch to stop", gr.Timer(active=False)
+
+    queue = get_queue()
+
+    # Cancel all jobs in the batch (returns list of cancelled jobs)
+    cancelled_jobs = queue.cancel_batch(current_batch_id)
+
+    active_job_id = None
+    active_batch_id = None
+
+    if cancelled_jobs:
+        return f"Cancelled {len(cancelled_jobs)} job(s) in batch {current_batch_id}", gr.Timer(active=False)
+    else:
+        return f"No pending jobs to cancel in batch {current_batch_id}", gr.Timer(active=False)
+
+
 def stop_generation():
     global stop_event, current_process
     stop_event.set()
@@ -1932,6 +2185,12 @@ def create_interface():
                         progress_text = gr.Textbox(label="Progress", interactive=False, value="")
                         save_latents_checkbox = gr.Checkbox(label="Save Latents Before VAE Decode", value=False)
 
+                # Timer for polling queue status (starts inactive)
+                poll_timer = gr.Timer(value=2, active=False)
+                # State variables to track current job/batch being polled
+                current_job_id_state = gr.State("")
+                current_batch_id_state = gr.State("")
+
                 with gr.Row():
                     generate_btn = gr.Button("Generate Video", elem_classes="green-btn")
                     queue_btn = gr.Button("Add to Queue", variant="secondary")
@@ -2252,8 +2511,9 @@ def create_interface():
                     outputs=[height]
                 )
 
+                # Generate button - uses queue system with auto-polling for browser-independent generation
                 generate_btn.click(
-                    fn=generate_video,
+                    fn=generate_via_queue,
                     inputs=[
                         prompt, negative_prompt, input_image, end_image, mode, model_config, dit_checkpoint_path, attention_engine,
                         attention_type, nabla_P, nabla_wT, nabla_wW, nabla_wH,
@@ -2272,10 +2532,17 @@ def create_interface():
                         # End frame noise scheduling
                         end_noise_schedule, end_noise_start, end_noise_end, start_noise_schedule, start_noise_level
                     ],
-                    outputs=[output, preview_output, batch_progress, progress_text]
+                    outputs=[output, preview_output, batch_progress, progress_text, current_job_id_state, current_batch_id_state, poll_timer]
                 )
 
-                # Queue button - submits job to background worker
+                # Timer polls job status for live updates
+                poll_timer.tick(
+                    fn=poll_active_job,
+                    inputs=[current_job_id_state, current_batch_id_state],
+                    outputs=[output, preview_output, batch_progress, progress_text, current_job_id_state, current_batch_id_state, poll_timer]
+                )
+
+                # Queue button - submits job to background worker (same as generate but no polling)
                 queue_btn.click(
                     fn=submit_to_queue,
                     inputs=[
@@ -2299,9 +2566,11 @@ def create_interface():
                     outputs=[batch_progress]
                 )
 
+                # Stop button - cancels queue jobs and stops timer
                 stop_btn.click(
-                    fn=stop_generation,
-                    outputs=[batch_progress]
+                    fn=stop_queue_generation,
+                    inputs=[current_batch_id_state],
+                    outputs=[batch_progress, poll_timer]
                 )
 
                 stop_decode_btn.click(
@@ -2906,19 +3175,21 @@ def create_interface():
                 gr.Markdown("""
                 ## Job Queue - Browser-Independent Generation
 
-                **The Job Queue allows video generation to continue even if you close your browser.**
+                **All video generation now continues even if you close your browser!**
 
+                The "Generate Video" button now uses the queue system with automatic live updates.
                 The background worker starts automatically when you launch `python k1.py`.
 
-                ### How to Use:
-                1. Use "Add to Queue" button on the Generation tab to submit jobs
-                2. Jobs will be processed in the background even if you close this browser
-                3. Return anytime to check job status and collect completed videos
+                ### How It Works:
+                1. Click "Generate Video" - jobs are queued and progress updates automatically
+                2. If you close the browser, generation continues in the background
+                3. Return anytime to see completed videos or check progress
+                4. Use "Add to Queue" for silent queuing without live updates
 
                 ### Notes:
                 - Jobs are stored in `job_queue.json` and persist across restarts
                 - The worker processes one job at a time in FIFO order
-                - You can still use "Generate Video" for immediate (blocking) generation
+                - Use "Stop Generation" to cancel pending jobs in the current batch
                 """)
 
                 with gr.Row():
