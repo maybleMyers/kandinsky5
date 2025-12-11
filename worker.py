@@ -332,8 +332,9 @@ def main():
     parser = argparse.ArgumentParser(description="Kandinsky5 Background Worker")
     parser.add_argument("--poll-interval", type=float, default=2.0,
                        help="Interval in seconds between queue polls (default: 2.0)")
-    parser.add_argument("--queue-file", type=str, default="job_queue.json",
-                       help="Path to the job queue file (default: job_queue.json)")
+    parser.add_argument("--queue-file", type=str, default=None,
+                       help="Path to the job queue file. Auto-detects GPU-specific file "
+                            "from CUDA_VISIBLE_DEVICES if not specified.")
     args = parser.parse_args()
 
     queue = get_queue(args.queue_file)

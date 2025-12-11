@@ -1409,30 +1409,49 @@ def poll_active_job(
     )
 
 
-def stop_queue_generation(current_batch_id: str) -> Tuple[str, gr.Timer]:
+def stop_queue_generation(current_batch_id: str) -> Tuple[List, None, str, str, str, str, gr.Timer]:
     """
     Stop the current queue-based generation by cancelling all jobs in the batch.
 
     Returns:
-        Tuple of (status_message, timer)
+        Tuple of (videos, preview, status_message, progress, job_id, batch_id, timer)
+        - Resets all state variables to prevent frontend desync
     """
     global active_job_id, active_batch_id
 
     if not current_batch_id:
-        return "No active batch to stop", gr.Timer(active=False)
+        # Reset all state even if no batch - prevents stale state
+        return [], None, "No active batch to stop", "", "", "", gr.Timer(active=False)
 
     queue = get_queue()
 
     # Cancel all jobs in the batch (returns list of cancelled jobs)
     cancelled_jobs = queue.cancel_batch(current_batch_id)
 
+    # Also signal any running process to stop
+    global stop_event, current_process
+    stop_event.set()
+    if current_process is not None:
+        try:
+            current_process.terminate()
+            try:
+                current_process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                current_process.kill()
+                current_process.wait()
+        except Exception as e:
+            print(f"Error stopping process: {e}")
+
     active_job_id = None
     active_batch_id = None
 
     if cancelled_jobs:
-        return f"Cancelled {len(cancelled_jobs)} job(s) in batch {current_batch_id}", gr.Timer(active=False)
+        status = f"Cancelled {len(cancelled_jobs)} job(s) in batch {current_batch_id}"
     else:
-        return f"No pending jobs to cancel in batch {current_batch_id}", gr.Timer(active=False)
+        status = f"No pending jobs to cancel in batch {current_batch_id}"
+
+    # Return full state reset to prevent frontend desync
+    return [], None, status, "Stopped", "", "", gr.Timer(active=False)
 
 
 def stop_generation():
@@ -2594,11 +2613,11 @@ def create_interface():
                     outputs=[batch_progress]
                 )
 
-                # Stop button - cancels queue jobs and stops timer
+                # Stop button - cancels queue jobs, stops timer, and resets all state
                 stop_btn.click(
                     fn=stop_queue_generation,
                     inputs=[current_batch_id_state],
-                    outputs=[batch_progress, poll_timer]
+                    outputs=[output, preview_output, batch_progress, progress_text, current_job_id_state, current_batch_id_state, poll_timer]
                 )
 
                 stop_decode_btn.click(
