@@ -1,4 +1,5 @@
 import os
+import time
 from typing import Union
 import torch
 from torch.distributed.device_mesh import init_device_mesh
@@ -25,21 +26,30 @@ from safetensors import safe_open
 torch._dynamo.config.suppress_errors = True
 
 
-def load_state_dict_mmap(checkpoint_path: str, device: str = "cpu") -> dict:
+def load_state_dict_mmap(checkpoint_path: str, device: str = "cpu", show_progress: bool = True) -> dict:
     """
     Load safetensors checkpoint using memory-mapping for reduced memory usage.
 
     Args:
         checkpoint_path: Path to .safetensors file
         device: Device to load tensors to ("cpu" or "cuda:X")
+        show_progress: Whether to print progress
 
     Returns:
         State dict with tensors loaded via mmap
     """
     state_dict = {}
+    start = time.perf_counter()
     with safe_open(checkpoint_path, framework="pt", device=device) as f:
-        for key in f.keys():
+        keys = list(f.keys())
+        total = len(keys)
+        for i, key in enumerate(keys):
             state_dict[key] = f.get_tensor(key)
+            if show_progress and (i + 1) % 100 == 0:
+                print(f"\r  Loading weights: {i+1}/{total} tensors...", end="", flush=True)
+        if show_progress:
+            elapsed = time.perf_counter() - start
+            print(f"\r  Loading weights: {total}/{total} tensors in {elapsed:.1f}s")
     return state_dict
 
 
@@ -873,6 +883,8 @@ def get_I2V_pipeline_with_block_swap(
 
     # Build text embedder
     # For block swap, always keep text encoder on CPU initially to save VRAM
+    print("[TIMING] Loading text embedder...", flush=True)
+    t0 = time.perf_counter()
     conf.model.text_embedder.qwen.mode = "i2v"
     text_embedder = get_text_embedder(
         conf.model.text_embedder,
@@ -884,9 +896,12 @@ def get_I2V_pipeline_with_block_swap(
     # Move to GPU only if not using offload or block swap
     if not offload and not enable_block_swap:
         text_embedder = text_embedder.to(device=device_map["text_embedder"])
+    print(f"[TIMING] Text embedder loaded in {time.perf_counter() - t0:.1f}s", flush=True)
 
     # Build VAE
     # For block swap, VAE is built on CPU by default
+    print("[TIMING] Loading VAE...", flush=True)
+    t0 = time.perf_counter()
     vae = build_vae(
         conf.model.vae,
         dtype=vae_dtype,
@@ -899,9 +914,11 @@ def get_I2V_pipeline_with_block_swap(
     # Move to GPU only if not using offload or block swap
     if not offload and not enable_block_swap:
         vae = vae.to(device=device_map["vae"], dtype=vae_dtype)
+    print(f"[TIMING] VAE loaded in {time.perf_counter() - t0:.1f}s", flush=True)
 
     # Build DiT with block swapping
-    print(f"Building DiT with block swapping: enabled={enable_block_swap}, blocks_in_memory={blocks_in_memory}")
+    print(f"[TIMING] Creating DiT architecture (this may take a while for large models)...", flush=True)
+    t0 = time.perf_counter()
 
     # Add INT8/SDNQ configuration to dit_params
     dit_params_dict = OmegaConf.to_container(conf.model.dit_params, resolve=True)
@@ -915,6 +932,7 @@ def get_I2V_pipeline_with_block_swap(
         blocks_in_memory=blocks_in_memory,
         enable_block_swap=enable_block_swap
     )
+    print(f"[TIMING] DiT architecture created in {time.perf_counter() - t0:.1f}s", flush=True)
 
     if magcache:
         mag_ratios = conf.magcache.mag_ratios
@@ -926,16 +944,24 @@ def get_I2V_pipeline_with_block_swap(
 
     # Use checkpoint_path_override if provided, otherwise use config value
     checkpoint_path = checkpoint_path_override if checkpoint_path_override else conf.model.checkpoint_path
-    print(f"Loading DiT weights from {checkpoint_path}")
+    print(f"[TIMING] Loading DiT weights from {checkpoint_path}", flush=True)
+    t0 = time.perf_counter()
     state_dict = load_state_dict_mmap(checkpoint_path)
+    print(f"[TIMING] Weights file read in {time.perf_counter() - t0:.1f}s", flush=True)
+
     # Convert state dict to specified dtype (unless using mixed weights or SDNQ)
     if use_mixed_weights:
         # Preserve original weight dtypes for mixed precision
         print("Using mixed weights mode - preserving original weight dtypes (fp32 for critical layers)")
     elif not use_sdnq:
+        print("[TIMING] Converting dtype...", flush=True)
+        t0 = time.perf_counter()
         state_dict = {k: v.to(computation_dtype) if v.dtype in [torch.float32, torch.float16, torch.bfloat16] else v
                       for k, v in state_dict.items()}
+        print(f"[TIMING] Dtype conversion done in {time.perf_counter() - t0:.1f}s", flush=True)
 
+    print("[TIMING] Applying state_dict to model...", flush=True)
+    t0 = time.perf_counter()
     if use_sdnq:
         # SDNQ quantization - load weights first, then quantize
         if SDNQ_AVAILABLE:
@@ -945,6 +971,7 @@ def get_I2V_pipeline_with_block_swap(
 
             # Load weights first
             dit.load_state_dict(state_dict, assign=True)
+            print(f"[TIMING] state_dict applied in {time.perf_counter() - t0:.1f}s", flush=True)
 
             # For block swap, quantization on CPU, keep on CPU
             target_device = device_map["dit"] if isinstance(device_map["dit"], torch.device) else torch.device(device_map["dit"])
@@ -962,6 +989,7 @@ def get_I2V_pipeline_with_block_swap(
         else:
             print("WARNING: SDNQ requested but not available. Falling back to standard precision.")
             dit.load_state_dict(state_dict, assign=True)
+            print(f"[TIMING] state_dict applied in {time.perf_counter() - t0:.1f}s", flush=True)
             if not offload and not enable_block_swap:
                 dit = dit.to(device_map["dit"], dtype=computation_dtype)
     elif use_fp8:
@@ -976,6 +1004,7 @@ def get_I2V_pipeline_with_block_swap(
             move_to_device=False,  # Keep on CPU for block swap
             use_scaled_mm=True
         )
+        print(f"[TIMING] FP8 optimization done in {time.perf_counter() - t0:.1f}s", flush=True)
         # Keep on CPU for block swap, move to GPU only if not using block swap or offload
         if not offload and not enable_block_swap:
             dit = dit.to(target_device)
@@ -988,6 +1017,7 @@ def get_I2V_pipeline_with_block_swap(
             print("INT8 quantization enabled - converting FP32 weights to INT8 during loading (this may take a moment)...")
         # Use strict=False to allow custom _load_from_state_dict to handle weight conversion
         dit.load_state_dict(state_dict, assign=True, strict=False)
+        print(f"[TIMING] state_dict applied in {time.perf_counter() - t0:.1f}s", flush=True)
         # Keep DiT on CPU when using offload OR block swap
         if not offload and not enable_block_swap:
             if use_mixed_weights:
@@ -996,6 +1026,7 @@ def get_I2V_pipeline_with_block_swap(
                 dit = dit.to(device_map["dit"], dtype=computation_dtype)
     else:
         dit.load_state_dict(state_dict, assign=True)
+        print(f"[TIMING] state_dict applied in {time.perf_counter() - t0:.1f}s", flush=True)
         # Keep DiT on CPU when using offload OR block swap
         # For block swap, DiT will be loaded on-demand during generation
         if not offload and not enable_block_swap:
@@ -1220,6 +1251,7 @@ def get_T2V_pipeline_with_block_swap(
         else:
             print("WARNING: SDNQ requested but not available. Falling back to standard precision.")
             dit.load_state_dict(state_dict, assign=True)
+            print(f"[TIMING] state_dict applied in {time.perf_counter() - t0:.1f}s", flush=True)
             if not offload and not enable_block_swap:
                 dit = dit.to(device_map["dit"], dtype=computation_dtype)
     elif use_fp8:
@@ -1234,6 +1266,7 @@ def get_T2V_pipeline_with_block_swap(
             move_to_device=False,  # Keep on CPU for block swap
             use_scaled_mm=True
         )
+        print(f"[TIMING] FP8 optimization done in {time.perf_counter() - t0:.1f}s", flush=True)
         # Keep on CPU for block swap, move to GPU only if not using block swap or offload
         if not offload and not enable_block_swap:
             dit = dit.to(target_device)
@@ -1246,6 +1279,7 @@ def get_T2V_pipeline_with_block_swap(
             print("INT8 quantization enabled - converting FP32 weights to INT8 during loading (this may take a moment)...")
         # Use strict=False to allow custom _load_from_state_dict to handle weight conversion
         dit.load_state_dict(state_dict, assign=True, strict=False)
+        print(f"[TIMING] state_dict applied in {time.perf_counter() - t0:.1f}s", flush=True)
         # Keep DiT on CPU when using offload OR block swap
         if not offload and not enable_block_swap:
             if use_mixed_weights:
@@ -1254,6 +1288,7 @@ def get_T2V_pipeline_with_block_swap(
                 dit = dit.to(device_map["dit"], dtype=computation_dtype)
     else:
         dit.load_state_dict(state_dict, assign=True)
+        print(f"[TIMING] state_dict applied in {time.perf_counter() - t0:.1f}s", flush=True)
         # Keep DiT on CPU when using offload OR block swap
         # For block swap, DiT will be loaded on-demand during generation
         if not offload and not enable_block_swap:

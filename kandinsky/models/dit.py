@@ -180,8 +180,12 @@ class DiffusionTransformer3D(nn.Module):
         )
 
         self.visual_rope_embeddings = RoPE3D(axes_dims)
-        self.visual_transformer_blocks = nn.ModuleList(
-            [
+        # Create visual transformer blocks with progress indicator
+        visual_blocks = []
+        for i in range(num_visual_blocks):
+            if num_visual_blocks > 10 and (i + 1) % 10 == 0:
+                print(f"\r  Creating visual blocks: {i+1}/{num_visual_blocks}...", end="", flush=True)
+            visual_blocks.append(
                 TransformerDecoderBlock(
                     model_dim, time_dim, ff_dim, head_dim, attention_engine,
                     use_int8=use_int8,
@@ -189,9 +193,10 @@ class DiffusionTransformer3D(nn.Module):
                     dtype=dtype,
                     use_sdnq=use_sdnq
                 )
-                for _ in range(num_visual_blocks)
-            ]
-        )
+            )
+        if num_visual_blocks > 10:
+            print(f"\r  Creating visual blocks: {num_visual_blocks}/{num_visual_blocks} done")
+        self.visual_transformer_blocks = nn.ModuleList(visual_blocks)
 
         self.out_layer = OutLayer(model_dim, time_dim, out_visual_dim, patch_size)
 
