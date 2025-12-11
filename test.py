@@ -1234,7 +1234,7 @@ if __name__ == "__main__":
             print(f">>> Saved denoised video to {args.output_filename}")
 
     elif is_i2v:
-        if args.image is not None and args.end_image is not None:
+        if args.image is not None and args.end_image is not None and args.video is None:
             # ============================================================
             # IMAGE-TO-IMAGE-VIDEO MODE
             # Generate video transitioning from start image to end image
