@@ -506,32 +506,42 @@ class JobQueue:
 
 # Global queue instance for easy access
 _queue_instance = None
+_queue_port = None
+
+def set_queue_port(port: int):
+    """Set the port to use for queue file naming. Must be called before get_queue()."""
+    global _queue_port
+    _queue_port = port
 
 def get_queue(queue_file: str = None) -> JobQueue:
     """
     Get the global queue instance.
 
-    Automatically uses GPU-specific queue files when CUDA_VISIBLE_DEVICES is set.
-    This allows running multiple instances on different GPUs without conflicts.
+    Uses port-based queue files for multi-instance separation.
+    Falls back to GPU-specific files if port not set.
 
     Examples:
-        CUDA_VISIBLE_DEVICES=0 -> job_queue_gpu0.json
-        CUDA_VISIBLE_DEVICES=1 -> job_queue_gpu1.json
-        CUDA_VISIBLE_DEVICES=0,1 -> job_queue_gpu0_1.json
+        Port 7860 -> job_queue_7860.json
+        Port 7861 -> job_queue_7861.json
+        CUDA_VISIBLE_DEVICES=0 (no port) -> job_queue_gpu0.json
         Not set -> job_queue.json
     """
-    global _queue_instance
+    global _queue_instance, _queue_port
     if _queue_instance is None:
         if queue_file is None:
-            # Auto-detect GPU-specific queue file
-            cuda_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "")
-            if cuda_devices:
-                # Replace commas with underscores for multi-GPU configs
-                gpu_suffix = cuda_devices.replace(",", "_")
-                queue_file = f"job_queue_gpu{gpu_suffix}.json"
-                print(f"[job_queue] Using GPU-specific queue: {queue_file}")
+            if _queue_port is not None:
+                # Use port-based queue file
+                queue_file = f"job_queue_{_queue_port}.json"
+                print(f"[job_queue] Using port-specific queue: {queue_file}")
             else:
-                queue_file = "job_queue.json"
+                # Fallback: auto-detect GPU-specific queue file
+                cuda_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+                if cuda_devices:
+                    gpu_suffix = cuda_devices.replace(",", "_")
+                    queue_file = f"job_queue_gpu{gpu_suffix}.json"
+                    print(f"[job_queue] Using GPU-specific queue: {queue_file}")
+                else:
+                    queue_file = "job_queue.json"
         _queue_instance = JobQueue(queue_file)
     return _queue_instance
 

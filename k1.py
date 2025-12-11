@@ -1323,32 +1323,65 @@ def poll_active_job(
     Poll the current job/batch for status updates.
 
     Called by Timer component to provide live updates.
+    Falls back to finding the latest active job if state is stale.
 
     Returns:
         Tuple of (videos, preview, status, progress, job_id, batch_id, timer)
     """
     global active_job_id, active_batch_id
 
-    if not current_job_id and not current_batch_id:
-        # No active job to poll
+    queue = get_queue()
+
+    # First, try to find jobs using the passed IDs
+    jobs = []
+    batch_id_to_use = current_batch_id
+    job_id_to_use = current_job_id
+
+    if current_batch_id:
+        jobs = queue.get_batch_jobs(current_batch_id)
+
+    if not jobs and current_job_id:
+        job = queue.get_job(current_job_id)
+        if job:
+            jobs = [job]
+            batch_id_to_use = job.batch_id or ""
+
+    # Fallback: find the latest running or pending job if state is stale
+    if not jobs:
+        running_jobs = queue.get_running_jobs()
+        if running_jobs:
+            # Use the most recent running job
+            running_jobs.sort(key=lambda x: x.started_at or x.created_at, reverse=True)
+            latest_job = running_jobs[0]
+            batch_id_to_use = latest_job.batch_id or ""
+            job_id_to_use = latest_job.id
+            if batch_id_to_use:
+                jobs = queue.get_batch_jobs(batch_id_to_use)
+            else:
+                jobs = [latest_job]
+        else:
+            # Check for pending jobs
+            pending_jobs = queue.get_jobs_by_status(JobStatus.PENDING, limit=10)
+            if pending_jobs:
+                # Use the oldest pending job (FIFO)
+                pending_jobs.sort(key=lambda x: x.created_at)
+                latest_job = pending_jobs[0]
+                batch_id_to_use = latest_job.batch_id or ""
+                job_id_to_use = latest_job.id
+                if batch_id_to_use:
+                    jobs = queue.get_batch_jobs(batch_id_to_use)
+                else:
+                    jobs = [latest_job]
+
+    if not jobs:
+        # No active jobs at all
         return [], None, "No active generation", "", "", "", gr.Timer(active=False)
 
-    queue = get_queue()
     all_videos = []
     current_preview = None
     status_parts = []
     progress_text = ""
     timer_active = True  # Keep polling by default
-
-    # Get all jobs in the batch
-    if current_batch_id:
-        jobs = queue.get_batch_jobs(current_batch_id)
-    else:
-        job = queue.get_job(current_job_id)
-        jobs = [job] if job else []
-
-    if not jobs:
-        return [], None, "Jobs not found", "", "", "", gr.Timer(active=False)
 
     completed_count = 0
     running_job = None
@@ -1398,13 +1431,14 @@ def poll_active_job(
 
     status_text = " | ".join(status_parts) if status_parts else "Processing..."
 
+    # Return the actual job/batch IDs being tracked (may differ from input if state was stale)
     return (
         all_videos,
         current_preview,
         status_text,
         progress_text,
-        current_job_id,
-        current_batch_id,
+        job_id_to_use,
+        batch_id_to_use,
         gr.Timer(active=timer_active)
     )
 
@@ -2242,6 +2276,7 @@ def create_interface():
                     generate_btn = gr.Button("Generate Video", elem_classes="green-btn")
                     queue_btn = gr.Button("Add to Queue", variant="secondary")
                     stop_btn = gr.Button("Stop Generation", variant="stop")
+                    refresh_btn = gr.Button("↻ Refresh", variant="secondary", scale=0)
 
                 with gr.Row():
                     with gr.Column():
@@ -2628,6 +2663,13 @@ def create_interface():
                 stop_save_btn.click(
                     fn=stop_and_save,
                     outputs=[batch_progress]
+                )
+
+                # Manual refresh button - calls poll_active_job and reactivates timer
+                refresh_btn.click(
+                    fn=poll_active_job,
+                    inputs=[current_job_id_state, current_batch_id_state],
+                    outputs=[output, preview_output, batch_progress, progress_text, current_job_id_state, current_batch_id_state, poll_timer]
                 )
 
                 resume_btn.click(
@@ -3357,10 +3399,45 @@ def start_background_worker():
     return worker_thread
 
 
+def find_available_port(start_port: int = 7860, max_attempts: int = 100) -> int:
+    """Find the first available port starting from start_port."""
+    import socket
+    for port in range(start_port, start_port + max_attempts):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(('', port))
+                return port
+        except OSError:
+            continue
+    raise RuntimeError(f"Could not find available port in range {start_port}-{start_port + max_attempts}")
+
+
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Kandinsky-5 Video Generation GUI")
+    parser.add_argument("--port", type=int, default=None,
+                        help="Server port. Auto-detects available port if not specified.")
+    parser.add_argument("--share", action="store_true",
+                        help="Create a public Gradio share link")
+    args = parser.parse_args()
+
+    # Determine port (auto-detect if not specified)
+    if args.port is not None:
+        port = args.port
+    else:
+        port = find_available_port(7860)
+
+    # Set port for queue file naming BEFORE initializing queue
+    from job_queue import set_queue_port
+    set_queue_port(port)
+
+    cuda_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "not set")
+    print(f"[k1.py] Starting on port {port}, CUDA_VISIBLE_DEVICES={cuda_devices}")
+
     # Start background worker for queue processing
     worker_thread = start_background_worker()
 
     demo = create_interface()
-    demo.launch(server_name="0.0.0.0", share=False)
+    demo.launch(server_name="0.0.0.0", server_port=port, share=args.share)
     #mod
