@@ -16,6 +16,40 @@ def _early_parse_no_compile():
             return True
     return False
 
+# Early parse SDNQ flags to enable optimal int8 performance BEFORE importing SDNQ
+def _early_parse_sdnq_flags():
+    """Parse SDNQ-related flags early to set env vars before module import.
+
+    CRITICAL: SDNQ module evaluates these environment variables at import time.
+    Setting them after import has no effect.
+    """
+    use_sdnq = '--use_sdnq' in sys.argv
+    no_triton_mm = '--no_sdnq_triton_mm' in sys.argv
+    no_compile = '--no_sdnq_compile' in sys.argv
+
+    if use_sdnq:
+        # Handle Triton int8 matmul kernel setting
+        if no_triton_mm:
+            os.environ["SDNQ_USE_TRITON_MM"] = "0"
+            print("SDNQ: Using torch._int_mm (Triton MM disabled)")
+        elif os.environ.get("SDNQ_USE_TRITON_MM") is None:
+            # Enable Triton int8 matmul kernel for optimal tensor core utilization on CUDA
+            # Default SDNQ only enables Triton MM for RDNA2/ZLUDA, but it's faster on 4090/5090 too
+            os.environ["SDNQ_USE_TRITON_MM"] = "1"
+            print("SDNQ: Enabling Triton int8 matmul kernel for optimal CUDA performance")
+
+        # Handle torch.compile setting
+        if no_compile:
+            os.environ["SDNQ_USE_TORCH_COMPILE"] = "0"
+            print("SDNQ: torch.compile disabled for faster startup")
+        elif os.environ.get("SDNQ_USE_TORCH_COMPILE") is None:
+            # Enable torch.compile for SDNQ dequantization (if Triton is available)
+            os.environ["SDNQ_USE_TORCH_COMPILE"] = "1"
+            print("SDNQ: Enabling torch.compile for dequantization kernels")
+
+# Must be called before any SDNQ-related imports
+_early_parse_sdnq_flags()
+
 # Set global compile flag before importing kandinsky modules
 import kandinsky.models.compile_config as compile_config
 _no_compile = _early_parse_no_compile()
@@ -29,6 +63,7 @@ from kandinsky.i2v_pipeline import (
     get_conditioning_frames_from_video,
     get_conditioning_frames_from_two_videos,
     get_conditioning_latents_from_two_images,
+    get_conditioning_video_and_image,
     encode_video_to_latents,
     Kandinsky5DenoisePipeline
 )
@@ -390,18 +425,69 @@ def parse_args():
         help="Override DiT model checkpoint path from config. Provide path to your .safetensors file."
     )
 
-    # INT8 quantization configuration
+    # INT8 quantization configuration (legacy)
     parser.add_argument(
         "--use_int8",
         action='store_true',
         default=False,
-        help="Use INT8 quantization for linear layers (40-60%% memory reduction, 1.5-2x faster inference)"
+        help="Use legacy INT8 quantization for linear layers. Consider --use_sdnq for better performance."
     )
     parser.add_argument(
         "--int8_block_size",
         type=int,
         default=128,
-        help="Block size for INT8 quantization (must be 128 for Triton kernels, default: 128)"
+        help="Block size for legacy INT8 quantization (must be 128 for Triton kernels, default: 128)"
+    )
+
+    # SDNQ quantization configuration (recommended)
+    parser.add_argument(
+        "--use_sdnq",
+        action='store_true',
+        default=False,
+        help="Use SDNQ quantization with auto-tuned Triton kernels (20-40%% faster than legacy INT8)"
+    )
+    parser.add_argument(
+        "--sdnq_weights_dtype",
+        type=str,
+        default="int8",
+        choices=["int8", "fp8", "int4"],
+        help="SDNQ weight storage dtype (default: int8). int8=best balance, fp8=H100+, int4=experimental"
+    )
+    parser.add_argument(
+        "--sdnq_use_quantized_matmul",
+        action='store_true',
+        default=True,
+        help="Use accelerated quantized matmul (default: True). Disable for debugging."
+    )
+    parser.add_argument(
+        "--no_sdnq_quantized_matmul",
+        action='store_true',
+        default=False,
+        help="Disable SDNQ quantized matmul (forces dequantize+fp matmul path)"
+    )
+    parser.add_argument(
+        "--sdnq_triton_mm",
+        action='store_true',
+        default=True,
+        help="Use Triton int8 matmul kernel (default: True for CUDA). Faster on 4090/5090."
+    )
+    parser.add_argument(
+        "--no_sdnq_triton_mm",
+        action='store_true',
+        default=False,
+        help="Disable Triton int8 matmul kernel (fallback to torch._int_mm)"
+    )
+    parser.add_argument(
+        "--sdnq_compile",
+        action='store_true',
+        default=True,
+        help="Enable torch.compile for SDNQ kernels (default: True). Improves performance after warmup."
+    )
+    parser.add_argument(
+        "--no_sdnq_compile",
+        action='store_true',
+        default=False,
+        help="Disable torch.compile for SDNQ kernels (faster startup, slower inference)"
     )
 
     # NABLA sparse attention configuration
@@ -481,6 +567,40 @@ def parse_args():
         type=float,
         default=55.0,
         help="Norm threshold for APG guidance clipping (default: 55.0)"
+    )
+
+    # Noise scheduling for image-to-image-video and video join modes
+    parser.add_argument(
+        "--end_noise_schedule",
+        type=str,
+        default="progressive",
+        choices=["progressive", "fixed", "symmetric"],
+        help="Noise schedule for end/target frames. 'progressive': noise decreases from end_noise_start to end_noise_end. 'fixed': constant noise level. 'symmetric': match timestep like middle region."
+    )
+    parser.add_argument(
+        "--end_noise_start",
+        type=float,
+        default=1.0,
+        help="Initial noise level for end frames (1.0 = full noise, 0.0 = clean). Default: 1.0"
+    )
+    parser.add_argument(
+        "--end_noise_end",
+        type=float,
+        default=0.0,
+        help="Final noise level for end frames (only for progressive schedule). Default: 0.0"
+    )
+    parser.add_argument(
+        "--start_noise_schedule",
+        type=str,
+        default="fixed",
+        choices=["fixed", "progressive"],
+        help="Noise schedule for start frames. Usually 'fixed' with level 0.0 for clean anchoring."
+    )
+    parser.add_argument(
+        "--start_noise_level",
+        type=float,
+        default=0.0,
+        help="Noise level for start frames (0.0 = clean anchoring). Default: 0.0"
     )
 
     # VAE temporal chunking configuration
@@ -601,6 +721,19 @@ if __name__ == "__main__":
     use_fp8_vae = args.vae_dtype == "fp8_scaled" if args.vae_dtype else use_fp8
     use_fp8_computation = args.computation_dtype == "fp8_scaled" if args.computation_dtype else use_fp8
 
+    # SDNQ quantization settings
+    use_sdnq = args.use_sdnq
+    sdnq_weights_dtype = args.sdnq_weights_dtype
+    sdnq_use_quantized_matmul = args.sdnq_use_quantized_matmul and not args.no_sdnq_quantized_matmul
+
+    # If SDNQ is enabled, disable legacy INT8 and FP8 (they are mutually exclusive)
+    if use_sdnq:
+        if args.use_int8:
+            print("Note: --use_sdnq takes priority over --use_int8. Legacy INT8 disabled.")
+        if use_fp8_computation:
+            print("Note: --use_sdnq takes priority over fp8_scaled. Legacy FP8 disabled.")
+        use_fp8_computation = False
+
     model_dtype = dtype_map[args.dtype]
 
     # Set individual component dtypes (fall back to model_dtype if not specified)
@@ -691,6 +824,9 @@ if __name__ == "__main__":
                 use_int8=args.use_int8,
                 int8_block_size=args.int8_block_size,
                 use_fp8=use_fp8_computation,
+                use_sdnq=use_sdnq,
+                sdnq_weights_dtype=sdnq_weights_dtype,
+                sdnq_use_quantized_matmul=sdnq_use_quantized_matmul,
                 vae_temporal_tile_frames=args.vae_temporal_tile_frames,
                 vae_temporal_stride_frames=args.vae_temporal_stride_frames,
                 vae_spatial_tile_height=args.vae_spatial_tile_height,
@@ -716,6 +852,9 @@ if __name__ == "__main__":
                 use_int8=args.use_int8,
                 int8_block_size=args.int8_block_size,
                 use_fp8=use_fp8_computation,
+                use_sdnq=use_sdnq,
+                sdnq_weights_dtype=sdnq_weights_dtype,
+                sdnq_use_quantized_matmul=sdnq_use_quantized_matmul,
                 vae_temporal_tile_frames=args.vae_temporal_tile_frames,
                 vae_temporal_stride_frames=args.vae_temporal_stride_frames,
                 vae_spatial_tile_height=args.vae_spatial_tile_height,
@@ -745,6 +884,9 @@ if __name__ == "__main__":
                 use_int8=args.use_int8,
                 int8_block_size=args.int8_block_size,
                 use_fp8=use_fp8_computation,
+                use_sdnq=use_sdnq,
+                sdnq_weights_dtype=sdnq_weights_dtype,
+                sdnq_use_quantized_matmul=sdnq_use_quantized_matmul,
                 vae_temporal_tile_frames=args.vae_temporal_tile_frames,
                 vae_temporal_stride_frames=args.vae_temporal_stride_frames,
                 vae_spatial_tile_height=args.vae_spatial_tile_height,
@@ -770,6 +912,9 @@ if __name__ == "__main__":
                 use_int8=args.use_int8,
                 int8_block_size=args.int8_block_size,
                 use_fp8=use_fp8_computation,
+                use_sdnq=use_sdnq,
+                sdnq_weights_dtype=sdnq_weights_dtype,
+                sdnq_use_quantized_matmul=sdnq_use_quantized_matmul,
                 vae_temporal_tile_frames=args.vae_temporal_tile_frames,
                 vae_temporal_stride_frames=args.vae_temporal_stride_frames,
                 vae_spatial_tile_height=args.vae_spatial_tile_height,
@@ -1089,7 +1234,7 @@ if __name__ == "__main__":
             print(f">>> Saved denoised video to {args.output_filename}")
 
     elif is_i2v:
-        if args.image is not None and args.end_image is not None:
+        if args.image is not None and args.end_image is not None and args.video is None:
             # ============================================================
             # IMAGE-TO-IMAGE-VIDEO MODE
             # Generate video transitioning from start image to end image
@@ -1211,6 +1356,12 @@ if __name__ == "__main__":
                 use_apg=args.use_apg,
                 apg_momentum=args.apg_momentum,
                 apg_norm_threshold=args.apg_norm_threshold,
+                # Noise scheduling for end frames
+                end_noise_schedule=args.end_noise_schedule,
+                end_noise_start=args.end_noise_start,
+                end_noise_end=args.end_noise_end,
+                start_noise_schedule=args.start_noise_schedule,
+                start_noise_level=args.start_noise_level,
             )
 
             # Save output video directly (no concatenation needed unlike video join mode)
@@ -1337,6 +1488,12 @@ if __name__ == "__main__":
                 use_apg=args.use_apg,
                 apg_momentum=args.apg_momentum,
                 apg_norm_threshold=args.apg_norm_threshold,
+                # Noise scheduling for end frames
+                end_noise_schedule=args.end_noise_schedule,
+                end_noise_start=args.end_noise_start,
+                end_noise_end=args.end_noise_end,
+                start_noise_schedule=args.start_noise_schedule,
+                start_noise_level=args.start_noise_level,
             )
 
             # Concatenate: video1 + generated middle + video2
@@ -1443,6 +1600,177 @@ if __name__ == "__main__":
                     options={"crf": "5"},
                 )
                 print(f">>> Saved joined video to {args.output_filename}")
+
+        elif args.video is not None and args.end_image is not None:
+            # Video + End Image mode - create transition from video to ending image
+            print(f">>> VIDEO + END IMAGE MODE")
+            print(f">>> Input video: {args.video}")
+            print(f">>> End image: {args.end_image}")
+            print(f">>> Conditioning frames from video: {args.num_cond_frames}")
+
+            alignment = 128 if args.attention_type == "nabla" else 32
+
+            # Load VAE for encoding conditioning frames
+            force_offload = hasattr(pipe.dit, 'enable_block_swap') and pipe.dit.enable_block_swap
+            if pipe.offload or force_offload:
+                pipe.vae = pipe.vae.to(pipe.device_map["vae"], non_blocking=True)
+
+            # Extract and encode conditioning frames from video and end image
+            start_cond_latents, end_cond_latents, scale_factor = get_conditioning_video_and_image(
+                args.video,
+                args.end_image,
+                args.num_cond_frames,
+                pipe.vae,
+                pipe.device_map["vae"],
+                alignment=alignment
+            )
+
+            # Offload VAE after encoding
+            if pipe.offload or force_offload:
+                pipe.vae = pipe.vae.to("cpu", non_blocking=True)
+                torch.cuda.empty_cache()
+
+            height, width = start_cond_latents.shape[1:3]
+            total_frames = 1 if args.video_duration == 0 else args.video_duration * 24 // 4 + 1
+            shape = (1, total_frames, height, width, 16)
+
+            print(f">>> Start conditioning latents shape: {start_cond_latents.shape}")
+            print(f">>> End conditioning latents shape: {end_cond_latents.shape}")
+            print(f">>> Total frames (latent): {total_frames}")
+            print(f">>> Output shape: {shape}")
+
+            # Create previewer for Video + End Image mode
+            previewer = None
+            num_steps = args.sample_steps if args.sample_steps else pipe.num_steps
+            if LatentPreviewer is not None and args.preview is not None and args.preview > 0:
+                print(f"\n>>> Video+EndImage: Initializing previewer with preview={args.preview}")
+                try:
+                    g_temp = torch.Generator(device=pipe.device_map["dit"])
+                    g_temp.manual_seed(args.seed)
+                    initial_latent = torch.randn(shape[0] * total_frames, shape[2], shape[3], shape[4],
+                                                device=pipe.device_map["dit"], generator=g_temp)
+                    initial_latent = initial_latent.permute(3, 0, 1, 2)
+
+                    timesteps = torch.linspace(1, 0, num_steps + 1, device=pipe.device_map["dit"])
+                    timesteps = args.scheduler_scale * timesteps / (1 + (args.scheduler_scale - 1) * timesteps)
+                    timesteps = timesteps[:-1] * 1000
+
+                    class Args:
+                        def __init__(self, save_path, fps):
+                            self.save_path = save_path
+                            self.fps = fps
+
+                    args_obj = Args(
+                        save_path=os.path.dirname(args.output_filename) if args.output_filename else './',
+                        fps=24
+                    )
+
+                    previewer = LatentPreviewer(
+                        args=args_obj,
+                        original_latents=initial_latent,
+                        timesteps=timesteps,
+                        device=pipe.device_map["dit"],
+                        dtype=torch.bfloat16,
+                        model_type="hunyuan"
+                    )
+                    print(f">>> Video+EndImage: Previewer initialized successfully")
+                except Exception as e:
+                    print(f">>> Video+EndImage: Failed to initialize previewer: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    previewer = None
+
+            # Generate video using dual conditioning (video start + image end)
+            x = generate_sample_v2v_join(
+                shape,
+                args.prompt,
+                pipe.dit,
+                pipe.vae,
+                pipe.conf,
+                text_embedder=pipe.text_embedder,
+                start_cond_latents=start_cond_latents,
+                end_cond_latents=end_cond_latents,
+                num_steps=num_steps,
+                guidance_weight=args.guidance_weight if args.guidance_weight else pipe.guidance_weight,
+                scheduler_scale=args.scheduler_scale,
+                negative_caption=args.negative_prompt,
+                clip_prompt=args.clip_prompt,
+                seed=args.seed,
+                device=pipe.device_map["dit"],
+                vae_device=pipe.device_map["vae"],
+                progress=True,
+                offload=pipe.offload,
+                force_offload=force_offload,
+                previewer=previewer,
+                preview_interval=args.preview,
+                preview_suffix=args.preview_suffix,
+                stop_check=check_stop_signals,
+                checkpoint_path=checkpoint_file,
+                save_latents=args.save_latents,
+                use_apg=args.use_apg,
+                apg_momentum=args.apg_momentum,
+                apg_norm_threshold=args.apg_norm_threshold,
+                # Noise scheduling for end frames
+                end_noise_schedule=args.end_noise_schedule,
+                end_noise_start=args.end_noise_start,
+                end_noise_end=args.end_noise_end,
+                start_noise_schedule=args.start_noise_schedule,
+                start_noise_level=args.start_noise_level,
+            )
+
+            # Concatenate input video with generated frames
+            if x is not None:
+                import torchvision
+                import av
+
+                # Load original input video frames
+                print(f">>> Loading input video for concatenation: {args.video}")
+                container = av.open(args.video)
+                stream = container.streams.video[0]
+                input_frames = []
+                for frame in container.decode(video=0):
+                    input_frames.append(frame.to_ndarray(format='rgb24'))
+                container.close()
+
+                input_video_tensor = torch.from_numpy(np.stack(input_frames)).float()
+                print(f">>> Input video: {input_video_tensor.shape[0]} frames at {input_video_tensor.shape[1]}x{input_video_tensor.shape[2]}")
+
+                # Get generated middle frames (excluding conditioning frames at both ends)
+                generated_video = x[0].float().permute(1, 2, 3, 0).cpu()
+                gen_h, gen_w = generated_video.shape[1], generated_video.shape[2]
+                num_cond = args.num_cond_frames
+                middle_frames = generated_video[num_cond:-num_cond] if num_cond > 0 else generated_video
+                print(f">>> Generated middle frames: {middle_frames.shape[0]} frames")
+
+                # Resize input video if needed to match generated resolution
+                if input_video_tensor.shape[1] != gen_h or input_video_tensor.shape[2] != gen_w:
+                    print(f">>> Resizing input video from {input_video_tensor.shape[1]}x{input_video_tensor.shape[2]} to {gen_h}x{gen_w}")
+                    input_video_tensor = torch.nn.functional.interpolate(
+                        input_video_tensor.permute(0, 3, 1, 2),
+                        size=(gen_h, gen_w),
+                        mode='bilinear',
+                        align_corners=False
+                    ).permute(0, 2, 3, 1)
+
+                # Normalize if requested
+                if args.normalize_frames and args.normalize_frames > 0:
+                    input_video_tensor, middle_frames = normalize_join_frames(
+                        input_video_tensor, middle_frames, args.normalize_frames
+                    )
+
+                # Concatenate: full input video + middle frames (no second video to append)
+                final_video = torch.cat([input_video_tensor, middle_frames], dim=0)
+                print(f">>> Final video: {final_video.shape[0]} frames")
+                print(f">>> Input video frames: {input_video_tensor.shape[0]}")
+                print(f">>> Generated middle frames: {middle_frames.shape[0]}")
+
+                torchvision.io.write_video(
+                    args.output_filename,
+                    final_video.numpy(),
+                    fps=24,
+                    options={"crf": "5"},
+                )
+                print(f">>> Saved video + end image result to {args.output_filename}")
 
         elif args.video is not None:
             # Video-to-Video continuation mode

@@ -13,6 +13,7 @@ from .models.text_embedders import get_text_embedder
 from .models.vae import build_vae
 from .models.parallelize import parallelize_dit
 from .models.fp8_layers import fp8_optimization
+from .models.sdnq_layers import SDNQ_AVAILABLE, apply_sdnq_quantization, get_sdnq_info
 from .i2v_pipeline import Kandinsky5I2VPipeline
 from .t2v_pipeline import Kandinsky5T2VPipeline
 from .t2i_pipeline import Kandinsky5T2IPipeline
@@ -48,6 +49,9 @@ def get_T2V_pipeline(
     use_int8: bool = False,
     int8_block_size: int = 128,
     use_fp8: bool = False,
+    use_sdnq: bool = False,
+    sdnq_weights_dtype: str = "int8",
+    sdnq_use_quantized_matmul: bool = True,
     vae_temporal_tile_frames: int = None,
     vae_temporal_stride_frames: int = None,
     vae_spatial_tile_height: int = None,
@@ -148,11 +152,12 @@ def get_T2V_pipeline(
     if not offload:
         vae = vae.to(device=device_map["vae"], dtype=vae_dtype)
 
-    # Add INT8 configuration to dit_params
+    # Add INT8/SDNQ configuration to dit_params
     dit_params_dict = OmegaConf.to_container(conf.model.dit_params, resolve=True)
-    dit_params_dict['use_int8'] = use_int8
+    dit_params_dict['use_int8'] = use_int8 and not use_sdnq  # Disable legacy INT8 if SDNQ is enabled
     dit_params_dict['int8_block_size'] = int8_block_size
     dit_params_dict['dtype'] = computation_dtype
+    dit_params_dict['use_sdnq'] = use_sdnq  # Pass SDNQ flag to create standard Linear layers
 
     dit = get_dit(dit_params_dict)
 
@@ -167,15 +172,44 @@ def get_T2V_pipeline(
     # Use checkpoint_path_override if provided, otherwise use config value
     checkpoint_path = checkpoint_path_override if checkpoint_path_override else conf.model.checkpoint_path
     state_dict = load_file(checkpoint_path)
-    # Convert state dict to specified dtype (unless using mixed weights)
+    # Convert state dict to specified dtype (unless using mixed weights or SDNQ)
     if use_mixed_weights:
         # Preserve original weight dtypes for mixed precision
         print("Using mixed weights mode - preserving original weight dtypes (fp32 for critical layers)")
-    else:
+    elif not use_sdnq:
+        # For SDNQ, we keep weights in original dtype until quantization
         state_dict = {k: v.to(computation_dtype) if v.dtype in [torch.float32, torch.float16, torch.bfloat16] else v
                       for k, v in state_dict.items()}
 
-    if use_fp8:
+    if use_sdnq:
+        # SDNQ quantization - load weights first, then quantize
+        if SDNQ_AVAILABLE:
+            sdnq_info = get_sdnq_info()
+            print(f"SDNQ quantization enabled (version {sdnq_info['version']})")
+            print(f"  weights_dtype={sdnq_weights_dtype}, use_quantized_matmul={sdnq_use_quantized_matmul}")
+            print(f"  torch_compile={sdnq_info['torch_compile']}, triton_mm={sdnq_info['triton_mm']}")
+
+            # Load weights first
+            dit.load_state_dict(state_dict, assign=True)
+
+            # Apply SDNQ quantization after loading
+            target_device = device_map["dit"] if isinstance(device_map["dit"], torch.device) else torch.device(device_map["dit"])
+            dit = apply_sdnq_quantization(
+                dit,
+                weights_dtype=sdnq_weights_dtype,
+                use_quantized_matmul=sdnq_use_quantized_matmul,
+                torch_dtype=computation_dtype,
+                quantization_device=target_device,
+                return_device=target_device if not offload else None,
+            )
+            if not offload:
+                dit = dit.to(target_device, dtype=computation_dtype)
+        else:
+            print("WARNING: SDNQ requested but not available. Falling back to standard precision.")
+            dit.load_state_dict(state_dict, assign=True)
+            if not offload:
+                dit = dit.to(device_map["dit"], dtype=computation_dtype)
+    elif use_fp8:
         # FP8 optimization - convert eligible weights to FP8 and apply monkey patching
         print("FP8 quantization enabled - converting weights to FP8 format...")
         target_device = device_map["dit"] if isinstance(device_map["dit"], torch.device) else torch.device(device_map["dit"])
@@ -251,6 +285,9 @@ def get_I2V_pipeline(
     use_int8: bool = False,
     int8_block_size: int = 128,
     use_fp8: bool = False,
+    use_sdnq: bool = False,
+    sdnq_weights_dtype: str = "int8",
+    sdnq_use_quantized_matmul: bool = True,
     vae_temporal_tile_frames: int = None,
     vae_temporal_stride_frames: int = None,
     vae_spatial_tile_height: int = None,
@@ -349,11 +386,12 @@ def get_I2V_pipeline(
     if not offload:
         vae = vae.to(device=device_map["vae"], dtype=vae_dtype)
 
-    # Add INT8 configuration to dit_params
+    # Add INT8/SDNQ configuration to dit_params
     dit_params_dict = OmegaConf.to_container(conf.model.dit_params, resolve=True)
-    dit_params_dict['use_int8'] = use_int8
+    dit_params_dict['use_int8'] = use_int8 and not use_sdnq  # Disable legacy INT8 if SDNQ is enabled
     dit_params_dict['int8_block_size'] = int8_block_size
     dit_params_dict['dtype'] = computation_dtype
+    dit_params_dict['use_sdnq'] = use_sdnq  # Pass SDNQ flag to create standard Linear layers
 
     dit = get_dit(dit_params_dict)
 
@@ -368,15 +406,44 @@ def get_I2V_pipeline(
     # Use checkpoint_path_override if provided, otherwise use config value
     checkpoint_path = checkpoint_path_override if checkpoint_path_override else conf.model.checkpoint_path
     state_dict = load_file(checkpoint_path)
-    # Convert state dict to specified dtype (unless using mixed weights)
+    # Convert state dict to specified dtype (unless using mixed weights or SDNQ)
     if use_mixed_weights:
         # Preserve original weight dtypes for mixed precision
         print("Using mixed weights mode - preserving original weight dtypes (fp32 for critical layers)")
-    else:
+    elif not use_sdnq:
+        # For SDNQ, we keep weights in original dtype until quantization
         state_dict = {k: v.to(computation_dtype) if v.dtype in [torch.float32, torch.float16, torch.bfloat16] else v
                       for k, v in state_dict.items()}
 
-    if use_fp8:
+    if use_sdnq:
+        # SDNQ quantization - load weights first, then quantize
+        if SDNQ_AVAILABLE:
+            sdnq_info = get_sdnq_info()
+            print(f"SDNQ quantization enabled (version {sdnq_info['version']})")
+            print(f"  weights_dtype={sdnq_weights_dtype}, use_quantized_matmul={sdnq_use_quantized_matmul}")
+            print(f"  torch_compile={sdnq_info['torch_compile']}, triton_mm={sdnq_info['triton_mm']}")
+
+            # Load weights first
+            dit.load_state_dict(state_dict, assign=True)
+
+            # Apply SDNQ quantization after loading
+            target_device = device_map["dit"] if isinstance(device_map["dit"], torch.device) else torch.device(device_map["dit"])
+            dit = apply_sdnq_quantization(
+                dit,
+                weights_dtype=sdnq_weights_dtype,
+                use_quantized_matmul=sdnq_use_quantized_matmul,
+                torch_dtype=computation_dtype,
+                quantization_device=target_device,
+                return_device=target_device if not offload else None,
+            )
+            if not offload:
+                dit = dit.to(target_device, dtype=computation_dtype)
+        else:
+            print("WARNING: SDNQ requested but not available. Falling back to standard precision.")
+            dit.load_state_dict(state_dict, assign=True)
+            if not offload:
+                dit = dit.to(device_map["dit"], dtype=computation_dtype)
+    elif use_fp8:
         # FP8 optimization - convert eligible weights to FP8 and apply monkey patching
         print("FP8 quantization enabled - converting weights to FP8 format...")
         target_device = device_map["dit"] if isinstance(device_map["dit"], torch.device) else torch.device(device_map["dit"])
@@ -703,6 +770,9 @@ def get_I2V_pipeline_with_block_swap(
     use_int8: bool = False,
     int8_block_size: int = 128,
     use_fp8: bool = False,
+    use_sdnq: bool = False,
+    sdnq_weights_dtype: str = "int8",
+    sdnq_use_quantized_matmul: bool = True,
     vae_temporal_tile_frames: int = None,
     vae_temporal_stride_frames: int = None,
     vae_spatial_tile_height: int = None,
@@ -815,11 +885,12 @@ def get_I2V_pipeline_with_block_swap(
     # Build DiT with block swapping
     print(f"Building DiT with block swapping: enabled={enable_block_swap}, blocks_in_memory={blocks_in_memory}")
 
-    # Add INT8 configuration to dit_params
+    # Add INT8/SDNQ configuration to dit_params
     dit_params_dict = OmegaConf.to_container(conf.model.dit_params, resolve=True)
-    dit_params_dict['use_int8'] = use_int8
+    dit_params_dict['use_int8'] = use_int8 and not use_sdnq
     dit_params_dict['int8_block_size'] = int8_block_size
     dit_params_dict['dtype'] = computation_dtype
+    dit_params_dict['use_sdnq'] = use_sdnq
 
     dit = get_dit_with_block_swap(
         dit_params_dict,
@@ -839,15 +910,43 @@ def get_I2V_pipeline_with_block_swap(
     checkpoint_path = checkpoint_path_override if checkpoint_path_override else conf.model.checkpoint_path
     print(f"Loading DiT weights from {checkpoint_path}")
     state_dict = load_file(checkpoint_path)
-    # Convert state dict to specified dtype (unless using mixed weights)
+    # Convert state dict to specified dtype (unless using mixed weights or SDNQ)
     if use_mixed_weights:
         # Preserve original weight dtypes for mixed precision
         print("Using mixed weights mode - preserving original weight dtypes (fp32 for critical layers)")
-    else:
+    elif not use_sdnq:
         state_dict = {k: v.to(computation_dtype) if v.dtype in [torch.float32, torch.float16, torch.bfloat16] else v
                       for k, v in state_dict.items()}
 
-    if use_fp8:
+    if use_sdnq:
+        # SDNQ quantization - load weights first, then quantize
+        if SDNQ_AVAILABLE:
+            sdnq_info = get_sdnq_info()
+            print(f"SDNQ quantization enabled (version {sdnq_info['version']})")
+            print(f"  weights_dtype={sdnq_weights_dtype}, use_quantized_matmul={sdnq_use_quantized_matmul}")
+
+            # Load weights first
+            dit.load_state_dict(state_dict, assign=True)
+
+            # For block swap, quantization on CPU, keep on CPU
+            target_device = device_map["dit"] if isinstance(device_map["dit"], torch.device) else torch.device(device_map["dit"])
+            return_dev = None if enable_block_swap or offload else target_device
+            dit = apply_sdnq_quantization(
+                dit,
+                weights_dtype=sdnq_weights_dtype,
+                use_quantized_matmul=sdnq_use_quantized_matmul,
+                torch_dtype=computation_dtype,
+                quantization_device=target_device,
+                return_device=return_dev,
+            )
+            if not offload and not enable_block_swap:
+                dit = dit.to(target_device, dtype=computation_dtype)
+        else:
+            print("WARNING: SDNQ requested but not available. Falling back to standard precision.")
+            dit.load_state_dict(state_dict, assign=True)
+            if not offload and not enable_block_swap:
+                dit = dit.to(device_map["dit"], dtype=computation_dtype)
+    elif use_fp8:
         # FP8 optimization - convert eligible weights to FP8 and apply monkey patching
         print("FP8 quantization enabled - converting weights to FP8 format...")
         target_device = device_map["dit"] if isinstance(device_map["dit"], torch.device) else torch.device(device_map["dit"])
@@ -932,6 +1031,9 @@ def get_T2V_pipeline_with_block_swap(
     use_int8: bool = False,
     int8_block_size: int = 128,
     use_fp8: bool = False,
+    use_sdnq: bool = False,
+    sdnq_weights_dtype: str = "int8",
+    sdnq_use_quantized_matmul: bool = True,
     vae_temporal_tile_frames: int = None,
     vae_temporal_stride_frames: int = None,
     vae_spatial_tile_height: int = None,
@@ -1041,11 +1143,12 @@ def get_T2V_pipeline_with_block_swap(
     # Build DiT with block swapping
     print(f"Building DiT with block swapping: enabled={enable_block_swap}, blocks_in_memory={blocks_in_memory}")
 
-    # Add INT8 configuration to dit_params
+    # Add INT8/SDNQ configuration to dit_params
     dit_params_dict = OmegaConf.to_container(conf.model.dit_params, resolve=True)
-    dit_params_dict['use_int8'] = use_int8
+    dit_params_dict['use_int8'] = use_int8 and not use_sdnq
     dit_params_dict['int8_block_size'] = int8_block_size
     dit_params_dict['dtype'] = computation_dtype
+    dit_params_dict['use_sdnq'] = use_sdnq
 
     dit = get_dit_with_block_swap(
         dit_params_dict,
@@ -1065,15 +1168,43 @@ def get_T2V_pipeline_with_block_swap(
     checkpoint_path = checkpoint_path_override if checkpoint_path_override else conf.model.checkpoint_path
     print(f"Loading DiT weights from {checkpoint_path}")
     state_dict = load_file(checkpoint_path)
-    # Convert state dict to specified dtype (unless using mixed weights)
+    # Convert state dict to specified dtype (unless using mixed weights or SDNQ)
     if use_mixed_weights:
         # Preserve original weight dtypes for mixed precision
         print("Using mixed weights mode - preserving original weight dtypes (fp32 for critical layers)")
-    else:
+    elif not use_sdnq:
         state_dict = {k: v.to(computation_dtype) if v.dtype in [torch.float32, torch.float16, torch.bfloat16] else v
                       for k, v in state_dict.items()}
 
-    if use_fp8:
+    if use_sdnq:
+        # SDNQ quantization - load weights first, then quantize
+        if SDNQ_AVAILABLE:
+            sdnq_info = get_sdnq_info()
+            print(f"SDNQ quantization enabled (version {sdnq_info['version']})")
+            print(f"  weights_dtype={sdnq_weights_dtype}, use_quantized_matmul={sdnq_use_quantized_matmul}")
+
+            # Load weights first
+            dit.load_state_dict(state_dict, assign=True)
+
+            # For block swap, quantization on CPU, keep on CPU
+            target_device = device_map["dit"] if isinstance(device_map["dit"], torch.device) else torch.device(device_map["dit"])
+            return_dev = None if enable_block_swap or offload else target_device
+            dit = apply_sdnq_quantization(
+                dit,
+                weights_dtype=sdnq_weights_dtype,
+                use_quantized_matmul=sdnq_use_quantized_matmul,
+                torch_dtype=computation_dtype,
+                quantization_device=target_device,
+                return_device=return_dev,
+            )
+            if not offload and not enable_block_swap:
+                dit = dit.to(target_device, dtype=computation_dtype)
+        else:
+            print("WARNING: SDNQ requested but not available. Falling back to standard precision.")
+            dit.load_state_dict(state_dict, assign=True)
+            if not offload and not enable_block_swap:
+                dit = dit.to(device_map["dit"], dtype=computation_dtype)
+    elif use_fp8:
         # FP8 optimization - convert eligible weights to FP8 and apply monkey patching
         print("FP8 quantization enabled - converting weights to FP8 format...")
         target_device = device_map["dit"] if isinstance(device_map["dit"], torch.device) else torch.device(device_map["dit"])

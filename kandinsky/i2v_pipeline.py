@@ -1,5 +1,5 @@
 from math import floor, sqrt
-from typing import Union
+from typing import Union, Tuple, Optional
 
 import transformers
 import torch
@@ -16,18 +16,173 @@ torch._dynamo.config.verbose = True
 MAX_AREA = 2048*2048
 MAX_DIMENSION = 2048  # Maximum pixels per dimension to fit within RoPE max_pos=128
 
-def get_conditioning_latents_from_two_images(start_image, end_image, vae, device, alignment=16):
+# Memory limit for chunked operations (from musubi-tuner)
+# Reduce if you see OOM during encoding
+MEMORY_LIMIT_MB = 512
+
+
+# =============================================================================
+# Musubi-tuner style blending functions for seamless tiling
+# =============================================================================
+
+def blend_v(a: torch.Tensor, b: torch.Tensor, blend_extent: int) -> torch.Tensor:
+    """
+    Blend tensor b vertically into a at blend_extent region.
+    Operates on tensors with shape [B, C, T, H, W].
+    From musubi-tuner: hunyuan_video_1_5_vae.py
+    """
+    blend_extent = min(a.shape[-2], b.shape[-2], blend_extent)
+    if blend_extent <= 0:
+        return b
+    b = b.clone()
+    for y in range(blend_extent):
+        weight = y / blend_extent
+        b[:, :, :, y, :] = a[:, :, :, -blend_extent + y, :] * (1 - weight) + b[:, :, :, y, :] * weight
+    return b
+
+
+def blend_h(a: torch.Tensor, b: torch.Tensor, blend_extent: int) -> torch.Tensor:
+    """
+    Blend tensor b horizontally into a at blend_extent region.
+    Operates on tensors with shape [B, C, T, H, W].
+    From musubi-tuner: hunyuan_video_1_5_vae.py
+    """
+    blend_extent = min(a.shape[-1], b.shape[-1], blend_extent)
+    if blend_extent <= 0:
+        return b
+    b = b.clone()
+    for x in range(blend_extent):
+        weight = x / blend_extent
+        b[:, :, :, :, x] = a[:, :, :, :, -blend_extent + x] * (1 - weight) + b[:, :, :, :, x] * weight
+    return b
+
+
+def blend_t(a: torch.Tensor, b: torch.Tensor, blend_extent: int) -> torch.Tensor:
+    """
+    Blend tensor b temporally into a at blend_extent region.
+    Operates on tensors with shape [B, C, T, H, W].
+    From musubi-tuner: hunyuan_video_1_5_vae.py
+    """
+    blend_extent = min(a.shape[2], b.shape[2], blend_extent)
+    if blend_extent <= 0:
+        return b
+    b = b.clone()
+    for t in range(blend_extent):
+        weight = t / blend_extent
+        b[:, :, t, :, :] = a[:, :, -blend_extent + t, :, :] * (1 - weight) + b[:, :, t, :, :] * weight
+    return b
+
+
+def encode_latent_deterministic(
+    vae,
+    input_tensor: torch.Tensor,
+    device: torch.device,
+    use_tiling: bool = False,
+) -> torch.Tensor:
+    """
+    Encode input tensor to latent space using deterministic .mode() sampling.
+    This provides more consistent results than stochastic .sample().
+
+    From musubi-tuner: Uses mode() for deterministic encoding.
+
+    Args:
+        vae: VAE model
+        input_tensor: Input tensor [B, C, T, H, W]
+        device: Device to use
+        use_tiling: Whether to use tiled encoding for large inputs
+
+    Returns:
+        Latent tensor scaled by VAE scaling factor
+    """
+    with torch.no_grad():
+        vae_dtype = next(vae.parameters()).dtype
+        input_tensor = input_tensor.to(device=device, dtype=vae_dtype)
+
+        # Use opt_tiling based on input size
+        latent_dist = vae.encode(input_tensor, opt_tiling=use_tiling).latent_dist
+
+        # Use .mode() for deterministic encoding (musubi-tuner approach)
+        # This gives the mean of the latent distribution rather than sampling
+        latent = latent_dist.mode()
+
+        # Scale by VAE scaling factor
+        latent = latent * vae.config.scaling_factor
+
+    return latent
+
+
+def spatial_tiled_encode(
+    vae,
+    x: torch.Tensor,
+    tile_size: int = 256,
+    tile_overlap: float = 0.25,
+) -> torch.Tensor:
+    """
+    Encode large images/videos using spatial tiling with smooth blending.
+    From musubi-tuner: spatial_tiled_encode in hunyuan_video_1_5_vae.py
+
+    Args:
+        vae: VAE model
+        x: Input tensor [B, C, T, H, W]
+        tile_size: Size of each tile in pixels
+        tile_overlap: Overlap factor between tiles (0.0 to 0.5)
+
+    Returns:
+        Encoded latent tensor
+    """
+    B, C, T, H, W = x.shape
+    spatial_compression = vae.spatial_compression_ratio  # Usually 8
+
+    # Calculate tile parameters
+    overlap_size = int(tile_size * (1 - tile_overlap))
+    blend_extent_latent = int((tile_size // spatial_compression) * tile_overlap)
+    tile_limit_latent = (tile_size // spatial_compression) - blend_extent_latent
+
+    rows = []
+    for i in range(0, H, overlap_size):
+        row = []
+        for j in range(0, W, overlap_size):
+            # Extract tile
+            tile = x[:, :, :, i:i + tile_size, j:j + tile_size]
+
+            # Encode tile
+            with torch.no_grad():
+                tile_latent = vae.encode(tile, opt_tiling=False).latent_dist.mode()
+                tile_latent = tile_latent * vae.config.scaling_factor
+
+            row.append(tile_latent)
+        rows.append(row)
+
+    # Blend tiles together
+    result_rows = []
+    for i, row in enumerate(rows):
+        result_row = []
+        for j, tile in enumerate(row):
+            if i > 0:
+                tile = blend_v(rows[i - 1][j], tile, blend_extent_latent)
+            if j > 0:
+                tile = blend_h(row[j - 1], tile, blend_extent_latent)
+            result_row.append(tile[:, :, :, :tile_limit_latent, :tile_limit_latent])
+        result_rows.append(torch.cat(result_row, dim=-1))
+
+    latent = torch.cat(result_rows, dim=-2)
+    return latent
+
+
+def get_conditioning_latents_from_two_images(start_image, end_image, vae, device, alignment=16, use_deterministic=True):
     """
     Encode two images to latent space for image-to-image-video generation.
     Mirrors get_conditioning_frames_from_two_videos() but for single images.
-    
+
     Args:
         start_image: Path to starting image or PIL Image
-        end_image: Path to ending image or PIL Image  
+        end_image: Path to ending image or PIL Image
         vae: VAE model
         device: Device to use
         alignment: Pixel alignment for resizing (16 standard, 128 for NABLA)
-    
+        use_deterministic: If True, use .mode() for deterministic encoding (musubi-tuner style).
+                          If False, use .sample() for stochastic encoding.
+
     Returns:
         Tuple of (start_latent, end_latent, scale_factor)
         start_latent: Tensor of shape [1, H, W, C] - single frame latent
@@ -35,7 +190,7 @@ def get_conditioning_latents_from_two_images(start_image, end_image, vae, device
         scale_factor: Scale factor applied during resizing
     """
     from PIL import Image
-    
+
     # Load start image
     if isinstance(start_image, str):
         start_pil = Image.open(start_image).convert('RGB')
@@ -43,7 +198,7 @@ def get_conditioning_latents_from_two_images(start_image, end_image, vae, device
         start_pil = start_image
     else:
         raise ValueError(f"Unknown start_image type: {type(start_image)}")
-    
+
     # Load end image
     if isinstance(end_image, str):
         end_pil = Image.open(end_image).convert('RGB')
@@ -51,42 +206,45 @@ def get_conditioning_latents_from_two_images(start_image, end_image, vae, device
         end_pil = end_image
     else:
         raise ValueError(f"Unknown end_image type: {type(end_image)}")
-    
+
     # Process start image - determines target dimensions
     start_tensor = F.pil_to_tensor(start_pil).unsqueeze(0)
     start_tensor, scale_factor = resize_image(start_tensor, max_area=MAX_AREA, alignment=alignment)
     target_h, target_w = start_tensor.shape[2], start_tensor.shape[3]
-    
+
     # Process end image - resize to match start image dimensions
     end_tensor = F.pil_to_tensor(end_pil).unsqueeze(0)
     import torch.nn.functional as F_torch
     end_tensor = F_torch.interpolate(
-        end_tensor.float(), 
-        size=(target_h, target_w), 
-        mode='bilinear', 
+        end_tensor.float(),
+        size=(target_h, target_w),
+        mode='bilinear',
         align_corners=False
     )
-    
+
     # Normalize to [-1, 1]
     start_tensor = start_tensor / 127.5 - 1.
     end_tensor = end_tensor / 127.5 - 1.
-    
+
     # Encode through VAE
     with torch.no_grad():
         vae_dtype = next(vae.parameters()).dtype
-        
+
         # Encode start image
         # Input shape: [1, C, H, W] -> transpose to [C, 1, H, W] -> unsqueeze to [1, C, 1, H, W]
         start_input = start_tensor.to(device=device, dtype=vae_dtype).transpose(0, 1).unsqueeze(0)
-        start_latent = vae.encode(start_input, opt_tiling=False).latent_dist.sample()
+        start_latent_dist = vae.encode(start_input, opt_tiling=False).latent_dist
+        # Use .mode() for deterministic or .sample() for stochastic (musubi-tuner uses mode)
+        start_latent = start_latent_dist.mode() if use_deterministic else start_latent_dist.sample()
         start_latent = start_latent.squeeze(0).permute(1, 2, 3, 0) * vae.config.scaling_factor
         # Output shape: [1, H_latent, W_latent, C_latent]
-        
+
         # Encode end image
         end_input = end_tensor.to(device=device, dtype=vae_dtype).transpose(0, 1).unsqueeze(0)
-        end_latent = vae.encode(end_input, opt_tiling=False).latent_dist.sample()
+        end_latent_dist = vae.encode(end_input, opt_tiling=False).latent_dist
+        end_latent = end_latent_dist.mode() if use_deterministic else end_latent_dist.sample()
         end_latent = end_latent.squeeze(0).permute(1, 2, 3, 0) * vae.config.scaling_factor
-    
+
     return start_latent, end_latent, scale_factor
 
 def extract_last_frames_from_video(video_path, num_frames, target_fps=24):
@@ -187,7 +345,7 @@ def extract_first_frames_from_video(video_path, num_frames, target_fps=24):
     return pil_frames
 
 
-def get_conditioning_frames_from_video(video_path, num_frames, vae, device, alignment=16):
+def get_conditioning_frames_from_video(video_path, num_frames, vae, device, alignment=16, use_deterministic=True):
     """
     Load video and encode last N frames to latent space for video continuation.
 
@@ -197,6 +355,7 @@ def get_conditioning_frames_from_video(video_path, num_frames, vae, device, alig
         vae: VAE model
         device: Device to use
         alignment: Pixel alignment for resizing
+        use_deterministic: If True, use .mode() for deterministic encoding (musubi-tuner style).
 
     Returns:
         Tuple of (latents, scale_factor)
@@ -224,8 +383,10 @@ def get_conditioning_frames_from_video(video_path, num_frames, vae, device, alig
         with torch.no_grad():
             vae_dtype = next(vae.parameters()).dtype
             image = image.to(device=device, dtype=vae_dtype).transpose(0, 1).unsqueeze(0)
-            lat_image = vae.encode(image, opt_tiling=False).latent_dist.sample().squeeze(0).permute(1, 2, 3, 0)
-            lat_image = lat_image * vae.config.scaling_factor
+            latent_dist = vae.encode(image, opt_tiling=False).latent_dist
+            # Use .mode() for deterministic or .sample() for stochastic (musubi-tuner uses mode)
+            lat_image = latent_dist.mode() if use_deterministic else latent_dist.sample()
+            lat_image = lat_image.squeeze(0).permute(1, 2, 3, 0) * vae.config.scaling_factor
             latents_list.append(lat_image)
 
     # Stack latents: [num_frames, H, W, C]
@@ -234,7 +395,7 @@ def get_conditioning_frames_from_video(video_path, num_frames, vae, device, alig
     return latents, scale_factor
 
 
-def get_conditioning_frames_from_two_videos(video1_path, video2_path, num_frames, vae, device, alignment=16):
+def get_conditioning_frames_from_two_videos(video1_path, video2_path, num_frames, vae, device, alignment=16, use_deterministic=True):
     """
     Load two videos and encode conditioning frames for video joining:
     - Last N frames from video1 (start conditioning)
@@ -247,12 +408,15 @@ def get_conditioning_frames_from_two_videos(video1_path, video2_path, num_frames
         vae: VAE model
         device: Device to use
         alignment: Pixel alignment for resizing
+        use_deterministic: If True, use .mode() for deterministic encoding (musubi-tuner style).
 
     Returns:
         Tuple of (start_latents, end_latents, scale_factor)
         start_latents: Tensor of shape [num_frames, H, W, C] from video1
         end_latents: Tensor of shape [num_frames, H, W, C] from video2
     """
+    import torch.nn.functional as F_torch
+
     # Extract last frames from video1 and first frames from video2
     pil_frames_start = extract_last_frames_from_video(video1_path, num_frames)
     pil_frames_end = extract_first_frames_from_video(video2_path, num_frames)
@@ -267,6 +431,8 @@ def get_conditioning_frames_from_two_videos(video1_path, video2_path, num_frames
     first_image, scale_factor = resize_image(first_image, max_area=MAX_AREA, alignment=alignment)
     target_h, target_w = first_image.shape[2], first_image.shape[3]
 
+    vae_dtype = next(vae.parameters()).dtype
+
     # Encode start frames (from video1)
     start_latents_list = []
     for i, pil_image in enumerate(pil_frames_start):
@@ -275,10 +441,11 @@ def get_conditioning_frames_from_two_videos(video1_path, video2_path, num_frames
         image = image / 127.5 - 1.
 
         with torch.no_grad():
-            vae_dtype = next(vae.parameters()).dtype
             image = image.to(device=device, dtype=vae_dtype).transpose(0, 1).unsqueeze(0)
-            lat_image = vae.encode(image, opt_tiling=False).latent_dist.sample().squeeze(0).permute(1, 2, 3, 0)
-            lat_image = lat_image * vae.config.scaling_factor
+            latent_dist = vae.encode(image, opt_tiling=False).latent_dist
+            # Use .mode() for deterministic or .sample() for stochastic (musubi-tuner uses mode)
+            lat_image = latent_dist.mode() if use_deterministic else latent_dist.sample()
+            lat_image = lat_image.squeeze(0).permute(1, 2, 3, 0) * vae.config.scaling_factor
             start_latents_list.append(lat_image)
 
     # Encode end frames (from video2) - resize to match video1 dimensions
@@ -286,15 +453,14 @@ def get_conditioning_frames_from_two_videos(video1_path, video2_path, num_frames
     for i, pil_image in enumerate(pil_frames_end):
         image = F.pil_to_tensor(pil_image).unsqueeze(0)
         # Resize to match video1 dimensions
-        import torch.nn.functional as F_torch
-        image = F_torch.interpolate(image, size=(target_h, target_w), mode='bilinear', align_corners=False)
+        image = F_torch.interpolate(image.float(), size=(target_h, target_w), mode='bilinear', align_corners=False)
         image = image / 127.5 - 1.
 
         with torch.no_grad():
-            vae_dtype = next(vae.parameters()).dtype
             image = image.to(device=device, dtype=vae_dtype).transpose(0, 1).unsqueeze(0)
-            lat_image = vae.encode(image, opt_tiling=False).latent_dist.sample().squeeze(0).permute(1, 2, 3, 0)
-            lat_image = lat_image * vae.config.scaling_factor
+            latent_dist = vae.encode(image, opt_tiling=False).latent_dist
+            lat_image = latent_dist.mode() if use_deterministic else latent_dist.sample()
+            lat_image = lat_image.squeeze(0).permute(1, 2, 3, 0) * vae.config.scaling_factor
             end_latents_list.append(lat_image)
 
     # Stack latents: [num_frames, H, W, C]
@@ -304,12 +470,96 @@ def get_conditioning_frames_from_two_videos(video1_path, video2_path, num_frames
     return start_latents, end_latents, scale_factor
 
 
-def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24, max_frames=None):
+def get_conditioning_video_and_image(video_path, end_image, num_frames, vae, device, alignment=16, use_deterministic=True):
+    """
+    Load a video and an end image for video + end image joining mode:
+    - Last N frames from video (start conditioning)
+    - Single end image replicated to N frames (end conditioning)
+
+    Args:
+        video_path: Path to the video file
+        end_image: Path to ending image or PIL Image
+        num_frames: Number of conditioning frames to extract from video
+        vae: VAE model
+        device: Device to use
+        alignment: Pixel alignment for resizing
+        use_deterministic: If True, use .mode() for deterministic encoding.
+
+    Returns:
+        Tuple of (start_latents, end_latents, scale_factor)
+        start_latents: Tensor of shape [num_frames, H, W, C] from video
+        end_latents: Tensor of shape [num_frames, H, W, C] from end image (replicated)
+    """
+    import torch.nn.functional as F_torch
+    from PIL import Image
+
+    # Extract last frames from video
+    pil_frames_start = extract_last_frames_from_video(video_path, num_frames)
+
+    if len(pil_frames_start) < num_frames:
+        raise ValueError(f"Video has only {len(pil_frames_start)} frames, need {num_frames}")
+
+    # Load end image
+    if isinstance(end_image, str):
+        end_pil = Image.open(end_image).convert('RGB')
+    elif isinstance(end_image, Image.Image):
+        end_pil = end_image
+    else:
+        raise ValueError(f"Unknown end_image type: {type(end_image)}")
+
+    # Determine target size from first frame of video
+    first_image = F.pil_to_tensor(pil_frames_start[0]).unsqueeze(0)
+    first_image, scale_factor = resize_image(first_image, max_area=MAX_AREA, alignment=alignment)
+    target_h, target_w = first_image.shape[2], first_image.shape[3]
+
+    vae_dtype = next(vae.parameters()).dtype
+
+    # Encode start frames (from video)
+    start_latents_list = []
+    for i, pil_image in enumerate(pil_frames_start):
+        image = F.pil_to_tensor(pil_image).unsqueeze(0)
+        image, _ = resize_image(image, max_area=MAX_AREA, alignment=alignment)
+        image = image / 127.5 - 1.
+
+        with torch.no_grad():
+            image = image.to(device=device, dtype=vae_dtype).transpose(0, 1).unsqueeze(0)
+            latent_dist = vae.encode(image, opt_tiling=False).latent_dist
+            lat_image = latent_dist.mode() if use_deterministic else latent_dist.sample()
+            lat_image = lat_image.squeeze(0).permute(1, 2, 3, 0) * vae.config.scaling_factor
+            start_latents_list.append(lat_image)
+
+    # Encode end image - resize to match video dimensions
+    end_image_tensor = F.pil_to_tensor(end_pil).unsqueeze(0)
+    end_image_tensor = F_torch.interpolate(end_image_tensor.float(), size=(target_h, target_w), mode='bilinear', align_corners=False)
+    end_image_tensor = end_image_tensor / 127.5 - 1.
+
+    with torch.no_grad():
+        end_image_tensor = end_image_tensor.to(device=device, dtype=vae_dtype).transpose(0, 1).unsqueeze(0)
+        latent_dist = vae.encode(end_image_tensor, opt_tiling=False).latent_dist
+        end_lat_image = latent_dist.mode() if use_deterministic else latent_dist.sample()
+        end_lat_image = end_lat_image.squeeze(0).permute(1, 2, 3, 0) * vae.config.scaling_factor
+
+    # Replicate end image latent to match num_frames
+    end_latents_list = [end_lat_image for _ in range(num_frames)]
+
+    # Stack latents: [num_frames, H, W, C]
+    start_latents = torch.cat(start_latents_list, dim=0)
+    end_latents = torch.cat(end_latents_list, dim=0)
+
+    return start_latents, end_latents, scale_factor
+
+
+def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24, max_frames=None, use_deterministic=True):
     """
     Load a video file and encode to latent space with proper temporal compression.
 
     The VAE has 4x temporal compression, so 17 video frames -> 5 latent frames.
     Videos are processed in small chunks to avoid OOM.
+
+    Uses musubi-tuner style encoding with:
+    - Deterministic .mode() sampling for consistent results
+    - Memory-efficient chunked processing for high-res/long videos
+    - Proper temporal blending at chunk boundaries
 
     Args:
         video_path: Path to the video file
@@ -318,6 +568,8 @@ def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24
         alignment: Pixel alignment for resizing
         target_fps: Target FPS for frame extraction
         max_frames: Maximum number of video frames to process (None = all frames)
+        use_deterministic: If True, use .mode() for deterministic encoding (musubi-tuner style).
+                          If False, use .sample() for stochastic encoding.
 
     Returns:
         Tuple of (latents, scale_factor, num_video_frames)
@@ -368,7 +620,8 @@ def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24
     # Calculate expected latent frames for full video
     expected_latent_frames = (num_video_frames - 1) // 4 + 1
 
-    print(f">>> Encoding video to latent space (4x temporal compression)...", flush=True)
+    sampling_mode = "deterministic (.mode())" if use_deterministic else "stochastic (.sample())"
+    print(f">>> Encoding video to latent space (4x temporal compression, {sampling_mode})...", flush=True)
     print(f">>> Resolution: {target_w}x{target_h}, {num_video_frames} frames -> {expected_latent_frames} latents expected", flush=True)
 
     # Estimate memory requirements to choose encoding strategy
@@ -386,11 +639,12 @@ def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24
     if use_chunked:
         print(f">>> High-res/long video detected, using chunked encoding directly...", flush=True)
         latents = _encode_video_chunked(pil_frames, num_video_frames, target_h, target_w,
-                                         vae, device, vae_dtype, expected_latent_frames)
+                                         vae, device, vae_dtype, expected_latent_frames,
+                                         use_deterministic=use_deterministic)
     else:
         # Try VAE's built-in encoding for smaller videos
         latents = _encode_video_full(pil_frames, num_video_frames, target_h, target_w,
-                                      vae, device, vae_dtype)
+                                      vae, device, vae_dtype, use_deterministic=use_deterministic)
 
     num_latent_frames = latents.shape[0]
 
@@ -400,10 +654,12 @@ def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24
     return latents, scale_factor, num_video_frames
 
 
-def _encode_video_full(pil_frames, num_video_frames, target_h, target_w, vae, device, vae_dtype):
+def _encode_video_full(pil_frames, num_video_frames, target_h, target_w, vae, device, vae_dtype, use_deterministic=True):
     """
     Encode video using VAE's built-in temporal tiled encoding.
     Works well for lower resolutions or shorter videos.
+
+    Uses musubi-tuner style deterministic encoding with .mode() when use_deterministic=True.
     """
     import torch.nn.functional as F_torch
 
@@ -425,7 +681,9 @@ def _encode_video_full(pil_frames, num_video_frames, target_h, target_w, vae, de
 
         # Use VAE's built-in tiled encoding (handles temporal chunking with proper blending)
         print(f">>> Using VAE's built-in temporal tiled encoding with blending...", flush=True)
-        latents = vae.encode(video_tensor, opt_tiling=True).latent_dist.sample()
+        latent_dist = vae.encode(video_tensor, opt_tiling=True).latent_dist
+        # Use .mode() for deterministic or .sample() for stochastic (musubi-tuner uses mode)
+        latents = latent_dist.mode() if use_deterministic else latent_dist.sample()
         latents = latents.squeeze(0).permute(1, 2, 3, 0)
         latents = latents * vae.config.scaling_factor
         latents = latents.cpu()
@@ -436,10 +694,15 @@ def _encode_video_full(pil_frames, num_video_frames, target_h, target_w, vae, de
     return latents
 
 
-def _encode_video_chunked(pil_frames, num_video_frames, target_h, target_w, vae, device, vae_dtype, expected_latent_frames):
+def _encode_video_chunked(pil_frames, num_video_frames, target_h, target_w, vae, device, vae_dtype, expected_latent_frames, use_deterministic=True):
     """
     Encode video in smaller chunks for high-resolution or long videos.
     Mirrors the VAE's _temporal_tiled_encode but loads frames on-demand to save memory.
+
+    Uses musubi-tuner style techniques:
+    - Deterministic .mode() sampling for consistent results
+    - Memory-efficient on-demand frame loading
+    - Proper temporal blending at chunk boundaries
     """
     import torch.nn.functional as F_torch
     from tqdm import tqdm
@@ -470,7 +733,7 @@ def _encode_video_chunked(pil_frames, num_video_frames, target_h, target_w, vae,
         old_stride_h = vae.tile_sample_stride_height
         old_stride_w = vae.tile_sample_stride_width
         old_use_tiling = vae.use_tiling
-        # Use 256x256 tiles with overlap
+        # Use 256x256 tiles with overlap (musubi-tuner style)
         vae.tile_sample_min_height = 256
         vae.tile_sample_min_width = 256
         vae.tile_sample_stride_height = 192
@@ -506,7 +769,7 @@ def _encode_video_chunked(pil_frames, num_video_frames, target_h, target_w, vae,
                 # Same frame selection as VAE: i : i + tile_sample_min_num_frames + 1
                 end_frame = min(start_frame + temporal_tile_frames, num_video_frames)
 
-                # Load only this chunk's frames to GPU (memory efficient)
+                # Load only this chunk's frames to GPU (memory efficient - musubi-tuner style)
                 chunk_tensors = []
                 for i in range(start_frame, end_frame):
                     pil_image = pil_frames[i]
@@ -524,7 +787,9 @@ def _encode_video_chunked(pil_frames, num_video_frames, target_h, target_w, vae,
 
                 # Encode this chunk - VAE will apply spatial tiling based on our settings
                 # Using opt_tiling=False to use our manually set tile dimensions
-                latent_chunk = vae.encode(chunk, opt_tiling=False).latent_dist.sample()
+                latent_dist = vae.encode(chunk, opt_tiling=False).latent_dist
+                # Use .mode() for deterministic or .sample() for stochastic (musubi-tuner uses mode)
+                latent_chunk = latent_dist.mode() if use_deterministic else latent_dist.sample()
                 latent_chunk = latent_chunk * vae.config.scaling_factor
 
                 # Drop first latent frame for subsequent chunks (same as VAE: tile[:, :, 1:, :, :])
@@ -581,6 +846,130 @@ def _blend_t_vae_format(a: torch.Tensor, b: torch.Tensor, blend_extent: int) -> 
         b[:, :, x, :, :] = a[:, :, -blend_extent + x, :, :] * (1 - x / blend_extent) + b[:, :, x, :, :] * (x / blend_extent)
 
     return b
+
+
+def decode_video_from_latents(
+    latents: torch.Tensor,
+    vae,
+    device: torch.device,
+    output_format: str = "tensor",
+) -> torch.Tensor:
+    """
+    Decode latent tensor back to video using musubi-tuner style decoding.
+
+    Uses VAE's built-in tiled decoding with proper temporal and spatial blending.
+
+    Args:
+        latents: Latent tensor [T, H, W, C] or [B, C, T, H, W]
+        vae: VAE model
+        device: Device to use
+        output_format: "tensor" returns [B, C, T, H, W], "frames" returns list of PIL images
+
+    Returns:
+        Decoded video tensor or list of PIL frames
+    """
+    from tqdm import tqdm
+
+    # Convert to VAE format [B, C, T, H, W] if needed
+    if latents.dim() == 4:
+        # [T, H, W, C] -> [B, C, T, H, W]
+        latents = latents.permute(3, 0, 1, 2).unsqueeze(0)
+    elif latents.dim() == 5 and latents.shape[-1] == 16:
+        # [B, T, H, W, C] -> [B, C, T, H, W]
+        latents = latents.permute(0, 4, 1, 2, 3)
+
+    # Unscale latents
+    latents = latents / vae.config.scaling_factor
+
+    vae_dtype = next(vae.parameters()).dtype
+    latents = latents.to(device=device, dtype=vae_dtype)
+
+    # Use VAE's built-in tiled decoding (handles temporal and spatial chunking with blending)
+    with torch.no_grad():
+        print(f">>> Decoding latents to video (musubi-tuner style)...", flush=True)
+        print(f">>> Latent shape: {latents.shape}", flush=True)
+
+        # VAE.decode handles tiling automatically based on latent size
+        decoded = vae.decode(latents).sample
+
+        # Clamp and convert to uint8
+        decoded = ((decoded.clamp(-1.0, 1.0) + 1.0) * 127.5).to(torch.uint8)
+
+    print(f">>> Decoded video shape: {decoded.shape}", flush=True)
+
+    if output_format == "frames":
+        # Convert to list of PIL images
+        from PIL import Image
+        frames = []
+        for t in range(decoded.shape[2]):
+            frame = decoded[0, :, t].permute(1, 2, 0).cpu().numpy()
+            frames.append(Image.fromarray(frame))
+        return frames
+
+    return decoded
+
+
+def spatial_tiled_decode(
+    vae,
+    z: torch.Tensor,
+    tile_size: int = 256,
+    tile_overlap: float = 0.25,
+) -> torch.Tensor:
+    """
+    Decode latents using spatial tiling with smooth blending.
+    From musubi-tuner: spatial_tiled_decode in hunyuan_video_1_5_vae.py
+
+    Args:
+        vae: VAE model
+        z: Latent tensor [B, C, T, H, W]
+        tile_size: Size of each tile in latent space
+        tile_overlap: Overlap factor between tiles (0.0 to 0.5)
+
+    Returns:
+        Decoded video tensor [B, C, T, H, W]
+    """
+    B, C, T, H, W = z.shape
+    spatial_compression = vae.spatial_compression_ratio  # Usually 8
+
+    # Calculate tile parameters in latent space
+    tile_size_latent = tile_size // spatial_compression
+    overlap_size_latent = int(tile_size_latent * (1 - tile_overlap))
+    blend_extent_pixels = int(tile_size * tile_overlap)
+
+    # Output dimensions
+    out_h = H * spatial_compression
+    out_w = W * spatial_compression
+
+    rows = []
+    for i in range(0, H, overlap_size_latent):
+        row = []
+        for j in range(0, W, overlap_size_latent):
+            # Extract tile
+            tile = z[:, :, :, i:i + tile_size_latent, j:j + tile_size_latent]
+
+            # Decode tile
+            with torch.no_grad():
+                tile = vae.post_quant_conv(tile)
+                decoded_tile = vae.decoder(tile)
+
+            row.append(decoded_tile)
+        rows.append(row)
+
+    # Blend tiles together
+    tile_limit_pixels = tile_size - blend_extent_pixels
+    result_rows = []
+    for i, row in enumerate(rows):
+        result_row = []
+        for j, tile in enumerate(row):
+            if i > 0:
+                tile = blend_v(rows[i - 1][j], tile, blend_extent_pixels)
+            if j > 0:
+                tile = blend_h(row[j - 1], tile, blend_extent_pixels)
+            result_row.append(tile[:, :, :, :tile_limit_pixels, :tile_limit_pixels])
+        result_rows.append(torch.cat(result_row, dim=-1))
+
+    decoded = torch.cat(result_rows, dim=-2)
+    return decoded[:, :, :, :out_h, :out_w]
 
 
 def log_vram_usage(stage_name, dit=None, vae=None, text_embedder=None):
@@ -692,15 +1081,18 @@ def resize_image(image, max_area, alignment=16):
     return F.resize(image, (new_h, new_w)), k
 
 
-def get_first_frame_from_image(image, vae, device, alignment=16):
+def get_first_frame_from_image(image, vae, device, alignment=16, use_deterministic=True):
     """
     Load and encode an image to latent space.
+
+    Uses musubi-tuner style deterministic encoding with .mode() when use_deterministic=True.
 
     Args:
         image: Path to image or PIL Image
         vae: VAE model
         device: Device to use
         alignment: Pixel alignment for resizing (use 128 for NABLA attention)
+        use_deterministic: If True, use .mode() for deterministic encoding (musubi-tuner style).
     """
     if isinstance(image, str):
         pil_image = Image.open(image).convert('RGB')
@@ -717,8 +1109,10 @@ def get_first_frame_from_image(image, vae, device, alignment=16):
         # Use the VAE's dtype to avoid dtype mismatch
         vae_dtype = next(vae.parameters()).dtype
         image = image.to(device=device, dtype=vae_dtype).transpose(0, 1).unsqueeze(0)
-        lat_image = vae.encode(image, opt_tiling=False).latent_dist.sample().squeeze(0).permute(1, 2, 3, 0)
-        lat_image = lat_image * vae.config.scaling_factor
+        latent_dist = vae.encode(image, opt_tiling=False).latent_dist
+        # Use .mode() for deterministic or .sample() for stochastic (musubi-tuner uses mode)
+        lat_image = latent_dist.mode() if use_deterministic else latent_dist.sample()
+        lat_image = lat_image.squeeze(0).permute(1, 2, 3, 0) * vae.config.scaling_factor
 
     return pil_image, lat_image, k
 

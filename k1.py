@@ -14,6 +14,9 @@ import io
 from PIL import Image
 import tiktoken
 
+# Job queue system for browser-independent generation
+from job_queue import get_queue, JobQueue, JobStatus, Job, format_job_for_display
+
 # Initialize tiktoken encoder for fast token counting
 enc = tiktoken.get_encoding("cl100k_base")
 
@@ -25,6 +28,8 @@ def count_tokens(text):
 
 stop_event = threading.Event()
 current_process = None  # Track the currently running process
+active_job_id = None  # Track current job being polled for unified UI
+active_batch_id = None  # Track current batch being processed
 current_output_filename = None  # Track current output filename for early stop signals
 
 def parse_progress_line(line: str) -> Optional[str]:
@@ -89,6 +94,7 @@ def generate_video(
     use_torch_compile: bool,
     use_magcache: bool,
     enable_block_swap: bool,
+    offload_inactive: bool,
     blocks_in_memory: int,
     dtype_str: str,
     text_encoder_dtype_str: str,
@@ -110,6 +116,16 @@ def generate_video(
     ultravico_alpha: float = 0.9,
     ultravico_suppress_harmonics: bool = False,
     ultravico_beta: float = 0.6,
+    use_sdnq: bool = False,
+    sdnq_weights_dtype: str = "int8",
+    sdnq_triton_mm: bool = True,
+    sdnq_compile: bool = True,
+    # End frame noise scheduling
+    end_noise_schedule: str = "progressive",
+    end_noise_start: float = 1.0,
+    end_noise_end: float = 0.0,
+    start_noise_schedule: str = "fixed",
+    start_noise_level: float = 0.0,
 ) -> Generator[Tuple[List[Tuple[str, str]], Optional[str], str, str], None, None]:
     global stop_event, current_process, current_output_filename
     stop_event.clear()
@@ -225,6 +241,12 @@ def generate_video(
             # Add end image if provided (for image-to-image video generation)
             if end_image:
                 command.extend(["--end_image", str(end_image)])
+                # Add noise scheduling parameters for end frame
+                command.extend(["--end_noise_schedule", str(end_noise_schedule)])
+                command.extend(["--end_noise_start", str(end_noise_start)])
+                command.extend(["--end_noise_end", str(end_noise_end)])
+                command.extend(["--start_noise_schedule", str(start_noise_schedule)])
+                command.extend(["--start_noise_level", str(start_noise_level)])
             # Pass width and height for i2v mode to resize the input image
             command.extend(["--width", str(int(width))])
             command.extend(["--height", str(int(height))])
@@ -235,6 +257,9 @@ def generate_video(
         if enable_block_swap:
             command.append("--enable_block_swap")
             command.extend(["--blocks_in_memory", str(int(blocks_in_memory))])
+
+        if offload_inactive or enable_block_swap:
+            command.append("--offload")
 
         if enable_preview and preview_steps > 0:
             command.extend(["--preview", str(preview_steps)])
@@ -270,6 +295,16 @@ def generate_video(
             if ultravico_suppress_harmonics:
                 command.append("--ultravico_suppress_harmonics")
                 command.extend(["--ultravico_beta", str(ultravico_beta)])
+
+        # Add SDNQ quantization options if enabled
+        if use_sdnq:
+            command.append("--use_sdnq")
+            command.extend(["--sdnq_weights_dtype", sdnq_weights_dtype])
+            # Triton MM and compile are enabled by default, add flags to disable
+            if not sdnq_triton_mm:
+                command.append("--no_sdnq_triton_mm")
+            if not sdnq_compile:
+                command.append("--no_sdnq_compile")
 
         # Print the command for debugging/transparency
         print("\n" + "="*80)
@@ -374,6 +409,14 @@ def generate_video(
                     "vae_spatial_tile_height": int(vae_spatial_tile_height) if enable_vae_chunking and vae_spatial_tile_height else None,
                     "vae_spatial_tile_width": int(vae_spatial_tile_width) if enable_vae_chunking and vae_spatial_tile_width else None,
                     "clip_prompt": clip_prompt if clip_prompt and clip_prompt.strip() else None,
+                    "ultravico_enabled": enable_ultravico,
+                    "ultravico_alpha": ultravico_alpha if enable_ultravico else None,
+                    "ultravico_suppress_harmonics": ultravico_suppress_harmonics if enable_ultravico else None,
+                    "ultravico_beta": ultravico_beta if enable_ultravico and ultravico_suppress_harmonics else None,
+                    "use_sdnq": use_sdnq,
+                    "sdnq_weights_dtype": sdnq_weights_dtype if use_sdnq else None,
+                    "sdnq_triton_mm": sdnq_triton_mm if use_sdnq else None,
+                    "sdnq_compile": sdnq_compile if use_sdnq else None,
                 }
                 try:
                     add_metadata_to_video(output_filename, params_for_meta)
@@ -403,6 +446,7 @@ def generate_v2v_video(
     negative_prompt: str,
     input_video: str,
     input_video2: str,
+    input_image2: str,
     num_cond_frames: int,
     normalize_frames: int,
     model_config: str,
@@ -425,6 +469,7 @@ def generate_v2v_video(
     use_torch_compile: bool,
     use_magcache: bool,
     enable_block_swap: bool,
+    offload_inactive: bool,
     blocks_in_memory: int,
     dtype_str: str,
     text_encoder_dtype_str: str,
@@ -451,6 +496,16 @@ def generate_v2v_video(
     ultravico_alpha: float = 0.9,
     ultravico_suppress_harmonics: bool = False,
     ultravico_beta: float = 0.6,
+    use_sdnq: bool = False,
+    sdnq_weights_dtype: str = "int8",
+    sdnq_triton_mm: bool = True,
+    sdnq_compile: bool = True,
+    # End frame noise scheduling (for video joining mode)
+    end_noise_schedule: str = "fixed",  # Default to "fixed" for backward compatibility
+    end_noise_start: float = 0.0,       # Default to 0.0 (clean end frames) for backward compatibility
+    end_noise_end: float = 0.0,
+    start_noise_schedule: str = "fixed",
+    start_noise_level: float = 0.0,
 ) -> Generator[Tuple[List[Tuple[str, str]], Optional[str], str, str], None, None]:
     """Generate video from video input (video continuation/v2v mode)."""
     global stop_event, current_process, current_output_filename
@@ -473,15 +528,22 @@ def generate_v2v_video(
         elif int(batch_size) > 1:
             current_seed = seed + i
 
-        # Determine mode based on whether second video is provided
-        mode_name = "Video Joining" if input_video2 else "Video Continuation"
+        # Determine mode based on whether second video or ending image is provided
+        if input_video2:
+            mode_name = "Video Joining"
+            mode_prefix = "join"
+        elif input_image2:
+            mode_name = "Video + End Image"
+            mode_prefix = "v2i"
+        else:
+            mode_name = "Video Continuation"
+            mode_prefix = "v2v"
         status_text = f"Processing {i+1}/{batch_size} - {mode_name} (Seed: {current_seed})"
         yield all_generated_videos.copy(), None, status_text, f"Starting {mode_name.lower()}..."
 
         timestamp = int(time.time())
         run_id = f"{timestamp}_{random.randint(1000, 9999)}"
         unique_preview_suffix = f"k1_{run_id}"
-        mode_prefix = "join" if input_video2 else "v2v"
         output_filename = os.path.join(save_path, f"k1_{mode_prefix}_{timestamp}_{current_seed}.mp4")
         current_output_filename = output_filename
 
@@ -567,9 +629,23 @@ def generate_v2v_video(
             return
         command.extend(["--video", str(input_video)])
 
-        # Add second video if provided (joining mode)
+        # Add second video or ending image if provided (joining mode)
         if input_video2:
             command.extend(["--video2", str(input_video2)])
+            # Add noise scheduling parameters for video joining (end frame control)
+            command.extend(["--end_noise_schedule", str(end_noise_schedule)])
+            command.extend(["--end_noise_start", str(end_noise_start)])
+            command.extend(["--end_noise_end", str(end_noise_end)])
+            command.extend(["--start_noise_schedule", str(start_noise_schedule)])
+            command.extend(["--start_noise_level", str(start_noise_level)])
+        elif input_image2:
+            command.extend(["--end_image", str(input_image2)])
+            # Add noise scheduling parameters for video + end image mode
+            command.extend(["--end_noise_schedule", str(end_noise_schedule)])
+            command.extend(["--end_noise_start", str(end_noise_start)])
+            command.extend(["--end_noise_end", str(end_noise_end)])
+            command.extend(["--start_noise_schedule", str(start_noise_schedule)])
+            command.extend(["--start_noise_level", str(start_noise_level)])
 
         command.extend(["--num_cond_frames", str(int(num_cond_frames))])
         if normalize_frames and int(normalize_frames) > 0:
@@ -591,6 +667,9 @@ def generate_v2v_video(
         if enable_block_swap:
             command.append("--enable_block_swap")
             command.extend(["--blocks_in_memory", str(int(blocks_in_memory))])
+
+        if offload_inactive or enable_block_swap:
+            command.append("--offload")
 
         if enable_preview and preview_steps > 0:
             command.extend(["--preview", str(preview_steps)])
@@ -626,6 +705,16 @@ def generate_v2v_video(
             if ultravico_suppress_harmonics:
                 command.append("--ultravico_suppress_harmonics")
                 command.extend(["--ultravico_beta", str(ultravico_beta)])
+
+        # Add SDNQ quantization options if enabled
+        if use_sdnq:
+            command.append("--use_sdnq")
+            command.extend(["--sdnq_weights_dtype", sdnq_weights_dtype])
+            # Triton MM and compile are enabled by default, add flags to disable
+            if not sdnq_triton_mm:
+                command.append("--no_sdnq_triton_mm")
+            if not sdnq_compile:
+                command.append("--no_sdnq_compile")
 
         # Print the command for debugging/transparency
         print("\n" + "="*80)
@@ -734,6 +823,14 @@ def generate_v2v_video(
                     "apg_momentum": apg_momentum if use_apg else None,
                     "apg_norm_threshold": apg_norm_threshold if use_apg else None,
                     "clip_prompt": clip_prompt if clip_prompt and clip_prompt.strip() else None,
+                    "ultravico_enabled": enable_ultravico,
+                    "ultravico_alpha": ultravico_alpha if enable_ultravico else None,
+                    "ultravico_suppress_harmonics": ultravico_suppress_harmonics if enable_ultravico else None,
+                    "ultravico_beta": ultravico_beta if enable_ultravico and ultravico_suppress_harmonics else None,
+                    "use_sdnq": use_sdnq,
+                    "sdnq_weights_dtype": sdnq_weights_dtype if use_sdnq else None,
+                    "sdnq_triton_mm": sdnq_triton_mm if use_sdnq else None,
+                    "sdnq_compile": sdnq_compile if use_sdnq else None,
                 }
                 try:
                     add_metadata_to_video(output_filename, params_for_meta)
@@ -757,6 +854,586 @@ def generate_v2v_video(
 
     current_process = None
     yield all_generated_videos, None, "All generations complete!", ""
+
+
+# =============================================================================
+# QUEUE-BASED GENERATION (Browser-Independent)
+# =============================================================================
+# These functions submit jobs to a persistent queue that is processed by a
+# background worker (worker.py). Jobs continue even if the browser disconnects.
+
+def submit_to_queue(
+    prompt: str,
+    negative_prompt: str,
+    input_image: str,
+    end_image: str,
+    mode: str,
+    model_config: str,
+    dit_checkpoint_path: str,
+    attention_engine: str,
+    attention_type: str,
+    nabla_P: float,
+    nabla_wT: int,
+    nabla_wW: int,
+    nabla_wH: int,
+    width: int,
+    height: int,
+    video_duration: int,
+    sample_steps: int,
+    guidance_weight: float,
+    scheduler_scale: float,
+    seed: int,
+    use_mixed_weights: bool,
+    use_int8: bool,
+    use_torch_compile: bool,
+    use_magcache: bool,
+    enable_block_swap: bool,
+    offload_inactive: bool,
+    blocks_in_memory: int,
+    dtype_str: str,
+    text_encoder_dtype_str: str,
+    vae_dtype_str: str,
+    computation_dtype_str: str,
+    save_path: str,
+    batch_size: int,
+    enable_preview: bool,
+    preview_steps: int,
+    enable_vae_chunking: bool,
+    vae_temporal_tile_frames: int,
+    vae_temporal_stride_frames: int,
+    vae_spatial_tile_height: int,
+    vae_spatial_tile_width: int,
+    use_prompt_expansion: bool,
+    clip_prompt: str,
+    save_latents: bool,
+    enable_ultravico: bool = False,
+    ultravico_alpha: float = 0.9,
+    ultravico_suppress_harmonics: bool = False,
+    ultravico_beta: float = 0.6,
+    use_sdnq: bool = False,
+    sdnq_weights_dtype: str = "int8",
+    sdnq_triton_mm: bool = True,
+    sdnq_compile: bool = True,
+    end_noise_schedule: str = "progressive",
+    end_noise_start: float = 1.0,
+    end_noise_end: float = 0.0,
+    start_noise_schedule: str = "fixed",
+    start_noise_level: float = 0.0,
+) -> str:
+    """
+    Submit generation job(s) to the queue.
+
+    This function returns immediately after queuing. The background worker
+    (worker.py) processes jobs independently of the browser connection.
+
+    Returns:
+        Status message with batch ID and job count
+    """
+    queue = get_queue()
+    os.makedirs(save_path, exist_ok=True)
+
+    batch_count = int(batch_size)
+    batch_id = f"{int(time.time())}_{random.randint(1000, 9999)}"
+
+    # Config mapping
+    config_map = {
+        "5s Lite (T2V)": "./configs/config_5s_sft.yaml",
+        "10s Lite (T2V)": "./configs/config_10s_sft.yaml",
+        "5s Pro 20B (T2V)": "./configs/config_5s_t2v_pro_20b.yaml",
+        "5s Pro 20B HD (T2V)": "./configs/k5_pro_t2v_5s_sft_hd.yaml",
+        "10s Pro 20B (T2V)": "./configs/config_10s_t2v_pro_20b.yaml",
+        "10s Pro 20B HD (T2V)": "./configs/k5_pro_t2v_10s_sft_hd.yaml",
+        "5s Pro 20B (I2V)": "./configs/config_5s_i2v_pro_20b.yaml",
+        "5s Pro 20B HD (I2V)": "./configs/k5_pro_i2v_5s_sft_hd.yaml",
+        "5s Lite (I2V)": "./configs/config_5s_i2v.yaml",
+    }
+    config_file = config_map.get(model_config, "./configs/config_5s_t2v_pro_20b.yaml")
+
+    jobs_created = []
+
+    for i in range(batch_count):
+        current_seed = seed
+        if seed == -1:
+            current_seed = random.randint(0, 2**32 - 1)
+        elif batch_count > 1:
+            current_seed = seed + i
+
+        timestamp = int(time.time())
+        run_id = f"{timestamp}_{random.randint(1000, 9999)}"
+        unique_preview_suffix = f"k1_{run_id}"
+        output_filename = os.path.join(save_path, f"k1_{mode}_{timestamp}_{current_seed}.mp4")
+
+        # Build command (same logic as generate_video)
+        command = [
+            sys.executable, "test.py",
+            "--config", config_file,
+            "--prompt", str(prompt),
+            "--video_duration", str(video_duration),
+            "--sample_steps", str(sample_steps),
+            "--seed", str(current_seed),
+            "--output_filename", output_filename,
+            "--dtype", dtype_str,
+        ]
+
+        if attention_engine and attention_engine != "auto":
+            command.extend(["--attention_engine", attention_engine])
+
+        if dit_checkpoint_path and dit_checkpoint_path.strip():
+            command.extend(["--checkpoint_path", dit_checkpoint_path.strip()])
+
+        if attention_type and attention_type != "auto":
+            command.extend(["--attention_type", attention_type])
+            if attention_type == "nabla":
+                if mode == "i2v":
+                    width = (int(width) // 128) * 128
+                    height = (int(height) // 128) * 128
+                    width = max(128, width)
+                    height = max(128, height)
+                command.extend(["--nabla_P", str(nabla_P)])
+                command.extend(["--nabla_wT", str(int(nabla_wT))])
+                command.extend(["--nabla_wW", str(int(nabla_wW))])
+                command.extend(["--nabla_wH", str(int(nabla_wH))])
+                command.append("--nabla_add_sta")
+
+        if text_encoder_dtype_str:
+            command.extend(["--text_encoder_dtype", text_encoder_dtype_str])
+        if vae_dtype_str:
+            command.extend(["--vae_dtype", vae_dtype_str])
+        if computation_dtype_str:
+            command.extend(["--computation_dtype", computation_dtype_str])
+
+        if use_mixed_weights:
+            command.append("--use_mixed_weights")
+        if use_int8:
+            command.append("--use_int8")
+        if not use_torch_compile:
+            command.append("--no_compile")
+        if use_magcache:
+            command.append("--magcache")
+
+        if negative_prompt:
+            command.extend(["--negative_prompt", str(negative_prompt)])
+
+        if guidance_weight is not None:
+            command.extend(["--guidance_weight", str(guidance_weight)])
+        if scheduler_scale is not None:
+            command.extend(["--scheduler_scale", str(scheduler_scale)])
+
+        if mode == "i2v":
+            if input_image:
+                command.extend(["--image", str(input_image)])
+            if end_image:
+                command.extend(["--end_image", str(end_image)])
+                command.extend(["--end_noise_schedule", str(end_noise_schedule)])
+                command.extend(["--end_noise_start", str(end_noise_start)])
+                command.extend(["--end_noise_end", str(end_noise_end)])
+                command.extend(["--start_noise_schedule", str(start_noise_schedule)])
+                command.extend(["--start_noise_level", str(start_noise_level)])
+
+        command.extend(["--width", str(int(width))])
+        command.extend(["--height", str(int(height))])
+
+        if enable_block_swap:
+            command.append("--enable_block_swap")
+            command.extend(["--blocks_in_memory", str(int(blocks_in_memory))])
+
+        if offload_inactive or enable_block_swap:
+            command.append("--offload")
+
+        if enable_preview and preview_steps > 0:
+            command.extend(["--preview", str(preview_steps)])
+            command.extend(["--preview_suffix", unique_preview_suffix])
+
+        if enable_vae_chunking:
+            if vae_temporal_tile_frames and vae_temporal_tile_frames > 0:
+                command.extend(["--vae_temporal_tile_frames", str(int(vae_temporal_tile_frames))])
+            if vae_temporal_stride_frames and vae_temporal_stride_frames > 0:
+                command.extend(["--vae_temporal_stride_frames", str(int(vae_temporal_stride_frames))])
+            if vae_spatial_tile_height and vae_spatial_tile_height > 0:
+                command.extend(["--vae_spatial_tile_height", str(int(vae_spatial_tile_height))])
+            if vae_spatial_tile_width and vae_spatial_tile_width > 0:
+                command.extend(["--vae_spatial_tile_width", str(int(vae_spatial_tile_width))])
+
+        command.extend(["--expand_prompt", "1" if use_prompt_expansion else "0"])
+
+        if clip_prompt and clip_prompt.strip():
+            command.extend(["--clip_prompt", clip_prompt.strip()])
+
+        if save_latents:
+            latents_filename = os.path.join(save_path, f"k1_{mode}_{timestamp}_{current_seed}_latents.pt")
+            command.extend(["--save_latents", latents_filename])
+
+        if enable_ultravico:
+            command.append("--ultravico")
+            command.extend(["--ultravico_alpha", str(ultravico_alpha)])
+            if ultravico_suppress_harmonics:
+                command.append("--ultravico_suppress_harmonics")
+                command.extend(["--ultravico_beta", str(ultravico_beta)])
+
+        if use_sdnq:
+            command.append("--use_sdnq")
+            command.extend(["--sdnq_weights_dtype", sdnq_weights_dtype])
+            if not sdnq_triton_mm:
+                command.append("--no_sdnq_triton_mm")
+            if not sdnq_compile:
+                command.append("--no_sdnq_compile")
+
+        # Build parameters dict for display/metadata
+        parameters = {
+            "prompt": prompt,
+            "negative_prompt": negative_prompt,
+            "mode": mode,
+            "model_config": model_config,
+            "width": int(width),
+            "height": int(height),
+            "video_duration": video_duration,
+            "sample_steps": sample_steps,
+            "guidance_weight": guidance_weight,
+            "seed": current_seed,
+            "save_path": save_path,
+        }
+
+        # Submit to queue
+        job = queue.add_job(
+            command=command,
+            parameters=parameters,
+            output_filename=output_filename,
+            batch_id=batch_id,
+            batch_index=i,
+            batch_total=batch_count,
+        )
+        jobs_created.append(job.id)
+
+    if batch_count == 1:
+        return f"Job queued: {jobs_created[0]} (Batch: {batch_id})"
+    else:
+        return f"Batch queued: {batch_id} ({batch_count} jobs: {', '.join(jobs_created)})"
+
+
+def get_queue_display() -> Tuple[str, str]:
+    """
+    Get queue status for display.
+
+    Returns:
+        Tuple of (queue_status_text, job_list_text)
+    """
+    queue = get_queue()
+    stats = queue.get_queue_stats()
+
+    status_text = f"Queue: {stats['pending']} pending, {stats['running']} running, {stats['completed']} completed, {stats['failed']} failed"
+
+    jobs = queue.get_all_jobs(limit=20)
+    if not jobs:
+        job_list = "No jobs in queue"
+    else:
+        lines = []
+        for job in jobs:
+            lines.append(format_job_for_display(job))
+        job_list = "\n".join(lines)
+
+    return status_text, job_list
+
+
+def poll_job_status(job_id: str) -> Tuple[Optional[str], Optional[str], str, str]:
+    """
+    Poll a specific job's status.
+
+    Returns:
+        Tuple of (video_path, preview_path, status_text, progress_text)
+    """
+    queue = get_queue()
+    job = queue.get_job(job_id)
+
+    if not job:
+        return None, None, f"Job {job_id} not found", ""
+
+    video_path = None
+    preview_path = None
+
+    if job.status == JobStatus.COMPLETED.value:
+        if os.path.exists(job.output_filename):
+            video_path = job.output_filename
+        status_text = f"Completed in {job.elapsed_time:.1f}s"
+    elif job.status == JobStatus.RUNNING.value:
+        status_text = f"Running ({job.progress:.0f}%)"
+        if job.preview_path and os.path.exists(job.preview_path):
+            preview_path = job.preview_path
+    elif job.status == JobStatus.FAILED.value:
+        status_text = f"Failed: {job.error_message}"
+    elif job.status == JobStatus.CANCELLED.value:
+        status_text = "Cancelled"
+    else:
+        status_text = "Pending in queue"
+
+    return video_path, preview_path, status_text, job.progress_text
+
+
+def cancel_queued_job(job_id: str) -> str:
+    """Cancel a job by ID."""
+    queue = get_queue()
+    job = queue.cancel_job(job_id)
+    if job:
+        return f"Cancelled job {job_id}"
+    return f"Could not cancel job {job_id}"
+
+
+def clear_completed_jobs() -> str:
+    """Remove all completed/failed/cancelled jobs from the queue."""
+    queue = get_queue()
+    removed = queue.cleanup_old_jobs(max_age_hours=0)
+    return f"Removed {removed} completed jobs"
+
+
+# =============================================================================
+# UNIFIED QUEUE-BASED GENERATION (Browser-Independent with Live Updates)
+# =============================================================================
+# These functions provide the same UX as direct generation but use the queue
+# system behind the scenes, allowing generation to continue if browser closes.
+
+def generate_via_queue(
+    prompt: str,
+    negative_prompt: str,
+    input_image: str,
+    end_image: str,
+    mode: str,
+    model_config: str,
+    dit_checkpoint_path: str,
+    attention_engine: str,
+    attention_type: str,
+    nabla_P: float,
+    nabla_wT: int,
+    nabla_wW: int,
+    nabla_wH: int,
+    width: int,
+    height: int,
+    video_duration: int,
+    sample_steps: int,
+    guidance_weight: float,
+    scheduler_scale: float,
+    seed: int,
+    use_mixed_weights: bool,
+    use_int8: bool,
+    use_torch_compile: bool,
+    use_magcache: bool,
+    enable_block_swap: bool,
+    offload_inactive: bool,
+    blocks_in_memory: int,
+    dtype_str: str,
+    text_encoder_dtype_str: str,
+    vae_dtype_str: str,
+    computation_dtype_str: str,
+    save_path: str,
+    batch_size: int,
+    enable_preview: bool,
+    preview_steps: int,
+    enable_vae_chunking: bool,
+    vae_temporal_tile_frames: int,
+    vae_temporal_stride_frames: int,
+    vae_spatial_tile_height: int,
+    vae_spatial_tile_width: int,
+    use_prompt_expansion: bool,
+    clip_prompt: str,
+    save_latents: bool,
+    enable_ultravico: bool = False,
+    ultravico_alpha: float = 0.9,
+    ultravico_suppress_harmonics: bool = False,
+    ultravico_beta: float = 0.6,
+    use_sdnq: bool = False,
+    sdnq_weights_dtype: str = "int8",
+    sdnq_triton_mm: bool = True,
+    sdnq_compile: bool = True,
+    end_noise_schedule: str = "progressive",
+    end_noise_start: float = 1.0,
+    end_noise_end: float = 0.0,
+    start_noise_schedule: str = "fixed",
+    start_noise_level: float = 0.0,
+):
+    """
+    Submit job(s) to queue and return initial state for polling.
+
+    This replaces the generator-based generate_video for browser-independent generation.
+    Returns immediately after queueing, with job/batch IDs for polling.
+
+    Returns:
+        Tuple of (videos, preview, status, progress, job_id, batch_id, timer)
+    """
+    global active_job_id, active_batch_id
+
+    # Submit to queue using existing function logic
+    result = submit_to_queue(
+        prompt, negative_prompt, input_image, end_image, mode,
+        model_config, dit_checkpoint_path, attention_engine,
+        attention_type, nabla_P, nabla_wT, nabla_wW, nabla_wH,
+        width, height, video_duration, sample_steps,
+        guidance_weight, scheduler_scale, seed,
+        use_mixed_weights, use_int8, use_torch_compile, use_magcache,
+        enable_block_swap, offload_inactive, blocks_in_memory,
+        dtype_str, text_encoder_dtype_str, vae_dtype_str, computation_dtype_str,
+        save_path, batch_size,
+        enable_preview, preview_steps,
+        enable_vae_chunking, vae_temporal_tile_frames, vae_temporal_stride_frames,
+        vae_spatial_tile_height, vae_spatial_tile_width,
+        use_prompt_expansion, clip_prompt, save_latents,
+        enable_ultravico, ultravico_alpha, ultravico_suppress_harmonics, ultravico_beta,
+        use_sdnq, sdnq_weights_dtype, sdnq_triton_mm, sdnq_compile,
+        end_noise_schedule, end_noise_start, end_noise_end,
+        start_noise_schedule, start_noise_level,
+    )
+
+    # Parse job/batch IDs from result message
+    # Format: "Job queued: {job_id} (Batch: {batch_id})" or
+    # "Batch queued: {batch_id} ({count} jobs: {id1}, {id2}, ...)"
+    batch_id = None
+    first_job_id = None
+
+    if "Batch queued:" in result:
+        # Multiple jobs
+        match = re.search(r'Batch queued: (\S+) \(\d+ jobs: ([^)]+)\)', result)
+        if match:
+            batch_id = match.group(1)
+            job_ids = match.group(2).split(', ')
+            first_job_id = job_ids[0] if job_ids else None
+    elif "Job queued:" in result:
+        # Single job
+        match = re.search(r'Job queued: (\S+) \(Batch: (\S+)\)', result)
+        if match:
+            first_job_id = match.group(1)
+            batch_id = match.group(2)
+
+    active_job_id = first_job_id
+    active_batch_id = batch_id
+
+    # Return initial state with timer active to start polling
+    return (
+        [],  # videos (empty initially)
+        None,  # preview
+        f"Queued: {result}",  # status
+        "Starting...",  # progress
+        first_job_id or "",  # job_id for state
+        batch_id or "",  # batch_id for state
+        gr.Timer(active=True)  # timer_active - start polling
+    )
+
+
+def poll_active_job(
+    current_job_id: str,
+    current_batch_id: str,
+):
+    """
+    Poll the current job/batch for status updates.
+
+    Called by Timer component to provide live updates.
+
+    Returns:
+        Tuple of (videos, preview, status, progress, job_id, batch_id, timer)
+    """
+    global active_job_id, active_batch_id
+
+    if not current_job_id and not current_batch_id:
+        # No active job to poll
+        return [], None, "No active generation", "", "", "", gr.Timer(active=False)
+
+    queue = get_queue()
+    all_videos = []
+    current_preview = None
+    status_parts = []
+    progress_text = ""
+    timer_active = True  # Keep polling by default
+
+    # Get all jobs in the batch
+    if current_batch_id:
+        jobs = queue.get_batch_jobs(current_batch_id)
+    else:
+        job = queue.get_job(current_job_id)
+        jobs = [job] if job else []
+
+    if not jobs:
+        return [], None, "Jobs not found", "", "", "", gr.Timer(active=False)
+
+    completed_count = 0
+    running_job = None
+
+    for job in jobs:
+        if job.status == JobStatus.COMPLETED.value:
+            completed_count += 1
+            if os.path.exists(job.output_filename):
+                # Extract seed from filename for label
+                seed_match = re.search(r'_(\d+)\.mp4$', job.output_filename)
+                seed_label = f"Seed: {seed_match.group(1)}" if seed_match else ""
+                all_videos.append((job.output_filename, seed_label))
+        elif job.status == JobStatus.RUNNING.value:
+            running_job = job
+        elif job.status == JobStatus.FAILED.value:
+            status_parts.append(f"Job {job.id} failed: {job.error_message}")
+
+    total_jobs = len(jobs)
+
+    # Build status message
+    if running_job:
+        status_parts.insert(0, f"Processing {completed_count + 1}/{total_jobs}")
+        progress_text = running_job.progress_text or f"Generating: {running_job.progress:.0f}%"
+
+        # Get preview if available
+        if running_job.preview_path and os.path.exists(running_job.preview_path):
+            current_preview = running_job.preview_path
+
+        # Update active job ID to track current running job
+        active_job_id = running_job.id
+    elif completed_count == total_jobs:
+        # All jobs complete
+        status_parts.insert(0, f"All {total_jobs} generation(s) complete!")
+        progress_text = "Done"
+        timer_active = False  # Stop polling
+        active_job_id = None
+        active_batch_id = None
+    elif completed_count > 0:
+        # Some complete, waiting for next
+        pending = total_jobs - completed_count
+        status_parts.insert(0, f"Completed {completed_count}/{total_jobs}, {pending} pending")
+        progress_text = "Waiting for worker..."
+    else:
+        # All pending
+        status_parts.insert(0, f"Queued: {total_jobs} job(s) pending")
+        progress_text = "Waiting for worker..."
+
+    status_text = " | ".join(status_parts) if status_parts else "Processing..."
+
+    return (
+        all_videos,
+        current_preview,
+        status_text,
+        progress_text,
+        current_job_id,
+        current_batch_id,
+        gr.Timer(active=timer_active)
+    )
+
+
+def stop_queue_generation(current_batch_id: str) -> Tuple[str, gr.Timer]:
+    """
+    Stop the current queue-based generation by cancelling all jobs in the batch.
+
+    Returns:
+        Tuple of (status_message, timer)
+    """
+    global active_job_id, active_batch_id
+
+    if not current_batch_id:
+        return "No active batch to stop", gr.Timer(active=False)
+
+    queue = get_queue()
+
+    # Cancel all jobs in the batch (returns list of cancelled jobs)
+    cancelled_jobs = queue.cancel_batch(current_batch_id)
+
+    active_job_id = None
+    active_batch_id = None
+
+    if cancelled_jobs:
+        return f"Cancelled {len(cancelled_jobs)} job(s) in batch {current_batch_id}", gr.Timer(active=False)
+    else:
+        return f"No pending jobs to cancel in batch {current_batch_id}", gr.Timer(active=False)
+
 
 def stop_generation():
     global stop_event, current_process
@@ -1536,14 +2213,58 @@ def create_interface():
                         progress_text = gr.Textbox(label="Progress", interactive=False, value="")
                         save_latents_checkbox = gr.Checkbox(label="Save Latents Before VAE Decode", value=False)
 
+                # Timer for polling queue status (starts inactive)
+                poll_timer = gr.Timer(value=2, active=False)
+                # State variables to track current job/batch being polled
+                current_job_id_state = gr.State("")
+                current_batch_id_state = gr.State("")
+
                 with gr.Row():
                     generate_btn = gr.Button("Generate Video", elem_classes="green-btn")
+                    queue_btn = gr.Button("Add to Queue", variant="secondary")
                     stop_btn = gr.Button("Stop Generation", variant="stop")
 
                 with gr.Row():
                     with gr.Column():
                         input_image = gr.Image(label="Input Image (for i2v mode)", type="filepath")
-                        end_image = gr.Image(label="End Image (optional - for start-to-end video)", type="filepath")
+
+                        with gr.Accordion("End Frame Settings", open=False):
+                            end_image = gr.Image(label="End Image (optional - for start-to-end video)", type="filepath")
+                            gr.Markdown("""
+                            **Noise Scheduling:** Control how the end/target image is revealed during generation.
+                            - **Progressive** (default): End frame starts hidden (noisy) and gradually emerges, reducing glitches.
+                            - **Fixed**: Constant noise level throughout (use 0.0 for original behavior).
+                            - **Symmetric**: End frame follows same noise schedule as middle frames.
+                            """)
+                            end_noise_schedule = gr.Dropdown(
+                                label="End Noise Schedule",
+                                choices=["progressive", "fixed", "symmetric"],
+                                value="progressive",
+                                info="How noise decreases for end frames during denoising"
+                            )
+                            with gr.Row():
+                                end_noise_start = gr.Slider(
+                                    minimum=0.0, maximum=1.0, value=1.0, step=0.05,
+                                    label="End Noise Start",
+                                    info="Initial noise level (1.0 = fully hidden, 0.0 = clean)"
+                                )
+                                end_noise_end = gr.Slider(
+                                    minimum=0.0, maximum=1.0, value=0.0, step=0.05,
+                                    label="End Noise End",
+                                    info="Final noise level (0.0 = fully revealed)"
+                                )
+                            with gr.Row():
+                                start_noise_schedule = gr.Dropdown(
+                                    label="Start Noise Schedule",
+                                    choices=["fixed", "progressive"],
+                                    value="fixed",
+                                    info="Usually keep 'fixed' with level 0.0 for clean anchoring"
+                                )
+                                start_noise_level = gr.Slider(
+                                    minimum=0.0, maximum=1.0, value=0.0, step=0.05,
+                                    label="Start Noise Level",
+                                    info="Noise level for start frames (0.0 = clean anchor)"
+                                )
 
                         gr.Markdown("### Generation Parameters")
                         mode = gr.Dropdown(
@@ -1677,11 +2398,17 @@ def create_interface():
                 with gr.Accordion("Model Settings & Performance", open=True):
                     with gr.Row():
                         use_mixed_weights = gr.Checkbox(label="Use Mixed Weights", value=False, info="Preserve fp32 for critical layers (norms, embeddings)")
-                        use_int8 = gr.Checkbox(label="Use int8 matmul", value=False, info="enable int8 quantization")
+                        use_int8 = gr.Checkbox(label="Use int8 matmul (legacy)", value=False, info="Legacy INT8 quantization")
                         use_torch_compile = gr.Checkbox(label="Use torch.compile", value=False, info="Slower startup (2-5 min) but faster inference")
                         use_magcache = gr.Checkbox(label="Use MagCache", value=False, info="Skip redundant computations (50-step models only)")
                     with gr.Row():
+                        use_sdnq = gr.Checkbox(label="Use SDNQ (recommended)", value=False, info="20-40% faster than legacy INT8 with auto-tuned Triton kernels")
+                        sdnq_weights_dtype = gr.Radio(choices=["int8", "fp8", "int4"], label="SDNQ Weights", value="int8", info="int8=best balance, fp8=H100+, int4=experimental")
+                        sdnq_triton_mm = gr.Checkbox(label="Triton MM", value=True, info="Use Triton int8 kernel (faster on 4090/5090)")
+                        sdnq_compile = gr.Checkbox(label="torch.compile SDNQ", value=True, info="Compile SDNQ kernels (better throughput after warmup)")
+                    with gr.Row():
                         enable_block_swap = gr.Checkbox(label="Enable Block Swap", value=True, info="Required for 24GB GPUs")
+                        offload_inactive = gr.Checkbox(label="Offload Inactive Models", value=False, info="Offload text encoder & VAE to CPU when not in use (auto-enabled with block swap)")
                         blocks_in_memory = gr.Slider(minimum=1, maximum=60, step=1, label="Blocks in Memory", value=2, info="Number of transformer blocks to keep in GPU memory")
                     with gr.Row():
                         dtype_select = gr.Radio(choices=["bfloat16", "float16", "float32", "fp8_scaled"], label="Default Data Type", value="bfloat16", info="Used for all components if specific dtypes not set. fp8_scaled provides ~50% memory savings.")
@@ -1812,14 +2539,15 @@ def create_interface():
                     outputs=[height]
                 )
 
+                # Generate button - uses queue system with auto-polling for browser-independent generation
                 generate_btn.click(
-                    fn=generate_video,
+                    fn=generate_via_queue,
                     inputs=[
                         prompt, negative_prompt, input_image, end_image, mode, model_config, dit_checkpoint_path, attention_engine,
                         attention_type, nabla_P, nabla_wT, nabla_wW, nabla_wH,
                         width, height, video_duration, sample_steps,
                         guidance_weight, scheduler_scale, seed,
-                        use_mixed_weights, use_int8, use_torch_compile, use_magcache, enable_block_swap, blocks_in_memory, dtype_select,
+                        use_mixed_weights, use_int8, use_torch_compile, use_magcache, enable_block_swap, offload_inactive, blocks_in_memory, dtype_select,
                         text_encoder_dtype_select, vae_dtype_select, computation_dtype_select,
                         save_path, batch_size,
                         enable_preview, preview_steps,
@@ -1827,14 +2555,50 @@ def create_interface():
                         vae_spatial_tile_height, vae_spatial_tile_width,
                         use_prompt_expansion, clip_prompt,
                         save_latents_checkbox,
-                        enable_ultravico, ultravico_alpha, ultravico_suppress_harmonics, ultravico_beta
+                        enable_ultravico, ultravico_alpha, ultravico_suppress_harmonics, ultravico_beta,
+                        use_sdnq, sdnq_weights_dtype, sdnq_triton_mm, sdnq_compile,
+                        # End frame noise scheduling
+                        end_noise_schedule, end_noise_start, end_noise_end, start_noise_schedule, start_noise_level
                     ],
-                    outputs=[output, preview_output, batch_progress, progress_text]
+                    outputs=[output, preview_output, batch_progress, progress_text, current_job_id_state, current_batch_id_state, poll_timer]
                 )
 
-                stop_btn.click(
-                    fn=stop_generation,
+                # Timer polls job status for live updates
+                poll_timer.tick(
+                    fn=poll_active_job,
+                    inputs=[current_job_id_state, current_batch_id_state],
+                    outputs=[output, preview_output, batch_progress, progress_text, current_job_id_state, current_batch_id_state, poll_timer]
+                )
+
+                # Queue button - submits job to background worker (same as generate but no polling)
+                queue_btn.click(
+                    fn=submit_to_queue,
+                    inputs=[
+                        prompt, negative_prompt, input_image, end_image, mode, model_config, dit_checkpoint_path, attention_engine,
+                        attention_type, nabla_P, nabla_wT, nabla_wW, nabla_wH,
+                        width, height, video_duration, sample_steps,
+                        guidance_weight, scheduler_scale, seed,
+                        use_mixed_weights, use_int8, use_torch_compile, use_magcache, enable_block_swap, offload_inactive, blocks_in_memory, dtype_select,
+                        text_encoder_dtype_select, vae_dtype_select, computation_dtype_select,
+                        save_path, batch_size,
+                        enable_preview, preview_steps,
+                        enable_vae_chunking, vae_temporal_tile_frames, vae_temporal_stride_frames,
+                        vae_spatial_tile_height, vae_spatial_tile_width,
+                        use_prompt_expansion, clip_prompt,
+                        save_latents_checkbox,
+                        enable_ultravico, ultravico_alpha, ultravico_suppress_harmonics, ultravico_beta,
+                        use_sdnq, sdnq_weights_dtype, sdnq_triton_mm, sdnq_compile,
+                        # End frame noise scheduling
+                        end_noise_schedule, end_noise_start, end_noise_end, start_noise_schedule, start_noise_level
+                    ],
                     outputs=[batch_progress]
+                )
+
+                # Stop button - cancels queue jobs and stops timer
+                stop_btn.click(
+                    fn=stop_queue_generation,
+                    inputs=[current_batch_id_state],
+                    outputs=[batch_progress, poll_timer]
                 )
 
                 stop_decode_btn.click(
@@ -1921,13 +2685,9 @@ def create_interface():
                     with gr.Column():
                         v2v_input_video = gr.Video(label="Input Video (for continuation)", interactive=True)
 
-                        v2v_input_video2 = gr.Video(label="Ending Video (optional - for joining mode)", interactive=True)
-
-                        gr.Markdown("""
-                        **Joining Mode (Work in Progress):** Provide both videos to create a transition:
-                        - Last N frames from the first video → Generated transition → First N frames from the second video
-                        - Leave the ending video empty for standard video continuation mode
-                        """)
+                        with gr.Accordion("Ending Video/Image (for joining mode)", open=False):
+                            v2v_input_video2 = gr.Video(label="Ending Video", interactive=True)
+                            v2v_input_image2 = gr.Image(label="Ending Image (alternative to video)", type="filepath", interactive=True)
 
                         gr.Markdown("### V2V Parameters")
                         v2v_num_cond_frames = gr.Slider(
@@ -1941,6 +2701,45 @@ def create_interface():
                             label="Join Normalization Frames",
                             info="Number of frames to blend at join points (0=off). Smoothly transitions color/brightness to reduce flash."
                         )
+
+                        with gr.Accordion("End Frame Noise Scheduling (for Video Joining)", open=False):
+                            gr.Markdown("""
+                            **Noise Scheduling for Video Joining:** Control how the end/target video frames are revealed during generation.
+                            - **Fixed** (default): Clean end frames throughout - preserves original behavior, smooth transitions.
+                            - **Progressive**: End frames start hidden (noisy) and gradually emerge - can help with difficult transitions.
+                            - **Symmetric**: End frames follow same noise schedule as middle frames.
+
+                            **Tip:** Use "fixed" with 0.0 noise (default) for most cases. Try "progressive" if you see glitches at join points.
+                            """)
+                            v2v_end_noise_schedule = gr.Dropdown(
+                                label="End Noise Schedule",
+                                choices=["fixed", "progressive", "symmetric"],
+                                value="fixed",
+                                info="How end frames are treated during denoising"
+                            )
+                            with gr.Row():
+                                v2v_end_noise_start = gr.Slider(
+                                    minimum=0.0, maximum=1.0, value=0.0, step=0.05,
+                                    label="End Noise Start",
+                                    info="Initial noise level (0.0 = clean, 1.0 = fully hidden)"
+                                )
+                                v2v_end_noise_end = gr.Slider(
+                                    minimum=0.0, maximum=1.0, value=0.0, step=0.05,
+                                    label="End Noise End",
+                                    info="Final noise level (0.0 = fully revealed)"
+                                )
+                            with gr.Row():
+                                v2v_start_noise_schedule = gr.Dropdown(
+                                    label="Start Noise Schedule",
+                                    choices=["fixed", "progressive"],
+                                    value="fixed",
+                                    info="Usually keep 'fixed' with level 0.0 for clean anchoring"
+                                )
+                                v2v_start_noise_level = gr.Slider(
+                                    minimum=0.0, maximum=1.0, value=0.0, step=0.05,
+                                    label="Start Noise Level",
+                                    info="Noise level for start frames (0.0 = clean anchor)"
+                                )
 
                         v2v_mode = gr.Dropdown(
                             label="Mode",
@@ -2116,11 +2915,17 @@ def create_interface():
                 with gr.Accordion("Model Settings & Performance", open=True):
                     with gr.Row():
                         v2v_use_mixed_weights = gr.Checkbox(label="Use Mixed Weights", value=False, info="Preserve fp32 for critical layers (norms, embeddings)")
-                        v2v_use_int8 = gr.Checkbox(label="Use int8 matmul", value=False, info="enable int8 quantization")
+                        v2v_use_int8 = gr.Checkbox(label="Use int8 matmul (legacy)", value=False, info="Legacy INT8 quantization")
                         v2v_use_torch_compile = gr.Checkbox(label="Use torch.compile", value=False, info="Slower startup (2-5 min) but faster inference")
                         v2v_use_magcache = gr.Checkbox(label="Use MagCache", value=False, info="Skip redundant computations (50-step models only)")
                     with gr.Row():
+                        v2v_use_sdnq = gr.Checkbox(label="Use SDNQ (recommended)", value=False, info="20-40% faster than legacy INT8 with auto-tuned Triton kernels")
+                        v2v_sdnq_weights_dtype = gr.Radio(choices=["int8", "fp8", "int4"], label="SDNQ Weights", value="int8", info="int8=best balance, fp8=H100+, int4=experimental")
+                        v2v_sdnq_triton_mm = gr.Checkbox(label="Triton MM", value=True, info="Use Triton int8 kernel (faster on 4090/5090)")
+                        v2v_sdnq_compile = gr.Checkbox(label="torch.compile SDNQ", value=True, info="Compile SDNQ kernels (better throughput after warmup)")
+                    with gr.Row():
                         v2v_enable_block_swap = gr.Checkbox(label="Enable Block Swap", value=True, info="Required for 24GB GPUs")
+                        v2v_offload_inactive = gr.Checkbox(label="Offload Inactive Models", value=False, info="Offload text encoder & VAE to CPU when not in use (auto-enabled with block swap)")
                         v2v_blocks_in_memory = gr.Slider(minimum=1, maximum=60, step=1, label="Blocks in Memory", value=2, info="Number of transformer blocks to keep in GPU memory")
                     with gr.Row():
                         v2v_dtype_select = gr.Radio(choices=["bfloat16", "float16", "float32", "fp8_scaled"], label="Default Data Type", value="bfloat16", info="Used for all components if specific dtypes not set. fp8_scaled provides ~50% memory savings.")
@@ -2261,13 +3066,13 @@ def create_interface():
                 v2v_generate_btn.click(
                     fn=generate_v2v_video,
                     inputs=[
-                        v2v_prompt, v2v_negative_prompt, v2v_input_video, v2v_input_video2, v2v_num_cond_frames,
+                        v2v_prompt, v2v_negative_prompt, v2v_input_video, v2v_input_video2, v2v_input_image2, v2v_num_cond_frames,
                         v2v_normalize_frames, v2v_model_config, v2v_dit_checkpoint_path, v2v_attention_engine,
                         v2v_attention_type, v2v_nabla_P, v2v_nabla_wT, v2v_nabla_wW, v2v_nabla_wH,
                         v2v_width, v2v_height, v2v_video_duration, v2v_sample_steps,
                         v2v_guidance_weight, v2v_scheduler_scale, v2v_seed,
                         v2v_use_mixed_weights, v2v_use_int8, v2v_use_torch_compile, v2v_use_magcache,
-                        v2v_enable_block_swap, v2v_blocks_in_memory, v2v_dtype_select,
+                        v2v_enable_block_swap, v2v_offload_inactive, v2v_blocks_in_memory, v2v_dtype_select,
                         v2v_text_encoder_dtype_select, v2v_vae_dtype_select, v2v_computation_dtype_select,
                         v2v_save_path, v2v_batch_size,
                         v2v_enable_preview, v2v_preview_steps,
@@ -2277,7 +3082,10 @@ def create_interface():
                         v2v_save_latents_checkbox,
                         v2v_use_apg, v2v_apg_momentum, v2v_apg_norm_threshold,
                         v2v_enable_denoise, v2v_denoise_strength,
-                        v2v_enable_ultravico, v2v_ultravico_alpha, v2v_ultravico_suppress_harmonics, v2v_ultravico_beta
+                        v2v_enable_ultravico, v2v_ultravico_alpha, v2v_ultravico_suppress_harmonics, v2v_ultravico_beta,
+                        v2v_use_sdnq, v2v_sdnq_weights_dtype, v2v_sdnq_triton_mm, v2v_sdnq_compile,
+                        v2v_end_noise_schedule, v2v_end_noise_start, v2v_end_noise_end,
+                        v2v_start_noise_schedule, v2v_start_noise_level
                     ],
                     outputs=[v2v_output, v2v_preview_output, v2v_batch_progress, v2v_progress_text]
                 )
@@ -2425,9 +3233,115 @@ def create_interface():
                     ]
                 )
 
+            # =====================================================================
+            # JOB QUEUE TAB - Browser-Independent Generation
+            # =====================================================================
+            with gr.Tab("Job Queue", id="queue"):
+                gr.Markdown("""
+                ## Job Queue - Browser-Independent Generation
+
+                **All video generation now continues even if you close your browser!**
+
+                The "Generate Video" button now uses the queue system with automatic live updates.
+                The background worker starts automatically when you launch `python k1.py`.
+
+                ### How It Works:
+                1. Click "Generate Video" - jobs are queued and progress updates automatically
+                2. If you close the browser, generation continues in the background
+                3. Return anytime to see completed videos or check progress
+                4. Use "Add to Queue" for silent queuing without live updates
+
+                ### Notes:
+                - Jobs are stored in `job_queue.json` and persist across restarts
+                - The worker processes one job at a time in FIFO order
+                - Use "Stop Generation" to cancel pending jobs in the current batch
+                """)
+
+                with gr.Row():
+                    queue_status_display = gr.Textbox(
+                        label="Queue Status",
+                        interactive=False,
+                        value="Click 'Refresh Queue' to see status"
+                    )
+                    refresh_queue_btn = gr.Button("Refresh Queue", variant="secondary")
+
+                with gr.Row():
+                    job_list_display = gr.Textbox(
+                        label="Jobs (Recent 20)",
+                        interactive=False,
+                        lines=15,
+                        value="Click 'Refresh Queue' to see jobs"
+                    )
+
+                with gr.Row():
+                    job_id_input = gr.Textbox(
+                        label="Job ID",
+                        placeholder="Enter job ID to cancel or view",
+                        scale=2
+                    )
+                    cancel_job_btn = gr.Button("Cancel Job", variant="stop")
+                    clear_completed_btn = gr.Button("Clear Completed Jobs", variant="secondary")
+
+                with gr.Row():
+                    queue_action_status = gr.Textbox(
+                        label="Action Result",
+                        interactive=False
+                    )
+
+                with gr.Row():
+                    with gr.Column():
+                        job_video_output = gr.Video(label="Job Video Output")
+                    with gr.Column():
+                        job_preview_output = gr.Video(label="Job Preview")
+
+                with gr.Row():
+                    job_status_display = gr.Textbox(label="Job Status", interactive=False)
+                    job_progress_display = gr.Textbox(label="Job Progress", interactive=False)
+
+                poll_job_btn = gr.Button("Check Job Status", variant="primary")
+
+                # Event handlers
+                refresh_queue_btn.click(
+                    fn=get_queue_display,
+                    outputs=[queue_status_display, job_list_display]
+                )
+
+                cancel_job_btn.click(
+                    fn=cancel_queued_job,
+                    inputs=[job_id_input],
+                    outputs=[queue_action_status]
+                )
+
+                clear_completed_btn.click(
+                    fn=clear_completed_jobs,
+                    outputs=[queue_action_status]
+                )
+
+                poll_job_btn.click(
+                    fn=poll_job_status,
+                    inputs=[job_id_input],
+                    outputs=[job_video_output, job_preview_output, job_status_display, job_progress_display]
+                )
+
     return demo
 
+def start_background_worker():
+    """Start the job queue worker in a background thread."""
+    from worker import Worker
+    queue = get_queue()
+    worker = Worker(queue, poll_interval=2.0)
+
+    # Run worker in daemon thread so it exits when main process exits
+    worker_thread = threading.Thread(target=worker.run, daemon=True)
+    worker_thread.start()
+    print("[k1.py] Background job worker started")
+    return worker_thread
+
+
 if __name__ == "__main__":
+    # Start background worker for queue processing
+    worker_thread = start_background_worker()
+
     demo = create_interface()
     demo.launch(server_name="0.0.0.0", share=False)
     #mod

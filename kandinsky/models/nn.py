@@ -10,6 +10,44 @@ from .attention import SelfAttentionEngine
 from .int8_layers import create_int8_linear
 from .compile_config import maybe_compile
 
+
+def create_linear(
+    in_features: int,
+    out_features: int,
+    bias: bool = True,
+    block_size: int = 128,
+    dtype: torch.dtype = torch.bfloat16,
+    use_int8: bool = False,
+    use_sdnq: bool = False,
+) -> nn.Module:
+    """
+    Factory function to create appropriate linear layer based on quantization mode.
+
+    Args:
+        in_features: Input dimension
+        out_features: Output dimension
+        bias: Whether to use bias
+        block_size: Block size for INT8 quantization
+        dtype: Data type for computation
+        use_int8: Use legacy INT8 quantization (custom Triton kernels)
+        use_sdnq: Use SDNQ quantization (applied post-loading)
+
+    Returns:
+        Linear layer (standard nn.Linear for SDNQ, Int8Linear for legacy)
+    """
+    if use_sdnq:
+        # SDNQ quantizes standard Linear layers after weight loading
+        return nn.Linear(in_features, out_features, bias=bias, dtype=dtype)
+    elif use_int8:
+        # Legacy INT8 with custom Triton kernels
+        return create_int8_linear(
+            in_features, out_features, bias=bias,
+            block_size=block_size, dtype=dtype, use_int8=True
+        )
+    else:
+        # Standard precision
+        return nn.Linear(in_features, out_features, bias=bias, dtype=dtype)
+
 @maybe_compile()
 @torch.autocast(device_type="cuda", dtype=torch.float32)
 def apply_scale_shift_norm(norm, x, scale, shift):
@@ -152,29 +190,29 @@ class Modulation(nn.Module):
         return self.out_layer(self.activation(x))
 
 class MultiheadSelfAttentionEnc(nn.Module):
-    def __init__(self, num_channels, head_dim, use_int8=False, int8_block_size=128, dtype=torch.bfloat16):
+    def __init__(self, num_channels, head_dim, use_int8=False, int8_block_size=128, dtype=torch.bfloat16, use_sdnq=False):
         super().__init__()
         assert num_channels % head_dim == 0
         self.num_heads = num_channels // head_dim
 
-        self.to_query = create_int8_linear(
+        self.to_query = create_linear(
             num_channels, num_channels, bias=True,
-            block_size=int8_block_size, dtype=dtype, use_int8=use_int8
+            block_size=int8_block_size, dtype=dtype, use_int8=use_int8, use_sdnq=use_sdnq
         )
-        self.to_key = create_int8_linear(
+        self.to_key = create_linear(
             num_channels, num_channels, bias=True,
-            block_size=int8_block_size, dtype=dtype, use_int8=use_int8
+            block_size=int8_block_size, dtype=dtype, use_int8=use_int8, use_sdnq=use_sdnq
         )
-        self.to_value = create_int8_linear(
+        self.to_value = create_linear(
             num_channels, num_channels, bias=True,
-            block_size=int8_block_size, dtype=dtype, use_int8=use_int8
+            block_size=int8_block_size, dtype=dtype, use_int8=use_int8, use_sdnq=use_sdnq
         )
         self.query_norm = nn.RMSNorm(head_dim)
         self.key_norm = nn.RMSNorm(head_dim)
 
-        self.out_layer = create_int8_linear(
+        self.out_layer = create_linear(
             num_channels, num_channels, bias=True,
-            block_size=int8_block_size, dtype=dtype, use_int8=use_int8
+            block_size=int8_block_size, dtype=dtype, use_int8=use_int8, use_sdnq=use_sdnq
         )
 
         self.attn_engine = SelfAttentionEngine("sdpa")
@@ -223,29 +261,29 @@ class MultiheadSelfAttentionEnc(nn.Module):
         return out
 
 class MultiheadSelfAttentionDec(nn.Module):
-    def __init__(self, num_channels, head_dim, attention_engine="auto", use_int8=False, int8_block_size=128, dtype=torch.bfloat16):
+    def __init__(self, num_channels, head_dim, attention_engine="auto", use_int8=False, int8_block_size=128, dtype=torch.bfloat16, use_sdnq=False):
         super().__init__()
         assert num_channels % head_dim == 0
         self.num_heads = num_channels // head_dim
 
-        self.to_query = create_int8_linear(
+        self.to_query = create_linear(
             num_channels, num_channels, bias=True,
-            block_size=int8_block_size, dtype=dtype, use_int8=use_int8
+            block_size=int8_block_size, dtype=dtype, use_int8=use_int8, use_sdnq=use_sdnq
         )
-        self.to_key = create_int8_linear(
+        self.to_key = create_linear(
             num_channels, num_channels, bias=True,
-            block_size=int8_block_size, dtype=dtype, use_int8=use_int8
+            block_size=int8_block_size, dtype=dtype, use_int8=use_int8, use_sdnq=use_sdnq
         )
-        self.to_value = create_int8_linear(
+        self.to_value = create_linear(
             num_channels, num_channels, bias=True,
-            block_size=int8_block_size, dtype=dtype, use_int8=use_int8
+            block_size=int8_block_size, dtype=dtype, use_int8=use_int8, use_sdnq=use_sdnq
         )
         self.query_norm = nn.RMSNorm(head_dim)
         self.key_norm = nn.RMSNorm(head_dim)
 
-        self.out_layer = create_int8_linear(
+        self.out_layer = create_linear(
             num_channels, num_channels, bias=True,
-            block_size=int8_block_size, dtype=dtype, use_int8=use_int8
+            block_size=int8_block_size, dtype=dtype, use_int8=use_int8, use_sdnq=use_sdnq
         )
 
         self.attn_engine = SelfAttentionEngine(attention_engine)
@@ -272,20 +310,28 @@ class MultiheadSelfAttentionDec(nn.Module):
     @maybe_compile()
     def attention(self, query, key, value):
         # Check if UltraViCo is enabled (lazy import to avoid overhead when disabled)
-        ultravico_bias = None
+        ultravico_params = None
         try:
-            from .ultravico import get_ultravico_bias_auto
-            ultravico_bias = get_ultravico_bias_auto(query.shape[0], query.device, torch.float32)
+            from .ultravico import is_ultravico_enabled, get_ultravico_params
+            if is_ultravico_enabled():
+                ultravico_params = get_ultravico_params()
         except ImportError:
             pass
 
-        if ultravico_bias is not None:
-            # Use SDPA with UltraViCo attention bias for long video extrapolation
+        if ultravico_params is not None:
+            # Use custom Triton kernel with UltraViCo decay (memory efficient)
+            from .ultravico_triton import ultravico_attention
+            hw, window_radius, log_alpha, log_beta, suppress_harmonics, gamma, period = ultravico_params
             q = query.unsqueeze(0).transpose(1, 2).contiguous()
             k = key.unsqueeze(0).transpose(1, 2).contiguous()
             v = value.unsqueeze(0).transpose(1, 2).contiguous()
-            bias = ultravico_bias.unsqueeze(0).unsqueeze(0)  # [1, 1, seq, seq]
-            out = F.scaled_dot_product_attention(q, k, v, attn_mask=bias)
+            out = ultravico_attention(
+                q, k, v, hw, window_radius, log_alpha,
+                log_beta=log_beta,
+                suppress_harmonics=suppress_harmonics,
+                gamma=gamma,
+                period=period,
+            )
             out = out.transpose(1, 2).squeeze(0).contiguous().flatten(-2, -1)
         else:
             # Original path - no changes
@@ -306,12 +352,23 @@ class MultiheadSelfAttentionDec(nn.Module):
             sparse_params["sta_mask"],
             thr=sparse_params["P"],
         )
+
+        # Check if UltraViCo is enabled
+        ultravico_score_mod = None
+        try:
+            from .ultravico import is_ultravico_enabled, get_ultravico_score_mod
+            if is_ultravico_enabled():
+                ultravico_score_mod = get_ultravico_score_mod()
+        except ImportError:
+            pass
+
         out = (
             flex_attention(
                 query,
                 key,
                 value,
-                block_mask=block_mask
+                block_mask=block_mask,
+                score_mod=ultravico_score_mod  # Apply UltraViCo decay if enabled
             )
             .transpose(1, 2)
             .squeeze(0)
@@ -406,29 +463,29 @@ class MultiheadSelfAttentionDec(nn.Module):
 
 
 class MultiheadCrossAttention(nn.Module):
-    def __init__(self, num_channels, head_dim, use_int8=False, int8_block_size=128, dtype=torch.bfloat16):
+    def __init__(self, num_channels, head_dim, use_int8=False, int8_block_size=128, dtype=torch.bfloat16, use_sdnq=False):
         super().__init__()
         assert num_channels % head_dim == 0
         self.num_heads = num_channels // head_dim
 
-        self.to_query = create_int8_linear(
+        self.to_query = create_linear(
             num_channels, num_channels, bias=True,
-            block_size=int8_block_size, dtype=dtype, use_int8=use_int8
+            block_size=int8_block_size, dtype=dtype, use_int8=use_int8, use_sdnq=use_sdnq
         )
-        self.to_key = create_int8_linear(
+        self.to_key = create_linear(
             num_channels, num_channels, bias=True,
-            block_size=int8_block_size, dtype=dtype, use_int8=use_int8
+            block_size=int8_block_size, dtype=dtype, use_int8=use_int8, use_sdnq=use_sdnq
         )
-        self.to_value = create_int8_linear(
+        self.to_value = create_linear(
             num_channels, num_channels, bias=True,
-            block_size=int8_block_size, dtype=dtype, use_int8=use_int8
+            block_size=int8_block_size, dtype=dtype, use_int8=use_int8, use_sdnq=use_sdnq
         )
         self.query_norm = nn.RMSNorm(head_dim)
         self.key_norm = nn.RMSNorm(head_dim)
 
-        self.out_layer = create_int8_linear(
+        self.out_layer = create_linear(
             num_channels, num_channels, bias=True,
-            block_size=int8_block_size, dtype=dtype, use_int8=use_int8
+            block_size=int8_block_size, dtype=dtype, use_int8=use_int8, use_sdnq=use_sdnq
         )
 
         self.attn_engine = SelfAttentionEngine("sdpa")
@@ -475,20 +532,22 @@ class MultiheadCrossAttention(nn.Module):
 
 
 class FeedForward(nn.Module):
-    def __init__(self, dim, ff_dim, use_int8=False, int8_block_size=128, dtype=torch.bfloat16):
+    def __init__(self, dim, ff_dim, use_int8=False, int8_block_size=128, dtype=torch.bfloat16, use_sdnq=False):
         super().__init__()
-        self.in_layer = create_int8_linear(
+        self.in_layer = create_linear(
             dim, ff_dim, bias=False,
             block_size=int8_block_size,
             dtype=dtype,
-            use_int8=use_int8
+            use_int8=use_int8,
+            use_sdnq=use_sdnq
         )
         self.activation = nn.GELU()
-        self.out_layer = create_int8_linear(
+        self.out_layer = create_linear(
             ff_dim, dim, bias=False,
             block_size=int8_block_size,
             dtype=dtype,
-            use_int8=use_int8
+            use_int8=use_int8,
+            use_sdnq=use_sdnq
         )
 
     @maybe_compile()

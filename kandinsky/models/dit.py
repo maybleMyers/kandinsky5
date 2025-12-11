@@ -21,7 +21,7 @@ from .compile_config import maybe_compile
 
 
 class TransformerEncoderBlock(nn.Module):
-    def __init__(self, model_dim, time_dim, ff_dim, head_dim, use_int8=False, int8_block_size=128, dtype=torch.bfloat16):
+    def __init__(self, model_dim, time_dim, ff_dim, head_dim, use_int8=False, int8_block_size=128, dtype=torch.bfloat16, use_sdnq=False):
         super().__init__()
         self.text_modulation = Modulation(time_dim, model_dim, 6)
 
@@ -30,7 +30,8 @@ class TransformerEncoderBlock(nn.Module):
             model_dim, head_dim,
             use_int8=use_int8,
             int8_block_size=int8_block_size,
-            dtype=dtype
+            dtype=dtype,
+            use_sdnq=use_sdnq
         )
 
         self.feed_forward_norm = nn.LayerNorm(model_dim, elementwise_affine=False)
@@ -38,7 +39,8 @@ class TransformerEncoderBlock(nn.Module):
             model_dim, ff_dim,
             use_int8=use_int8,
             int8_block_size=int8_block_size,
-            dtype=dtype
+            dtype=dtype,
+            use_sdnq=use_sdnq
         )
 
     def forward(self, x, time_embed, rope, attention_mask=None):
@@ -56,7 +58,7 @@ class TransformerEncoderBlock(nn.Module):
 
 
 class TransformerDecoderBlock(nn.Module):
-    def __init__(self, model_dim, time_dim, ff_dim, head_dim, attention_engine="auto", use_int8=False, int8_block_size=128, dtype=torch.bfloat16):
+    def __init__(self, model_dim, time_dim, ff_dim, head_dim, attention_engine="auto", use_int8=False, int8_block_size=128, dtype=torch.bfloat16, use_sdnq=False):
         super().__init__()
         self.visual_modulation = Modulation(time_dim, model_dim, 9)
 
@@ -65,7 +67,8 @@ class TransformerDecoderBlock(nn.Module):
             model_dim, head_dim, attention_engine,
             use_int8=use_int8,
             int8_block_size=int8_block_size,
-            dtype=dtype
+            dtype=dtype,
+            use_sdnq=use_sdnq
         )
 
         self.cross_attention_norm = nn.LayerNorm(model_dim, elementwise_affine=False)
@@ -73,7 +76,8 @@ class TransformerDecoderBlock(nn.Module):
             model_dim, head_dim,
             use_int8=use_int8,
             int8_block_size=int8_block_size,
-            dtype=dtype
+            dtype=dtype,
+            use_sdnq=use_sdnq
         )
 
         self.feed_forward_norm = nn.LayerNorm(model_dim, elementwise_affine=False)
@@ -81,7 +85,8 @@ class TransformerDecoderBlock(nn.Module):
             model_dim, ff_dim,
             use_int8=use_int8,
             int8_block_size=int8_block_size,
-            dtype=dtype
+            dtype=dtype,
+            use_sdnq=use_sdnq
         )
 
     def forward(self, visual_embed, text_embed, time_embed, rope, sparse_params, attention_mask=None,
@@ -142,7 +147,8 @@ class DiffusionTransformer3D(nn.Module):
         attention_engine="auto",
         use_int8=False,
         int8_block_size=128,
-        dtype=torch.bfloat16
+        dtype=torch.bfloat16,
+        use_sdnq=False
     ):
         super().__init__()
         head_dim = sum(axes_dims)
@@ -151,6 +157,7 @@ class DiffusionTransformer3D(nn.Module):
         self.patch_size = patch_size
         self.visual_cond = visual_cond
         self.use_int8 = use_int8
+        self.use_sdnq = use_sdnq
 
         visual_embed_dim = 2 * in_visual_dim + 1 if visual_cond else in_visual_dim
         self.time_embeddings = TimeEmbeddings(model_dim, time_dim)
@@ -165,7 +172,8 @@ class DiffusionTransformer3D(nn.Module):
                     model_dim, time_dim, ff_dim, head_dim,
                     use_int8=use_int8,
                     int8_block_size=int8_block_size,
-                    dtype=dtype
+                    dtype=dtype,
+                    use_sdnq=use_sdnq
                 )
                 for _ in range(num_text_blocks)
             ]
@@ -178,7 +186,8 @@ class DiffusionTransformer3D(nn.Module):
                     model_dim, time_dim, ff_dim, head_dim, attention_engine,
                     use_int8=use_int8,
                     int8_block_size=int8_block_size,
-                    dtype=dtype
+                    dtype=dtype,
+                    use_sdnq=use_sdnq
                 )
                 for _ in range(num_visual_blocks)
             ]

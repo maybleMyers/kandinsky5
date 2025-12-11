@@ -834,6 +834,12 @@ def generate_v2v_join(
     use_apg=False,
     apg_momentum=-0.75,
     apg_norm_threshold=55.0,
+    # Noise scheduling parameters for end frames
+    end_noise_schedule="progressive",  # "progressive", "fixed", "symmetric"
+    end_noise_start=1.0,  # Initial noise level for end frames (1.0 = full noise, 0.0 = clean)
+    end_noise_end=0.0,    # Final noise level for end frames
+    start_noise_schedule="fixed",  # Usually keep start frames clean
+    start_noise_level=0.0,  # Noise level for start frames (0.0 = clean)
 ):
     """
     Generate video joining with dual conditioning (start and end frames).
@@ -856,6 +862,14 @@ def generate_v2v_join(
         start_cond_latents: Start conditioning latents [num_cond_frames, H, W, C]
         end_cond_latents: End conditioning latents [num_cond_frames, H, W, C]
         conf: Model configuration
+        end_noise_schedule: Noise schedule for end frames:
+            - "progressive": Noise decreases from end_noise_start to end_noise_end over steps
+            - "fixed": Use constant noise level (end_noise_start)
+            - "symmetric": Match the timestep (same as middle region would have)
+        end_noise_start: Initial noise level for end frames (1.0 = full noise, 0.0 = clean)
+        end_noise_end: Final noise level for end frames (only for "progressive")
+        start_noise_schedule: Noise schedule for start frames (usually "fixed")
+        start_noise_level: Noise level for start frames (0.0 = clean anchoring)
         ...
 
     Returns:
@@ -872,9 +886,27 @@ def generate_v2v_join(
     # Store original noise for early-stop decode
     original_noise = img.clone()
 
+    # Store noise for conditioning frames to enable noise injection
+    start_noise = img[:num_start_cond_frames].clone()
+    end_noise = img[-num_end_cond_frames:].clone()
+
     sparse_params = get_sparse_params(conf, {"visual": img}, device)
     timesteps = torch.linspace(1, 0, num_steps + 1, device=device)
     timesteps = scheduler_scale * timesteps / (1 + (scheduler_scale - 1) * timesteps)
+
+    # Pre-compute noise schedule for end frames
+    if end_noise_schedule == "progressive":
+        # Linear interpolation from end_noise_start to end_noise_end
+        end_noise_levels = torch.linspace(end_noise_start, end_noise_end, num_steps, device=device)
+    elif end_noise_schedule == "symmetric":
+        # Use the same timestep as middle region
+        end_noise_levels = timesteps[:-1].clone()
+    else:  # "fixed"
+        end_noise_levels = torch.full((num_steps,), end_noise_start, device=device)
+
+    # Log noise schedule info
+    print(f">>> End noise schedule: {end_noise_schedule}")
+    print(f">>> End noise levels: start={end_noise_levels[0].item():.4f}, mid={end_noise_levels[num_steps//2].item():.4f}, end={end_noise_levels[-1].item():.4f}")
 
     # Initialize APG momentum buffer if enabled
     momentum_buffer = MomentumBuffer(apg_momentum) if use_apg else None
@@ -891,8 +923,22 @@ def generate_v2v_join(
             start_cond_device = start_cond_latents.to(device=img.device, dtype=img.dtype)
             end_cond_device = end_cond_latents.to(device=img.device, dtype=img.dtype)
 
-            img[:num_start_cond_frames] = start_cond_device
-            img[-num_end_cond_frames:] = end_cond_device
+            # Apply noise scheduling to start frames
+            if start_noise_schedule == "fixed" and start_noise_level > 0:
+                noisy_start = start_cond_device + start_noise_level * start_noise
+                img[:num_start_cond_frames] = noisy_start
+            else:
+                img[:num_start_cond_frames] = start_cond_device
+
+            # Apply noise scheduling to end frames
+            end_noise_level = end_noise_levels[i]
+            if end_noise_level > 0:
+                # Add noise proportional to the schedule: x_noisy = x_clean + sigma * noise
+                noisy_end = end_cond_device + end_noise_level * end_noise
+                img[-num_end_cond_frames:] = noisy_end
+            else:
+                img[-num_end_cond_frames:] = end_cond_device
+
             visual_cond_mask[:num_start_cond_frames] = 1
             visual_cond_mask[-num_end_cond_frames:] = 1
 
@@ -1008,6 +1054,12 @@ def generate_sample_v2v_join(
     use_apg=False,
     apg_momentum=-0.75,
     apg_norm_threshold=55.0,
+    # Noise scheduling parameters
+    end_noise_schedule="progressive",
+    end_noise_start=1.0,
+    end_noise_end=0.0,
+    start_noise_schedule="fixed",
+    start_noise_level=0.0,
 ):
     """
     Generate video joining with dual conditioning (start and end frames).
@@ -1105,6 +1157,12 @@ def generate_sample_v2v_join(
                 use_apg=use_apg,
                 apg_momentum=apg_momentum,
                 apg_norm_threshold=apg_norm_threshold,
+                # Pass noise scheduling parameters
+                end_noise_schedule=end_noise_schedule,
+                end_noise_start=end_noise_start,
+                end_noise_end=end_noise_end,
+                start_noise_schedule=start_noise_schedule,
+                start_noise_level=start_noise_level,
             )
 
     # Handle early stop results
