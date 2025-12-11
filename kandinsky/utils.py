@@ -959,6 +959,11 @@ def get_I2V_pipeline_with_block_swap(
                       for k, v in state_dict.items()}
         print(f"[TIMING] Dtype conversion done in {time.perf_counter() - t0:.1f}s", flush=True)
 
+    print("[TIMING] Materializing model from meta device...", flush=True)
+    t0 = time.perf_counter()
+    dit = dit.to_empty(device='cpu')
+    print(f"[TIMING] Model materialized in {time.perf_counter() - t0:.1f}s", flush=True)
+
     print("[TIMING] Applying state_dict to model...", flush=True)
     t0 = time.perf_counter()
     if use_sdnq:
@@ -1236,6 +1241,11 @@ def get_T2V_pipeline_with_block_swap(
         state_dict = {k: v.to(computation_dtype) if v.dtype in [torch.float32, torch.float16, torch.bfloat16] else v
                       for k, v in state_dict.items()}
         print(f"[TIMING] Dtype conversion done in {time.perf_counter() - t0:.1f}s", flush=True)
+
+    print("[TIMING] Materializing model from meta device...", flush=True)
+    t0 = time.perf_counter()
+    dit = dit.to_empty(device='cpu')
+    print(f"[TIMING] Model materialized in {time.perf_counter() - t0:.1f}s", flush=True)
 
     print("[TIMING] Applying state_dict to model...", flush=True)
     t0 = time.perf_counter()
