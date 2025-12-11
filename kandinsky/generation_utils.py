@@ -1,6 +1,7 @@
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "False"
 
+import time
 import torch
 from tqdm import tqdm
 
@@ -414,7 +415,12 @@ def generate_sample(
         type_of_content = "video"
 
     with torch.no_grad():
-        # Pass clip_texts if a separate clip_prompt is provided
+        print("[TIMING] Moving text encoder to GPU...", flush=True)
+        t0 = time.perf_counter()
+        text_embedder = text_embedder.to(device)
+        print(f"[TIMING] Text encoder on GPU in {time.perf_counter() - t0:.1f}s", flush=True)
+
+        t0 = time.perf_counter()
         clip_texts = [clip_prompt] if clip_prompt else None
         bs_text_embed, text_cu_seqlens, attention_mask = text_embedder.encode(
             [caption], type_of_content=type_of_content, clip_texts=clip_texts
@@ -422,12 +428,8 @@ def generate_sample(
         bs_null_text_embed, null_text_cu_seqlens, null_attention_mask = text_embedder.encode(
             [negative_caption], type_of_content=type_of_content
         )
+        print(f"[TIMING] Text encoding done in {time.perf_counter() - t0:.1f}s", flush=True)
 
-    # Clean up text embedder after encoding to free VRAM and RAM
-    # Text embedder is no longer needed after this point
-    if offload or force_offload:
-        text_embedder = text_embedder.to('cpu')
-    # Delete text embedder components to free memory
     del text_embedder.embedder.model
     del text_embedder.clip_embedder.model
     del text_embedder
@@ -1088,6 +1090,12 @@ def generate_sample_v2v_join(
     type_of_content = "video"
 
     with torch.no_grad():
+        print("[TIMING] Moving text encoder to GPU...", flush=True)
+        t0 = time.perf_counter()
+        text_embedder = text_embedder.to(device)
+        print(f"[TIMING] Text encoder on GPU in {time.perf_counter() - t0:.1f}s", flush=True)
+
+        t0 = time.perf_counter()
         clip_texts = [clip_prompt] if clip_prompt else None
         bs_text_embed, text_cu_seqlens, attention_mask = text_embedder.encode(
             [caption], type_of_content=type_of_content, clip_texts=clip_texts
@@ -1095,10 +1103,8 @@ def generate_sample_v2v_join(
         bs_null_text_embed, null_text_cu_seqlens, null_attention_mask = text_embedder.encode(
             [negative_caption], type_of_content=type_of_content
         )
+        print(f"[TIMING] Text encoding done in {time.perf_counter() - t0:.1f}s", flush=True)
 
-    # Clean up text embedder
-    if offload or force_offload:
-        text_embedder = text_embedder.to('cpu')
     del text_embedder.embedder.model
     del text_embedder.clip_embedder.model
     del text_embedder
@@ -1309,6 +1315,12 @@ def generate_sample_v2v(
         type_of_content = "video"
 
     with torch.no_grad():
+        print("[TIMING] Moving text encoder to GPU...", flush=True)
+        t0 = time.perf_counter()
+        text_embedder = text_embedder.to(device)
+        print(f"[TIMING] Text encoder on GPU in {time.perf_counter() - t0:.1f}s", flush=True)
+
+        t0 = time.perf_counter()
         clip_texts = [clip_prompt] if clip_prompt else None
         bs_text_embed, text_cu_seqlens, attention_mask = text_embedder.encode(
             [caption], type_of_content=type_of_content, clip_texts=clip_texts
@@ -1316,10 +1328,8 @@ def generate_sample_v2v(
         bs_null_text_embed, null_text_cu_seqlens, null_attention_mask = text_embedder.encode(
             [negative_caption], type_of_content=type_of_content
         )
+        print(f"[TIMING] Text encoding done in {time.perf_counter() - t0:.1f}s", flush=True)
 
-    # Clean up text embedder
-    if offload or force_offload:
-        text_embedder = text_embedder.to('cpu')
     del text_embedder.embedder.model
     del text_embedder.clip_embedder.model
     del text_embedder
@@ -1507,7 +1517,12 @@ def generate_sample_i2v(
         type_of_content = "video"
 
     with torch.no_grad():
-        # Pass clip_texts if a separate clip_prompt is provided
+        print("[TIMING] Moving text encoder to GPU...", flush=True)
+        t0 = time.perf_counter()
+        text_embedder = text_embedder.to(device)
+        print(f"[TIMING] Text encoder on GPU in {time.perf_counter() - t0:.1f}s", flush=True)
+
+        t0 = time.perf_counter()
         clip_texts = [clip_prompt] if clip_prompt else None
         bs_text_embed, text_cu_seqlens, attention_mask = text_embedder.encode(
             [caption], type_of_content=type_of_content, clip_texts=clip_texts
@@ -1515,12 +1530,8 @@ def generate_sample_i2v(
         bs_null_text_embed, null_text_cu_seqlens, null_attention_mask = text_embedder.encode(
             [negative_caption], type_of_content=type_of_content
         )
+        print(f"[TIMING] Text encoding done in {time.perf_counter() - t0:.1f}s", flush=True)
 
-    # Clean up text embedder after encoding to free VRAM and RAM
-    # Text embedder is no longer needed after this point
-    if offload or force_offload:
-        text_embedder = text_embedder.to('cpu')
-    # Delete text embedder components to free memory
     del text_embedder.embedder.model
     del text_embedder.clip_embedder.model
     del text_embedder
@@ -2149,6 +2160,12 @@ def generate_sample_denoise(
     type_of_content = "video"
 
     with torch.no_grad():
+        print("[TIMING] Moving text encoder to GPU...", flush=True)
+        t0 = time.perf_counter()
+        text_embedder = text_embedder.to(device)
+        print(f"[TIMING] Text encoder on GPU in {time.perf_counter() - t0:.1f}s", flush=True)
+
+        t0 = time.perf_counter()
         clip_texts = [clip_prompt] if clip_prompt else None
         bs_text_embed, text_cu_seqlens, attention_mask = text_embedder.encode(
             [caption], type_of_content=type_of_content, clip_texts=clip_texts
@@ -2156,10 +2173,8 @@ def generate_sample_denoise(
         bs_null_text_embed, null_text_cu_seqlens, null_attention_mask = text_embedder.encode(
             [negative_caption], type_of_content=type_of_content
         )
+        print(f"[TIMING] Text encoding done in {time.perf_counter() - t0:.1f}s", flush=True)
 
-    # Clean up text embedder
-    if offload or force_offload:
-        text_embedder = text_embedder.to('cpu')
     del text_embedder.embedder.model
     del text_embedder.clip_embedder.model
     del text_embedder

@@ -916,22 +916,21 @@ def get_I2V_pipeline_with_block_swap(
         vae = vae.to(device=device_map["vae"], dtype=vae_dtype)
     print(f"[TIMING] VAE loaded in {time.perf_counter() - t0:.1f}s", flush=True)
 
-    # Build DiT with block swapping
-    print(f"[TIMING] Creating DiT architecture (this may take a while for large models)...", flush=True)
+    print(f"[TIMING] Creating DiT architecture on meta device...", flush=True)
     t0 = time.perf_counter()
 
-    # Add INT8/SDNQ configuration to dit_params
     dit_params_dict = OmegaConf.to_container(conf.model.dit_params, resolve=True)
     dit_params_dict['use_int8'] = use_int8 and not use_sdnq
     dit_params_dict['int8_block_size'] = int8_block_size
     dit_params_dict['dtype'] = computation_dtype
     dit_params_dict['use_sdnq'] = use_sdnq
 
-    dit = get_dit_with_block_swap(
-        dit_params_dict,
-        blocks_in_memory=blocks_in_memory,
-        enable_block_swap=enable_block_swap
-    )
+    with torch.device('meta'):
+        dit = get_dit_with_block_swap(
+            dit_params_dict,
+            blocks_in_memory=blocks_in_memory,
+            enable_block_swap=enable_block_swap
+        )
     print(f"[TIMING] DiT architecture created in {time.perf_counter() - t0:.1f}s", flush=True)
 
     if magcache:
@@ -1195,22 +1194,21 @@ def get_T2V_pipeline_with_block_swap(
         vae = vae.to(device=device_map["vae"], dtype=vae_dtype)
     print(f"[TIMING] VAE loaded in {time.perf_counter() - t0:.1f}s", flush=True)
 
-    # Build DiT with block swapping
-    print(f"[TIMING] Creating DiT architecture (this may take a while for large models)...", flush=True)
+    print(f"[TIMING] Creating DiT architecture on meta device...", flush=True)
     t0 = time.perf_counter()
 
-    # Add INT8/SDNQ configuration to dit_params
     dit_params_dict = OmegaConf.to_container(conf.model.dit_params, resolve=True)
     dit_params_dict['use_int8'] = use_int8 and not use_sdnq
     dit_params_dict['int8_block_size'] = int8_block_size
     dit_params_dict['dtype'] = computation_dtype
     dit_params_dict['use_sdnq'] = use_sdnq
 
-    dit = get_dit_with_block_swap(
-        dit_params_dict,
-        blocks_in_memory=blocks_in_memory,
-        enable_block_swap=enable_block_swap
-    )
+    with torch.device('meta'):
+        dit = get_dit_with_block_swap(
+            dit_params_dict,
+            blocks_in_memory=blocks_in_memory,
+            enable_block_swap=enable_block_swap
+        )
     print(f"[TIMING] DiT architecture created in {time.perf_counter() - t0:.1f}s", flush=True)
 
     if magcache:
