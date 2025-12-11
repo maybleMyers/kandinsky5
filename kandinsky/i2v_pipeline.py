@@ -470,6 +470,85 @@ def get_conditioning_frames_from_two_videos(video1_path, video2_path, num_frames
     return start_latents, end_latents, scale_factor
 
 
+def get_conditioning_video_and_image(video_path, end_image, num_frames, vae, device, alignment=16, use_deterministic=True):
+    """
+    Load a video and an end image for video + end image joining mode:
+    - Last N frames from video (start conditioning)
+    - Single end image replicated to N frames (end conditioning)
+
+    Args:
+        video_path: Path to the video file
+        end_image: Path to ending image or PIL Image
+        num_frames: Number of conditioning frames to extract from video
+        vae: VAE model
+        device: Device to use
+        alignment: Pixel alignment for resizing
+        use_deterministic: If True, use .mode() for deterministic encoding.
+
+    Returns:
+        Tuple of (start_latents, end_latents, scale_factor)
+        start_latents: Tensor of shape [num_frames, H, W, C] from video
+        end_latents: Tensor of shape [num_frames, H, W, C] from end image (replicated)
+    """
+    import torch.nn.functional as F_torch
+    from PIL import Image
+
+    # Extract last frames from video
+    pil_frames_start = extract_last_frames_from_video(video_path, num_frames)
+
+    if len(pil_frames_start) < num_frames:
+        raise ValueError(f"Video has only {len(pil_frames_start)} frames, need {num_frames}")
+
+    # Load end image
+    if isinstance(end_image, str):
+        end_pil = Image.open(end_image).convert('RGB')
+    elif isinstance(end_image, Image.Image):
+        end_pil = end_image
+    else:
+        raise ValueError(f"Unknown end_image type: {type(end_image)}")
+
+    # Determine target size from first frame of video
+    first_image = F.pil_to_tensor(pil_frames_start[0]).unsqueeze(0)
+    first_image, scale_factor = resize_image(first_image, max_area=MAX_AREA, alignment=alignment)
+    target_h, target_w = first_image.shape[2], first_image.shape[3]
+
+    vae_dtype = next(vae.parameters()).dtype
+
+    # Encode start frames (from video)
+    start_latents_list = []
+    for i, pil_image in enumerate(pil_frames_start):
+        image = F.pil_to_tensor(pil_image).unsqueeze(0)
+        image, _ = resize_image(image, max_area=MAX_AREA, alignment=alignment)
+        image = image / 127.5 - 1.
+
+        with torch.no_grad():
+            image = image.to(device=device, dtype=vae_dtype).transpose(0, 1).unsqueeze(0)
+            latent_dist = vae.encode(image, opt_tiling=False).latent_dist
+            lat_image = latent_dist.mode() if use_deterministic else latent_dist.sample()
+            lat_image = lat_image.squeeze(0).permute(1, 2, 3, 0) * vae.config.scaling_factor
+            start_latents_list.append(lat_image)
+
+    # Encode end image - resize to match video dimensions
+    end_image_tensor = F.pil_to_tensor(end_pil).unsqueeze(0)
+    end_image_tensor = F_torch.interpolate(end_image_tensor.float(), size=(target_h, target_w), mode='bilinear', align_corners=False)
+    end_image_tensor = end_image_tensor / 127.5 - 1.
+
+    with torch.no_grad():
+        end_image_tensor = end_image_tensor.to(device=device, dtype=vae_dtype).transpose(0, 1).unsqueeze(0)
+        latent_dist = vae.encode(end_image_tensor, opt_tiling=False).latent_dist
+        end_lat_image = latent_dist.mode() if use_deterministic else latent_dist.sample()
+        end_lat_image = end_lat_image.squeeze(0).permute(1, 2, 3, 0) * vae.config.scaling_factor
+
+    # Replicate end image latent to match num_frames
+    end_latents_list = [end_lat_image for _ in range(num_frames)]
+
+    # Stack latents: [num_frames, H, W, C]
+    start_latents = torch.cat(start_latents_list, dim=0)
+    end_latents = torch.cat(end_latents_list, dim=0)
+
+    return start_latents, end_latents, scale_factor
+
+
 def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24, max_frames=None, use_deterministic=True):
     """
     Load a video file and encode to latent space with proper temporal compression.

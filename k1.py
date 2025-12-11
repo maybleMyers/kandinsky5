@@ -446,6 +446,7 @@ def generate_v2v_video(
     negative_prompt: str,
     input_video: str,
     input_video2: str,
+    input_image2: str,
     num_cond_frames: int,
     normalize_frames: int,
     model_config: str,
@@ -527,15 +528,22 @@ def generate_v2v_video(
         elif int(batch_size) > 1:
             current_seed = seed + i
 
-        # Determine mode based on whether second video is provided
-        mode_name = "Video Joining" if input_video2 else "Video Continuation"
+        # Determine mode based on whether second video or ending image is provided
+        if input_video2:
+            mode_name = "Video Joining"
+            mode_prefix = "join"
+        elif input_image2:
+            mode_name = "Video + End Image"
+            mode_prefix = "v2i"
+        else:
+            mode_name = "Video Continuation"
+            mode_prefix = "v2v"
         status_text = f"Processing {i+1}/{batch_size} - {mode_name} (Seed: {current_seed})"
         yield all_generated_videos.copy(), None, status_text, f"Starting {mode_name.lower()}..."
 
         timestamp = int(time.time())
         run_id = f"{timestamp}_{random.randint(1000, 9999)}"
         unique_preview_suffix = f"k1_{run_id}"
-        mode_prefix = "join" if input_video2 else "v2v"
         output_filename = os.path.join(save_path, f"k1_{mode_prefix}_{timestamp}_{current_seed}.mp4")
         current_output_filename = output_filename
 
@@ -621,10 +629,18 @@ def generate_v2v_video(
             return
         command.extend(["--video", str(input_video)])
 
-        # Add second video if provided (joining mode)
+        # Add second video or ending image if provided (joining mode)
         if input_video2:
             command.extend(["--video2", str(input_video2)])
             # Add noise scheduling parameters for video joining (end frame control)
+            command.extend(["--end_noise_schedule", str(end_noise_schedule)])
+            command.extend(["--end_noise_start", str(end_noise_start)])
+            command.extend(["--end_noise_end", str(end_noise_end)])
+            command.extend(["--start_noise_schedule", str(start_noise_schedule)])
+            command.extend(["--start_noise_level", str(start_noise_level)])
+        elif input_image2:
+            command.extend(["--end_image", str(input_image2)])
+            # Add noise scheduling parameters for video + end image mode
             command.extend(["--end_noise_schedule", str(end_noise_schedule)])
             command.extend(["--end_noise_start", str(end_noise_start)])
             command.extend(["--end_noise_end", str(end_noise_end)])
@@ -2669,13 +2685,9 @@ def create_interface():
                     with gr.Column():
                         v2v_input_video = gr.Video(label="Input Video (for continuation)", interactive=True)
 
-                        v2v_input_video2 = gr.Video(label="Ending Video (optional - for joining mode)", interactive=True)
-
-                        gr.Markdown("""
-                        **Joining Mode (Work in Progress):** Provide both videos to create a transition:
-                        - Last N frames from the first video → Generated transition → First N frames from the second video
-                        - Leave the ending video empty for standard video continuation mode
-                        """)
+                        with gr.Accordion("Ending Video/Image (for joining mode)", open=False):
+                            v2v_input_video2 = gr.Video(label="Ending Video", interactive=True)
+                            v2v_input_image2 = gr.Image(label="Ending Image (alternative to video)", type="filepath", interactive=True)
 
                         gr.Markdown("### V2V Parameters")
                         v2v_num_cond_frames = gr.Slider(
@@ -3054,7 +3066,7 @@ def create_interface():
                 v2v_generate_btn.click(
                     fn=generate_v2v_video,
                     inputs=[
-                        v2v_prompt, v2v_negative_prompt, v2v_input_video, v2v_input_video2, v2v_num_cond_frames,
+                        v2v_prompt, v2v_negative_prompt, v2v_input_video, v2v_input_video2, v2v_input_image2, v2v_num_cond_frames,
                         v2v_normalize_frames, v2v_model_config, v2v_dit_checkpoint_path, v2v_attention_engine,
                         v2v_attention_type, v2v_nabla_P, v2v_nabla_wT, v2v_nabla_wW, v2v_nabla_wH,
                         v2v_width, v2v_height, v2v_video_duration, v2v_sample_steps,
