@@ -11,6 +11,22 @@ from .int8_layers import create_int8_linear
 from .compile_config import maybe_compile
 
 
+def reinit_rope_buffers(model):
+    """Reinitialize RoPE and TimeEmbeddings buffers after to_empty()."""
+    for name, module in model.named_modules():
+        if isinstance(module, TimeEmbeddings):
+            module.freqs = get_freqs(module.model_dim // 2, module.max_period)
+        elif isinstance(module, RoPE1D):
+            freq = get_freqs(module.dim // 2, module.max_period)
+            pos = torch.arange(module.max_pos, dtype=freq.dtype)
+            module.args = torch.outer(pos, freq)
+        elif isinstance(module, RoPE3D):
+            for i, (axes_dim, ax_max_pos) in enumerate(zip(module.axes_dims, module.max_pos)):
+                freq = get_freqs(axes_dim // 2, module.max_period)
+                pos = torch.arange(ax_max_pos, dtype=freq.dtype)
+                setattr(module, f"args_{i}", torch.outer(pos, freq))
+
+
 def create_linear(
     in_features: int,
     out_features: int,

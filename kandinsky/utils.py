@@ -15,6 +15,7 @@ from .models.vae import build_vae
 from .models.parallelize import parallelize_dit
 from .models.fp8_layers import fp8_optimization
 from .models.sdnq_layers import SDNQ_AVAILABLE, apply_sdnq_quantization, get_sdnq_info
+from .models.nn import reinit_rope_buffers
 from .i2v_pipeline import Kandinsky5I2VPipeline
 from .t2v_pipeline import Kandinsky5T2VPipeline
 from .t2i_pipeline import Kandinsky5T2IPipeline
@@ -962,6 +963,7 @@ def get_I2V_pipeline_with_block_swap(
     print("[TIMING] Materializing model from meta device...", flush=True)
     t0 = time.perf_counter()
     dit = dit.to_empty(device='cpu')
+    reinit_rope_buffers(dit)
     print(f"[TIMING] Model materialized in {time.perf_counter() - t0:.1f}s", flush=True)
 
     print("[TIMING] Applying state_dict to model...", flush=True)
@@ -1245,6 +1247,7 @@ def get_T2V_pipeline_with_block_swap(
     print("[TIMING] Materializing model from meta device...", flush=True)
     t0 = time.perf_counter()
     dit = dit.to_empty(device='cpu')
+    reinit_rope_buffers(dit)
     print(f"[TIMING] Model materialized in {time.perf_counter() - t0:.1f}s", flush=True)
 
     print("[TIMING] Applying state_dict to model...", flush=True)
