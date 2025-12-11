@@ -20,9 +20,27 @@ from .t2i_pipeline import Kandinsky5T2IPipeline
 from .magcache_utils import set_magcache_params
 
 from PIL import Image
-from safetensors.torch import load_file
+from safetensors import safe_open
 
 torch._dynamo.config.suppress_errors = True
+
+
+def load_state_dict_mmap(checkpoint_path: str, device: str = "cpu") -> dict:
+    """
+    Load safetensors checkpoint using memory-mapping for reduced memory usage.
+
+    Args:
+        checkpoint_path: Path to .safetensors file
+        device: Device to load tensors to ("cpu" or "cuda:X")
+
+    Returns:
+        State dict with tensors loaded via mmap
+    """
+    state_dict = {}
+    with safe_open(checkpoint_path, framework="pt", device=device) as f:
+        for key in f.keys():
+            state_dict[key] = f.get_tensor(key)
+    return state_dict
 
 
 def get_T2V_pipeline(
@@ -171,7 +189,7 @@ def get_T2V_pipeline(
 
     # Use checkpoint_path_override if provided, otherwise use config value
     checkpoint_path = checkpoint_path_override if checkpoint_path_override else conf.model.checkpoint_path
-    state_dict = load_file(checkpoint_path)
+    state_dict = load_state_dict_mmap(checkpoint_path)
     # Convert state dict to specified dtype (unless using mixed weights or SDNQ)
     if use_mixed_weights:
         # Preserve original weight dtypes for mixed precision
@@ -405,7 +423,7 @@ def get_I2V_pipeline(
 
     # Use checkpoint_path_override if provided, otherwise use config value
     checkpoint_path = checkpoint_path_override if checkpoint_path_override else conf.model.checkpoint_path
-    state_dict = load_file(checkpoint_path)
+    state_dict = load_state_dict_mmap(checkpoint_path)
     # Convert state dict to specified dtype (unless using mixed weights or SDNQ)
     if use_mixed_weights:
         # Preserve original weight dtypes for mixed precision
@@ -598,7 +616,7 @@ def get_T2I_pipeline(
 
     # Use checkpoint_path_override if provided, otherwise use config value
     checkpoint_path = checkpoint_path_override if checkpoint_path_override else conf.model.checkpoint_path
-    state_dict = load_file(checkpoint_path)
+    state_dict = load_state_dict_mmap(checkpoint_path)
     dit.load_state_dict(state_dict, assign=True)
 
     if not offload:
@@ -909,7 +927,7 @@ def get_I2V_pipeline_with_block_swap(
     # Use checkpoint_path_override if provided, otherwise use config value
     checkpoint_path = checkpoint_path_override if checkpoint_path_override else conf.model.checkpoint_path
     print(f"Loading DiT weights from {checkpoint_path}")
-    state_dict = load_file(checkpoint_path)
+    state_dict = load_state_dict_mmap(checkpoint_path)
     # Convert state dict to specified dtype (unless using mixed weights or SDNQ)
     if use_mixed_weights:
         # Preserve original weight dtypes for mixed precision
@@ -1167,7 +1185,7 @@ def get_T2V_pipeline_with_block_swap(
     # Use checkpoint_path_override if provided, otherwise use config value
     checkpoint_path = checkpoint_path_override if checkpoint_path_override else conf.model.checkpoint_path
     print(f"Loading DiT weights from {checkpoint_path}")
-    state_dict = load_file(checkpoint_path)
+    state_dict = load_state_dict_mmap(checkpoint_path)
     # Convert state dict to specified dtype (unless using mixed weights or SDNQ)
     if use_mixed_weights:
         # Preserve original weight dtypes for mixed precision
