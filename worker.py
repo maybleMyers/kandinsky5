@@ -16,6 +16,7 @@ The worker will automatically:
 """
 
 import argparse
+import json
 import os
 import sys
 import re
@@ -27,6 +28,32 @@ from typing import Optional, Tuple
 from datetime import datetime
 
 from job_queue import get_queue, JobQueue, JobStatus, Job
+
+
+def add_metadata_to_video(video_path: str, parameters: dict) -> None:
+    """Add generation parameters to video metadata using ffmpeg."""
+    params_json = json.dumps(parameters, indent=2)
+    temp_path = video_path.replace(".mp4", "_temp.mp4")
+
+    cmd = [
+        'ffmpeg', '-y',
+        '-i', video_path,
+        '-metadata', f'comment={params_json}',
+        '-codec', 'copy',
+        temp_path
+    ]
+
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        os.replace(temp_path, video_path)
+    except subprocess.CalledProcessError as e:
+        print(f"[Worker] Failed to add metadata: {e.stderr.decode() if e.stderr else str(e)}")
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+    except Exception as e:
+        print(f"[Worker] Metadata error: {str(e)}")
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
 
 
 class Worker:
@@ -231,6 +258,13 @@ class Worker:
 
             # Check if output file exists
             if return_code == 0 and os.path.exists(job.output_filename):
+                # Add metadata to the generated video
+                try:
+                    add_metadata_to_video(job.output_filename, job.parameters)
+                    print(f"[Worker] Added metadata to {job.output_filename}")
+                except Exception as meta_err:
+                    print(f"[Worker] Warning: Failed to add metadata: {meta_err}")
+
                 self.queue.mark_completed(job.id, return_code)
                 print(f"[Worker] Job {job.id} completed successfully")
                 return True
@@ -332,8 +366,9 @@ def main():
     parser = argparse.ArgumentParser(description="Kandinsky5 Background Worker")
     parser.add_argument("--poll-interval", type=float, default=2.0,
                        help="Interval in seconds between queue polls (default: 2.0)")
-    parser.add_argument("--queue-file", type=str, default="job_queue.json",
-                       help="Path to the job queue file (default: job_queue.json)")
+    parser.add_argument("--queue-file", type=str, default=None,
+                       help="Path to the job queue file. Auto-detects GPU-specific file "
+                            "from CUDA_VISIBLE_DEVICES if not specified.")
     args = parser.parse_args()
 
     queue = get_queue(args.queue_file)
