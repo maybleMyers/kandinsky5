@@ -68,6 +68,39 @@ def parse_progress_line(line: str) -> Optional[str]:
 
     return None
 
+def get_recent_outputs(output_folder: str = "outputs", max_files: int = 20) -> List[Tuple[str, str]]:
+    """
+    Scan the output folder for recent video files.
+    Returns list of (filepath, label) tuples sorted by modification time (newest first).
+    """
+    import glob
+    from datetime import datetime
+
+    if not os.path.exists(output_folder):
+        return []
+
+    # Find all mp4 files in the output folder
+    video_files = glob.glob(os.path.join(output_folder, "*.mp4"))
+
+    # Get modification times and sort by newest first
+    files_with_mtime = []
+    for f in video_files:
+        try:
+            mtime = os.path.getmtime(f)
+            # Create a human-readable label
+            mtime_str = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+            filename = os.path.basename(f)
+            label = f"{filename} ({mtime_str})"
+            files_with_mtime.append((mtime, f, label))
+        except OSError:
+            continue
+
+    # Sort by mtime descending (newest first)
+    files_with_mtime.sort(key=lambda x: x[0], reverse=True)
+
+    # Return top N files as (filepath, label) tuples
+    return [(f, label) for mtime, f, label in files_with_mtime[:max_files]]
+
 def generate_video(
     prompt: str,
     negative_prompt: str,
@@ -2593,9 +2626,9 @@ def create_interface():
                     outputs=[height]
                 )
 
-                # Generate button - uses queue system with auto-polling for browser-independent generation
+                # Generate button - uses Gradio's built-in queue for browser-independent generation
                 generate_btn.click(
-                    fn=generate_via_queue,
+                    fn=generate_video,
                     inputs=[
                         prompt, negative_prompt, input_image, end_image, mode, model_config, dit_checkpoint_path, attention_engine,
                         attention_type, nabla_P, nabla_wT, nabla_wW, nabla_wH,
@@ -2614,14 +2647,7 @@ def create_interface():
                         # End frame noise scheduling
                         end_noise_schedule, end_noise_start, end_noise_end, start_noise_schedule, start_noise_level
                     ],
-                    outputs=[output, preview_output, batch_progress, progress_text, current_job_id_state, current_batch_id_state, poll_timer]
-                )
-
-                # Timer polls job status for live updates
-                poll_timer.tick(
-                    fn=poll_active_job,
-                    inputs=[current_job_id_state, current_batch_id_state],
-                    outputs=[output, preview_output, batch_progress, progress_text, current_job_id_state, current_batch_id_state, poll_timer]
+                    outputs=[output, preview_output, batch_progress, progress_text]
                 )
 
                 # Queue button - submits job to background worker (same as generate but no polling)
@@ -3295,27 +3321,62 @@ def create_interface():
                 )
 
             # =====================================================================
+            # RECENT OUTPUTS TAB - View completed videos after reconnecting
+            # =====================================================================
+            with gr.Tab("Recent Outputs", id="recent"):
+                gr.Markdown("""
+                ## Recent Outputs
+
+                View recently generated videos. Useful after reconnecting from a dropped connection.
+                Videos are automatically saved to the outputs folder even if your browser disconnects.
+                """)
+
+                with gr.Row():
+                    recent_output_folder = gr.Textbox(label="Output Folder", value="outputs", scale=3)
+                    recent_max_files = gr.Slider(minimum=5, maximum=50, step=5, value=20, label="Max Files", scale=1)
+                    refresh_recent_btn = gr.Button("Refresh", variant="primary", scale=1)
+
+                recent_gallery = gr.Gallery(
+                    label="Recent Videos (newest first)",
+                    columns=[4], rows=[3], object_fit="contain", height="auto",
+                    allow_preview=True, preview=True
+                )
+
+                recent_status = gr.Textbox(label="Status", interactive=False)
+
+                def refresh_recent_outputs(folder, max_files):
+                    videos = get_recent_outputs(folder, int(max_files))
+                    if videos:
+                        return videos, f"Found {len(videos)} video(s) in {folder}"
+                    else:
+                        return [], f"No videos found in {folder}"
+
+                refresh_recent_btn.click(
+                    fn=refresh_recent_outputs,
+                    inputs=[recent_output_folder, recent_max_files],
+                    outputs=[recent_gallery, recent_status]
+                )
+
+            # =====================================================================
             # JOB QUEUE TAB - Browser-Independent Generation
             # =====================================================================
             with gr.Tab("Job Queue", id="queue"):
                 gr.Markdown("""
-                ## Job Queue - Browser-Independent Generation
+                ## Browser-Independent Generation
 
-                **All video generation now continues even if you close your browser!**
+                **Video generation continues even if you close your browser!**
 
-                The "Generate Video" button now uses the queue system with automatic live updates.
-                The background worker starts automatically when you launch `python k1.py`.
+                Using Gradio's built-in queue system, jobs continue processing server-side.
 
                 ### How It Works:
-                1. Click "Generate Video" - jobs are queued and progress updates automatically
-                2. If you close the browser, generation continues in the background
-                3. Return anytime to see completed videos or check progress
-                4. Use "Add to Queue" for silent queuing without live updates
+                1. Click "Generate Video" - job runs on the server
+                2. If browser disconnects, generation continues in the background
+                3. Videos are saved to the `outputs/` folder automatically
+                4. Use the **Recent Outputs** tab to find completed videos after reconnecting
 
                 ### Notes:
-                - Jobs are stored in `job_queue.json` and persist across restarts
-                - The worker processes one job at a time in FIFO order
-                - Use "Stop Generation" to cancel pending jobs in the current batch
+                - One job runs at a time (queue processes sequentially)
+                - Check the Recent Outputs tab to see all completed videos
                 """)
 
                 with gr.Row():
@@ -3435,9 +3496,7 @@ if __name__ == "__main__":
     cuda_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "not set")
     print(f"[k1.py] Starting on port {port}, CUDA_VISIBLE_DEVICES={cuda_devices}")
 
-    # Start background worker for queue processing
-    worker_thread = start_background_worker()
-
     demo = create_interface()
+    demo.queue(default_concurrency_limit=1, max_size=20)  # Gradio's built-in queue handles disconnections
     demo.launch(server_name="0.0.0.0", server_port=port, share=args.share)
     #mod
