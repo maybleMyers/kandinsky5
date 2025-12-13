@@ -2299,17 +2299,9 @@ def create_interface():
                         progress_text = gr.Textbox(label="Progress", interactive=False, value="")
                         save_latents_checkbox = gr.Checkbox(label="Save Latents Before VAE Decode", value=False)
 
-                # Timer for polling queue status (starts inactive)
-                poll_timer = gr.Timer(value=2, active=False)
-                # State variables to track current job/batch being polled
-                current_job_id_state = gr.State("")
-                current_batch_id_state = gr.State("")
-
                 with gr.Row():
                     generate_btn = gr.Button("Generate Video", elem_classes="green-btn")
-                    queue_btn = gr.Button("Add to Queue", variant="secondary")
                     stop_btn = gr.Button("Stop Generation", variant="stop")
-                    refresh_btn = gr.Button("↻ Refresh", variant="secondary", scale=0)
 
                 with gr.Row():
                     with gr.Column():
@@ -2650,35 +2642,10 @@ def create_interface():
                     outputs=[output, preview_output, batch_progress, progress_text]
                 )
 
-                # Queue button - submits job to background worker (same as generate but no polling)
-                queue_btn.click(
-                    fn=submit_to_queue,
-                    inputs=[
-                        prompt, negative_prompt, input_image, end_image, mode, model_config, dit_checkpoint_path, attention_engine,
-                        attention_type, nabla_P, nabla_wT, nabla_wW, nabla_wH,
-                        width, height, video_duration, sample_steps,
-                        guidance_weight, scheduler_scale, seed,
-                        use_mixed_weights, use_int8, use_torch_compile, use_magcache, enable_block_swap, offload_inactive, blocks_in_memory, dtype_select,
-                        text_encoder_dtype_select, vae_dtype_select, computation_dtype_select,
-                        save_path, batch_size,
-                        enable_preview, preview_steps,
-                        enable_vae_chunking, vae_temporal_tile_frames, vae_temporal_stride_frames,
-                        vae_spatial_tile_height, vae_spatial_tile_width,
-                        use_prompt_expansion, clip_prompt,
-                        save_latents_checkbox,
-                        enable_ultravico, ultravico_alpha, ultravico_suppress_harmonics, ultravico_beta,
-                        use_sdnq, sdnq_weights_dtype, sdnq_triton_mm, sdnq_compile,
-                        # End frame noise scheduling
-                        end_noise_schedule, end_noise_start, end_noise_end, start_noise_schedule, start_noise_level
-                    ],
-                    outputs=[batch_progress]
-                )
-
-                # Stop button - cancels queue jobs, stops timer, and resets all state
+                # Stop button - stops current generation
                 stop_btn.click(
-                    fn=stop_queue_generation,
-                    inputs=[current_batch_id_state],
-                    outputs=[output, preview_output, batch_progress, progress_text, current_job_id_state, current_batch_id_state, poll_timer]
+                    fn=stop_generation,
+                    outputs=[batch_progress]
                 )
 
                 stop_decode_btn.click(
@@ -2689,13 +2656,6 @@ def create_interface():
                 stop_save_btn.click(
                     fn=stop_and_save,
                     outputs=[batch_progress]
-                )
-
-                # Manual refresh button - calls poll_active_job and reactivates timer
-                refresh_btn.click(
-                    fn=poll_active_job,
-                    inputs=[current_job_id_state, current_batch_id_state],
-                    outputs=[output, preview_output, batch_progress, progress_text, current_job_id_state, current_batch_id_state, poll_timer]
                 )
 
                 resume_btn.click(
