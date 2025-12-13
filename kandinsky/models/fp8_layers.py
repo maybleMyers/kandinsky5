@@ -543,8 +543,11 @@ TEXT_ENCODER_FP8_EXCLUDE_KEYS = [
 
 def should_quantize_text_encoder_to_fp8(key: str) -> bool:
     """
-    Determine if a text encoder tensor should be quantized to FP8.
+    Determine if a text encoder module should be quantized to FP8.
     More permissive than DiT - quantizes all linear layers except embeddings and norms.
+
+    Args:
+        key: Module name (not parameter name) - e.g., 'layers.0.self_attn.q_proj'
     """
     # Skip excluded patterns
     key_lower = key.lower()
@@ -552,11 +555,10 @@ def should_quantize_text_encoder_to_fp8(key: str) -> bool:
         if exclude in key_lower:
             return False
 
-    # Only quantize weight matrices, not biases
-    if key.endswith('.weight'):
-        return True
-
-    return False
+    # Module name doesn't include .weight suffix - that's for parameters
+    # Since we're already filtering for nn.Linear modules in the caller,
+    # we just need to check exclusions above
+    return True
 
 
 def convert_text_encoder_to_fp8(
@@ -634,8 +636,10 @@ def convert_text_encoder_to_fp8(
                             w_scale = w_scale.to(x.device)
 
                         try:
+                            # _scaled_mm requires mat2 to be column-major (transposed)
+                            # Don't call .contiguous() after .t() - that would make it row-major
                             out = torch._scaled_mm(
-                                x_fp8, w_fp8.t().contiguous(),
+                                x_fp8, w_fp8.t(),
                                 scale_a=x_scale, scale_b=w_scale,
                                 out_dtype=dtype
                             )
