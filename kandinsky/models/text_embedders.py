@@ -11,15 +11,22 @@ from transformers import (
 
 from .utils import freeze
 from .compile_config import USE_TORCH_COMPILE
+from .fp8_layers import convert_text_encoder_to_fp8
 
 
 class ClipTextEmbedder:
-    def __init__(self, conf, device, dtype=torch.bfloat16):
+    def __init__(self, conf, device, dtype=torch.bfloat16, use_fp8=False):
         # Support separate paths for model and tokenizer (for diffusers format)
         tokenizer_path = getattr(conf, 'tokenizer_path', conf.checkpoint_path)
 
         self.model = CLIPTextModel.from_pretrained(conf.checkpoint_path, torch_dtype=dtype).to(device)
         self.model = freeze(self.model)
+
+        # Apply FP8 quantization if requested
+        if use_fp8:
+            print("Applying FP8 quantization to CLIP text encoder...")
+            convert_text_encoder_to_fp8(self.model, device=torch.device('cuda:0'))
+
         self.tokenizer = CLIPTokenizer.from_pretrained(tokenizer_path)
         self.max_length = conf.max_length
 
@@ -96,7 +103,7 @@ class Qwen2_5_VLTextEmbedder:
         },
     }
 
-    def __init__(self, conf, device, quantized_qwen=False, text_token_padding=True, dtype=torch.bfloat16):
+    def __init__(self, conf, device, quantized_qwen=False, text_token_padding=True, dtype=torch.bfloat16, use_fp8=False):
         quantization_config = None
         if quantized_qwen:
             quantization_config = BitsAndBytesConfig(
@@ -117,6 +124,12 @@ class Qwen2_5_VLTextEmbedder:
             quantization_config=quantization_config
         )
         self.model = freeze(self.model)
+
+        # Apply FP8 quantization if requested (not compatible with BnB quantization)
+        if use_fp8 and not quantized_qwen:
+            print("Applying FP8 quantization to Qwen text encoder...")
+            convert_text_encoder_to_fp8(self.model, device=torch.device('cuda:0'))
+
         if USE_TORCH_COMPILE:
             self.model = torch.compile(self.model, dynamic=True)
         self.mode = conf.mode
@@ -212,9 +225,9 @@ class Qwen2_5_VLTextEmbedder:
 
 
 class Kandinsky5TextEmbedder:
-    def __init__(self, conf, device="cpu", quantized_qwen=False, text_token_padding=True, dtype=torch.bfloat16):
-        self.embedder = Qwen2_5_VLTextEmbedder(conf.qwen, device, quantized_qwen, text_token_padding, dtype)
-        self.clip_embedder = ClipTextEmbedder(conf.clip, device, dtype)
+    def __init__(self, conf, device="cpu", quantized_qwen=False, text_token_padding=True, dtype=torch.bfloat16, use_fp8=False):
+        self.embedder = Qwen2_5_VLTextEmbedder(conf.qwen, device, quantized_qwen, text_token_padding, dtype, use_fp8=use_fp8)
+        self.clip_embedder = ClipTextEmbedder(conf.clip, device, dtype, use_fp8=use_fp8)
         self.conf = conf
 
     def encode(self, texts, images=None, type_of_content="image", clip_texts=None):
@@ -230,5 +243,5 @@ class Kandinsky5TextEmbedder:
         return self
 
 
-def get_text_embedder(conf, device="cpu", quantized_qwen=False, text_token_padding=True, dtype=torch.bfloat16):
-    return Kandinsky5TextEmbedder(conf, device, quantized_qwen, text_token_padding, dtype)
+def get_text_embedder(conf, device="cpu", quantized_qwen=False, text_token_padding=True, dtype=torch.bfloat16, use_fp8=False):
+    return Kandinsky5TextEmbedder(conf, device, quantized_qwen, text_token_padding, dtype, use_fp8=use_fp8)

@@ -172,7 +172,7 @@ def generate_video(
         config_file = config_map.get(model_config, "./configs/config_5s_t2v_pro_20b.yaml")
 
         command = [
-            sys.executable, "test.py",
+            sys.executable, "kandi_generate_video.py",
             "--config", config_file,
             "--prompt", str(prompt),
             "--video_duration", str(video_duration),
@@ -563,7 +563,7 @@ def generate_v2v_video(
         config_file = config_map.get(model_config, "./configs/config_5s_i2v_pro_20b.yaml")
 
         command = [
-            sys.executable, "test.py",
+            sys.executable, "kandi_generate_video.py",
             "--config", config_file,
             "--prompt", str(prompt),
             "--video_duration", str(video_duration),
@@ -965,7 +965,7 @@ def submit_to_queue(
 
         # Build command (same logic as generate_video)
         command = [
-            sys.executable, "test.py",
+            sys.executable, "kandi_generate_video.py",
             "--config", config_file,
             "--prompt", str(prompt),
             "--video_duration", str(video_duration),
@@ -1576,7 +1576,7 @@ def resume_from_checkpoint(
 
     # Build command
     command = [
-        "python", "test.py",
+        "python", "kandi_generate_video.py",
         "--config", config_file,
         "--prompt", "resume",  # Placeholder, not used in resume mode
         "--output_filename", output_filename,
@@ -1693,7 +1693,7 @@ def decode_from_latents(
 
     # Build command
     command = [
-        "python", "test.py",
+        "python", "kandi_generate_video.py",
         "--config", config_file,
         "--output_filename", output_filename,
         "--decode_from_file", latents_path,

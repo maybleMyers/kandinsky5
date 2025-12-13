@@ -529,3 +529,139 @@ def convert_model_to_fp8(
 
     print(f"Converted {converted} linear layers to FP8")
     return converted
+
+
+# Keys to exclude from text encoder FP8 quantization
+TEXT_ENCODER_FP8_EXCLUDE_KEYS = [
+    "embed_tokens",  # Embedding layer
+    "lm_head",       # Output head
+    "norm",          # Normalization layers
+    "layernorm",     # LayerNorm
+    "embeddings",    # Various embedding layers
+]
+
+
+def should_quantize_text_encoder_to_fp8(key: str) -> bool:
+    """
+    Determine if a text encoder tensor should be quantized to FP8.
+    More permissive than DiT - quantizes all linear layers except embeddings and norms.
+    """
+    # Skip excluded patterns
+    key_lower = key.lower()
+    for exclude in TEXT_ENCODER_FP8_EXCLUDE_KEYS:
+        if exclude in key_lower:
+            return False
+
+    # Only quantize weight matrices, not biases
+    if key.endswith('.weight'):
+        return True
+
+    return False
+
+
+def convert_text_encoder_to_fp8(
+    model: nn.Module,
+    device: torch.device = None,
+    verbose: bool = True
+) -> int:
+    """
+    Convert a text encoder's linear layers to FP8 in-place.
+
+    This handles Qwen, CLIP, and similar transformer-based text encoders.
+    More aggressive than DiT conversion - quantizes all linear layers
+    except embeddings and normalization layers.
+
+    Args:
+        model: Text encoder model to convert
+        device: Device for conversion (defaults to cuda:0)
+        verbose: Whether to print progress
+
+    Returns:
+        Number of layers converted
+    """
+    if device is None:
+        device = torch.device('cuda:0')
+
+    # Check FP8 support
+    supported, msg = check_fp8_support()
+    if not supported:
+        warnings.warn(f"FP8 not fully supported: {msg}. Skipping text encoder FP8 conversion.")
+        return 0
+
+    converted = 0
+    skipped = 0
+
+    for name, module in model.named_modules():
+        if isinstance(module, nn.Linear):
+            # Check if should quantize
+            if should_quantize_text_encoder_to_fp8(name):
+                # Get original weight
+                weight = module.weight.data
+                bias = module.bias
+
+                # Quantize weight (one at a time on GPU, result on CPU)
+                weight_gpu = weight.to(device)
+                fp8_weight, scale = quantize_tensor_to_fp8(weight_gpu, device)
+
+                # Keep on CPU for offload mode
+                fp8_weight = fp8_weight.cpu()
+                scale = scale.cpu()
+                del weight_gpu
+
+                # Store as buffers
+                module.register_buffer('weight_fp8', fp8_weight)
+                module.register_buffer('weight_scale', scale)
+
+                # Create FP8 forward
+                compute_dtype = weight.dtype
+
+                def make_forward(original_module, dtype):
+                    def forward(x):
+                        w_fp8 = original_module.weight_fp8
+                        w_scale = original_module.weight_scale
+                        b = original_module.bias
+
+                        original_shape = x.shape
+                        in_features = w_fp8.shape[1]
+                        out_features = w_fp8.shape[0]
+
+                        x_2d = x.reshape(-1, in_features).contiguous()
+                        x_fp8, x_scale = quantize_tensor_to_fp8(x_2d, x.device)
+
+                        # Move FP8 weight to same device as input if needed
+                        if w_fp8.device != x.device:
+                            w_fp8 = w_fp8.to(x.device)
+                            w_scale = w_scale.to(x.device)
+
+                        try:
+                            out = torch._scaled_mm(
+                                x_fp8, w_fp8.t().contiguous(),
+                                scale_a=x_scale, scale_b=w_scale,
+                                out_dtype=dtype
+                            )
+                        except Exception:
+                            # Fallback to dequantized matmul
+                            x_dq = x_fp8.float() * x_scale
+                            w_dq = w_fp8.float() * w_scale
+                            out = torch.mm(x_dq, w_dq.t()).to(dtype)
+
+                        if b is not None:
+                            out = out + b
+
+                        return out.reshape(list(original_shape[:-1]) + [out_features]).to(x.dtype)
+
+                    return forward
+
+                module.forward = make_forward(module, compute_dtype)
+
+                # Remove original weight to save memory
+                del module.weight
+
+                converted += 1
+            else:
+                skipped += 1
+
+    if verbose:
+        print(f"Text encoder FP8: Converted {converted} linear layers, skipped {skipped}")
+
+    return converted

@@ -78,6 +78,7 @@ def get_T2V_pipeline(
     use_int8: bool = False,
     int8_block_size: int = 128,
     use_fp8: bool = False,
+    use_fp8_text_encoder: bool = False,
     use_sdnq: bool = False,
     sdnq_weights_dtype: str = "int8",
     sdnq_use_quantized_matmul: bool = True,
@@ -165,7 +166,7 @@ def get_T2V_pipeline(
     conf.model.text_embedder.qwen.mode = "t2v"
     text_embedder = get_text_embedder(conf.model.text_embedder, device=device_map["text_embedder"],
                                       quantized_qwen=quantized_qwen, text_token_padding=text_token_padding,
-                                      dtype=text_encoder_dtype)
+                                      dtype=text_encoder_dtype, use_fp8=use_fp8_text_encoder)
     if not offload:
         text_embedder = text_embedder.to(device=device_map["text_embedder"])
 
@@ -314,6 +315,7 @@ def get_I2V_pipeline(
     use_int8: bool = False,
     int8_block_size: int = 128,
     use_fp8: bool = False,
+    use_fp8_text_encoder: bool = False,
     use_sdnq: bool = False,
     sdnq_weights_dtype: str = "int8",
     sdnq_use_quantized_matmul: bool = True,
@@ -399,7 +401,7 @@ def get_I2V_pipeline(
     conf.model.text_embedder.qwen.mode = "i2v"
     text_embedder = get_text_embedder(conf.model.text_embedder, device=device_map["text_embedder"],
                                       quantized_qwen=quantized_qwen, text_token_padding=text_token_padding,
-                                      dtype=text_encoder_dtype)
+                                      dtype=text_encoder_dtype, use_fp8=use_fp8_text_encoder)
     if not offload:
         text_embedder = text_embedder.to(device=device_map["text_embedder"])
 
@@ -799,6 +801,7 @@ def get_I2V_pipeline_with_block_swap(
     use_int8: bool = False,
     int8_block_size: int = 128,
     use_fp8: bool = False,
+    use_fp8_text_encoder: bool = False,
     use_sdnq: bool = False,
     sdnq_weights_dtype: str = "int8",
     sdnq_use_quantized_matmul: bool = True,
@@ -892,7 +895,8 @@ def get_I2V_pipeline_with_block_swap(
         device="cpu" if enable_block_swap else device_map["text_embedder"],
         quantized_qwen=quantized_qwen,
         text_token_padding=text_token_padding,
-        dtype=text_encoder_dtype
+        dtype=text_encoder_dtype,
+        use_fp8=use_fp8_text_encoder
     )
     # Move to GPU only if not using offload or block swap
     if not offload and not enable_block_swap:
@@ -1086,6 +1090,7 @@ def get_T2V_pipeline_with_block_swap(
     use_int8: bool = False,
     int8_block_size: int = 128,
     use_fp8: bool = False,
+    use_fp8_text_encoder: bool = False,
     use_sdnq: bool = False,
     sdnq_weights_dtype: str = "int8",
     sdnq_use_quantized_matmul: bool = True,
@@ -1176,7 +1181,8 @@ def get_T2V_pipeline_with_block_swap(
         device="cpu" if enable_block_swap else device_map["text_embedder"],
         quantized_qwen=quantized_qwen,
         text_token_padding=text_token_padding,
-        dtype=text_encoder_dtype
+        dtype=text_encoder_dtype,
+        use_fp8=use_fp8_text_encoder
     )
     # Move to GPU only if not using offload or block swap
     if not offload and not enable_block_swap:
