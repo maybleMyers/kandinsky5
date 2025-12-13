@@ -1223,7 +1223,11 @@ class Kandinsky5I2VPipeline:
                 print("\n" + "="*80)
                 print("EXPANDED QWEN 2.5 PROMPT:")
                 print("="*80)
-                print(caption)
+                try:
+                    print(caption)
+                except UnicodeEncodeError:
+                    # Windows console encoding (cp1252) can't handle some Unicode characters
+                    print(caption.encode('utf-8', errors='replace').decode('utf-8', errors='replace'))
                 print("="*80 + "\n")
             if self.world_size > 1:
                 caption = [caption]
