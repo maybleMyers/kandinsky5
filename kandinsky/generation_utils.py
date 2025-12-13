@@ -430,12 +430,12 @@ def generate_sample(
         )
         print(f"[TIMING] Text encoding done in {time.perf_counter() - t0:.1f}s", flush=True)
 
-    del text_embedder.embedder.model
-    del text_embedder.clip_embedder.model
-    del text_embedder
+    # Offload text encoder to CPU before DiT inference to free VRAM
+    print("[TIMING] Offloading text encoder to CPU...", flush=True)
+    t0 = time.perf_counter()
+    text_embedder = text_embedder.to('cpu')
     torch.cuda.empty_cache()
-    import gc
-    gc.collect()
+    print(f"[TIMING] Text encoder offloaded in {time.perf_counter() - t0:.1f}s", flush=True)
 
     for key in bs_text_embed:
         bs_text_embed[key] = bs_text_embed[key].to(device=device,dtype=torch.bfloat16)
@@ -1105,12 +1105,17 @@ def generate_sample_v2v_join(
         )
         print(f"[TIMING] Text encoding done in {time.perf_counter() - t0:.1f}s", flush=True)
 
+    # Delete text encoder to free VRAM
+    # gc.collect() must run BEFORE empty_cache() to release Python references first
+    print("[TIMING] Deleting text encoder from VRAM...", flush=True)
+    t0 = time.perf_counter()
     del text_embedder.embedder.model
     del text_embedder.clip_embedder.model
     del text_embedder
-    torch.cuda.empty_cache()
     import gc
     gc.collect()
+    torch.cuda.empty_cache()
+    print(f"[TIMING] Text encoder deleted in {time.perf_counter() - t0:.1f}s", flush=True)
 
     for key in bs_text_embed:
         bs_text_embed[key] = bs_text_embed[key].to(device=device)
@@ -1330,12 +1335,17 @@ def generate_sample_v2v(
         )
         print(f"[TIMING] Text encoding done in {time.perf_counter() - t0:.1f}s", flush=True)
 
+    # Delete text encoder to free VRAM
+    # gc.collect() must run BEFORE empty_cache() to release Python references first
+    print("[TIMING] Deleting text encoder from VRAM...", flush=True)
+    t0 = time.perf_counter()
     del text_embedder.embedder.model
     del text_embedder.clip_embedder.model
     del text_embedder
-    torch.cuda.empty_cache()
     import gc
     gc.collect()
+    torch.cuda.empty_cache()
+    print(f"[TIMING] Text encoder deleted in {time.perf_counter() - t0:.1f}s", flush=True)
 
     for key in bs_text_embed:
         bs_text_embed[key] = bs_text_embed[key].to(device=device)
@@ -1532,12 +1542,12 @@ def generate_sample_i2v(
         )
         print(f"[TIMING] Text encoding done in {time.perf_counter() - t0:.1f}s", flush=True)
 
-    del text_embedder.embedder.model
-    del text_embedder.clip_embedder.model
-    del text_embedder
+    # Offload text encoder to CPU before DiT inference to free VRAM
+    print("[TIMING] Offloading text encoder to CPU...", flush=True)
+    t0 = time.perf_counter()
+    text_embedder = text_embedder.to('cpu')
     torch.cuda.empty_cache()
-    import gc
-    gc.collect()
+    print(f"[TIMING] Text encoder offloaded in {time.perf_counter() - t0:.1f}s", flush=True)
 
     for key in bs_text_embed:
         bs_text_embed[key] = bs_text_embed[key].to(device=device)
@@ -1556,7 +1566,7 @@ def generate_sample_i2v(
     null_text_rope_pos = torch.arange(null_text_cu_seqlens)
 
     # Log VRAM before DiT inference
-    log_vram_usage("BEFORE DiT INFERENCE (I2V)", dit=dit, vae=vae, text_embedder=None)
+    log_vram_usage("BEFORE DiT INFERENCE (I2V)", dit=dit, vae=vae, text_embedder=text_embedder)
 
     if offload or force_offload:
         dit.to(device, non_blocking=True)
@@ -2175,12 +2185,17 @@ def generate_sample_denoise(
         )
         print(f"[TIMING] Text encoding done in {time.perf_counter() - t0:.1f}s", flush=True)
 
+    # Delete text encoder to free VRAM
+    # gc.collect() must run BEFORE empty_cache() to release Python references first
+    print("[TIMING] Deleting text encoder from VRAM...", flush=True)
+    t0 = time.perf_counter()
     del text_embedder.embedder.model
     del text_embedder.clip_embedder.model
     del text_embedder
-    torch.cuda.empty_cache()
     import gc
     gc.collect()
+    torch.cuda.empty_cache()
+    print(f"[TIMING] Text encoder deleted in {time.perf_counter() - t0:.1f}s", flush=True)
 
     for key in bs_text_embed:
         bs_text_embed[key] = bs_text_embed[key].to(device=device, dtype=torch.bfloat16)

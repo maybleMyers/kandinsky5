@@ -1,8 +1,12 @@
+import os
+import sys
+
+# Use local patched gradio from modules/ (allows jobs to continue after browser disconnect)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "modules"))
+
 import gradio as gr
 from gradio import themes
 from gradio.themes.utils import colors
-import os
-import sys
 import time
 import random
 import subprocess
@@ -348,9 +352,14 @@ def generate_video(
         try:
             start_time = time.perf_counter()
 
+            # Write subprocess output to log file to prevent pipe buffer blocking
+            os.makedirs(os.path.join(save_path, "logs"), exist_ok=True)
+            log_file_path = os.path.join(save_path, "logs", f"gen_{run_id}.log")
+            log_file = open(log_file_path, "w", encoding="utf-8")
+
             process = subprocess.Popen(
                 command,
-                stdout=subprocess.PIPE,
+                stdout=log_file,
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1
@@ -364,6 +373,8 @@ def generate_video(
             preview_mp4_path = os.path.join(preview_base_dir, f"latent_preview_{unique_preview_suffix}.mp4")
 
             last_progress = ""
+            last_log_position = 0
+
             while True:
                 if stop_event.is_set():
                     process.terminate()
@@ -372,16 +383,25 @@ def generate_video(
                     except subprocess.TimeoutExpired:
                         process.kill()
                     current_process = None
+                    log_file.close()
                     yield all_generated_videos, None, "Generation stopped by user.", ""
                     return
 
-                line = process.stdout.readline()
-                if line:
-                    print(line.strip())
-
-                    parsed_progress = parse_progress_line(line)
-                    if parsed_progress:
-                        last_progress = parsed_progress
+                # Read new lines from log file to parse progress
+                try:
+                    with open(log_file_path, "r", encoding="utf-8") as f:
+                        f.seek(last_log_position)
+                        new_lines = f.readlines()
+                        last_log_position = f.tell()
+                        for line in new_lines:
+                            line = line.strip()
+                            if line:
+                                print(line)  # Echo to console
+                                parsed_progress = parse_progress_line(line)
+                                if parsed_progress:
+                                    last_progress = parsed_progress
+                except:
+                    pass
 
                 if enable_preview:
                     if os.path.exists(preview_mp4_path):
@@ -392,7 +412,24 @@ def generate_video(
 
                 yield all_generated_videos.copy(), current_preview_yield_path, status_text, last_progress
 
+                # Small sleep to avoid busy-waiting
+                time.sleep(0.5)
+
                 if process.poll() is not None:
+                    # Read any remaining log content
+                    try:
+                        with open(log_file_path, "r", encoding="utf-8") as f:
+                            f.seek(last_log_position)
+                            for line in f.readlines():
+                                line = line.strip()
+                                if line:
+                                    print(line)
+                                    parsed_progress = parse_progress_line(line)
+                                    if parsed_progress:
+                                        last_progress = parsed_progress
+                    except:
+                        pass
+                    log_file.close()
                     break
 
             # Clear current process when done
@@ -759,9 +796,14 @@ def generate_v2v_video(
         try:
             start_time = time.perf_counter()
 
+            # Write subprocess output to log file to prevent pipe buffer blocking
+            os.makedirs(os.path.join(save_path, "logs"), exist_ok=True)
+            log_file_path = os.path.join(save_path, "logs", f"v2v_{run_id}.log")
+            log_file = open(log_file_path, "w", encoding="utf-8")
+
             process = subprocess.Popen(
                 command,
-                stdout=subprocess.PIPE,
+                stdout=log_file,
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1
@@ -775,6 +817,8 @@ def generate_v2v_video(
             preview_mp4_path = os.path.join(preview_base_dir, f"latent_preview_{unique_preview_suffix}.mp4")
 
             last_progress = ""
+            last_log_position = 0
+
             while True:
                 if stop_event.is_set():
                     process.terminate()
@@ -783,16 +827,25 @@ def generate_v2v_video(
                     except subprocess.TimeoutExpired:
                         process.kill()
                     current_process = None
+                    log_file.close()
                     yield all_generated_videos, None, "Generation stopped by user.", ""
                     return
 
-                line = process.stdout.readline()
-                if line:
-                    print(line.strip())
-
-                    parsed_progress = parse_progress_line(line)
-                    if parsed_progress:
-                        last_progress = parsed_progress
+                # Read new lines from log file to parse progress
+                try:
+                    with open(log_file_path, "r", encoding="utf-8") as f:
+                        f.seek(last_log_position)
+                        new_lines = f.readlines()
+                        last_log_position = f.tell()
+                        for line in new_lines:
+                            line = line.strip()
+                            if line:
+                                print(line)  # Echo to console
+                                parsed_progress = parse_progress_line(line)
+                                if parsed_progress:
+                                    last_progress = parsed_progress
+                except:
+                    pass
 
                 if enable_preview:
                     if os.path.exists(preview_mp4_path):
@@ -803,7 +856,24 @@ def generate_v2v_video(
 
                 yield all_generated_videos.copy(), current_preview_yield_path, status_text, last_progress
 
+                # Small sleep to avoid busy-waiting
+                time.sleep(0.5)
+
                 if process.poll() is not None:
+                    # Read any remaining log content
+                    try:
+                        with open(log_file_path, "r", encoding="utf-8") as f:
+                            f.seek(last_log_position)
+                            for line in f.readlines():
+                                line = line.strip()
+                                if line:
+                                    print(line)
+                                    parsed_progress = parse_progress_line(line)
+                                    if parsed_progress:
+                                        last_progress = parsed_progress
+                    except:
+                        pass
+                    log_file.close()
                     break
 
             # Clear current process when done
