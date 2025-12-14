@@ -19,7 +19,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import torch
 
-from kandinsky.utils import set_hf_token
 from kandinsky import get_I2V_pipeline_with_block_swap, get_T2V_pipeline_with_block_swap, get_T2V_pipeline_dual_gpu
 
 
@@ -150,12 +149,6 @@ def parse_args():
         choices=["flash_attention_2", "flash_attention_3", "sdpa", "sage", "auto"]
     )
     parser.add_argument(
-        "--hf_token",
-        type=str,
-        default=None,
-        help="Token to download restricted models",
-    )
-    parser.add_argument(
         "--gpu0",
         type=int,
         default=0,
@@ -186,10 +179,6 @@ def parse_args():
         help="Use only a single GPU (specify 0 or 1)"
     )
     args = parser.parse_args()
-
-    if args.hf_token:
-        set_hf_token(args.hf_token)
-
     return args
 
 
