@@ -2679,13 +2679,28 @@ def generate_sample_t2v_pipeline_parallel(
     cond_result = [None]
     uncond_result = [None]
 
+    # Check if model uses visual conditioning (T2V Pro has this enabled)
+    has_visual_cond = getattr(dit_gpu0, 'visual_cond', False)
+
+    def prepare_model_input(img, device):
+        """Prepare model input, adding visual_cond channels if needed."""
+        if has_visual_cond:
+            # For T2V, visual_cond and mask are zeros (no conditioning frame)
+            visual_cond = torch.zeros_like(img)
+            visual_cond_mask = torch.zeros(
+                [*img.shape[:-1], 1], dtype=img.dtype, device=device
+            )
+            return torch.cat([img, visual_cond, visual_cond_mask], dim=-1)
+        return img
+
     def run_conditional(x, t_val):
         """Run conditional forward pass on GPU 0"""
         with torch.cuda.device(device0):
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 with torch._dynamo.utils.disable_cache_limit():
+                    model_input = prepare_model_input(x, device0)
                     cond_result[0] = dit_gpu0(
-                        x,
+                        model_input,
                         cond_text_embed["text_embeds"],
                         cond_text_embed["pooled_embed"],
                         t_val * 1000,
@@ -2701,8 +2716,9 @@ def generate_sample_t2v_pipeline_parallel(
         with torch.cuda.device(device1):
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 with torch._dynamo.utils.disable_cache_limit():
+                    model_input = prepare_model_input(x, device1)
                     uncond_result[0] = dit_gpu1(
-                        x,
+                        model_input,
                         uncond_text_embed["text_embeds"],
                         uncond_text_embed["pooled_embed"],
                         t_val * 1000,
