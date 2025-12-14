@@ -19,7 +19,7 @@ from PIL import Image
 import tiktoken
 
 # Job queue system for browser-independent generation
-from job_queue import get_queue, JobQueue, JobStatus, Job, format_job_for_display
+from job_queue import get_queue, JobStatus
 
 # Initialize tiktoken encoder for fast token counting
 enc = tiktoken.get_encoding("cl100k_base")
@@ -1213,171 +1213,6 @@ def submit_to_queue(
         return f"Batch queued: {batch_id} ({batch_count} jobs: {', '.join(jobs_created)})"
 
 
-def get_queue_display() -> Tuple[str, str]:
-    """
-    Get queue status for display.
-
-    Returns:
-        Tuple of (queue_status_text, job_list_text)
-    """
-    queue = get_queue()
-    stats = queue.get_queue_stats()
-
-    status_text = f"Queue: {stats['pending']} pending, {stats['running']} running, {stats['completed']} completed, {stats['failed']} failed"
-
-    jobs = queue.get_all_jobs(limit=20)
-    if not jobs:
-        job_list = "No jobs in queue"
-    else:
-        lines = []
-        for job in jobs:
-            lines.append(format_job_for_display(job))
-        job_list = "\n".join(lines)
-
-    return status_text, job_list
-
-
-def poll_job_status(job_id: str) -> Tuple[Optional[str], Optional[str], str, str]:
-    """
-    Poll a specific job's status.
-
-    Returns:
-        Tuple of (video_path, preview_path, status_text, progress_text)
-    """
-    queue = get_queue()
-    job = queue.get_job(job_id)
-
-    if not job:
-        return None, None, f"Job {job_id} not found", ""
-
-    video_path = None
-    preview_path = None
-
-    if job.status == JobStatus.COMPLETED.value:
-        if os.path.exists(job.output_filename):
-            video_path = job.output_filename
-        status_text = f"Completed in {job.elapsed_time:.1f}s"
-    elif job.status == JobStatus.RUNNING.value:
-        status_text = f"Running ({job.progress:.0f}%)"
-        if job.preview_path and os.path.exists(job.preview_path):
-            preview_path = job.preview_path
-    elif job.status == JobStatus.FAILED.value:
-        status_text = f"Failed: {job.error_message}"
-    elif job.status == JobStatus.CANCELLED.value:
-        status_text = "Cancelled"
-    else:
-        status_text = "Pending in queue"
-
-    return video_path, preview_path, status_text, job.progress_text
-
-
-def cancel_queued_job(job_id: str) -> str:
-    """Cancel a job by ID."""
-    queue = get_queue()
-    job = queue.cancel_job(job_id)
-    if job:
-        return f"Cancelled job {job_id}"
-    return f"Could not cancel job {job_id}"
-
-
-def clear_completed_jobs() -> str:
-    """Remove all completed/failed/cancelled jobs from the queue."""
-    queue = get_queue()
-    removed = queue.cleanup_old_jobs(max_age_hours=0)
-    return f"Removed {removed} completed jobs"
-
-
-# =============================================================================
-# RECONNECTION SUPPORT - Auto-restore UI state on page load
-# =============================================================================
-
-def check_and_restore_active_jobs():
-    """
-    Called on page load - finds any running/recent jobs and restores UI state.
-
-    This enables seamless reconnection after browser disconnect:
-    - Detects active generations by checking for recently-modified preview files
-    - Shows any completed videos from the current session (last 30 minutes)
-    - User sees their generation progress immediately on reconnect
-
-    Returns:
-        Tuple of (videos, preview, status, progress)
-    """
-    try:
-        # =================================================================
-        # STEP 1: Check for active generation by looking for
-        #         recently-modified preview files in outputs/previews/
-        # =================================================================
-        preview_dir = os.path.join("outputs", "previews")
-        active_preview = None
-        active_preview_age = float('inf')
-
-        if os.path.exists(preview_dir):
-            now = time.time()
-            for filename in os.listdir(preview_dir):
-                if filename.startswith("latent_preview_k1_") and filename.endswith(".mp4"):
-                    filepath = os.path.join(preview_dir, filename)
-                    try:
-                        mtime = os.path.getmtime(filepath)
-                        age = now - mtime
-                        # Consider preview "active" if modified within last 30 minutes
-                        # (generation steps can take a long time on slower hardware)
-                        if age < 1800 and age < active_preview_age:
-                            active_preview = filepath
-                            active_preview_age = age
-                    except OSError:
-                        continue
-
-        # =================================================================
-        # STEP 2: Find completed videos from current session (last 3 hours)
-        # =================================================================
-        videos = []
-        outputs_dir = "outputs"
-        if os.path.exists(outputs_dir):
-            now = time.time()
-            recent_videos = []
-            for filename in os.listdir(outputs_dir):
-                if filename.startswith("k1_") and filename.endswith(".mp4"):
-                    filepath = os.path.join(outputs_dir, filename)
-                    try:
-                        mtime = os.path.getmtime(filepath)
-                        # Only show videos from last 3 hours (same session)
-                        if now - mtime < 10800:
-                            recent_videos.append((filepath, mtime))
-                    except OSError:
-                        continue
-
-            # Sort by newest first
-            recent_videos.sort(key=lambda x: x[1], reverse=True)
-            for filepath, _ in recent_videos[:10]:
-                seed_match = re.search(r'_(\d+)\.mp4$', filepath)
-                seed_label = f"Seed: {seed_match.group(1)}" if seed_match else "Completed"
-                videos.append((filepath, seed_label))
-
-        # =================================================================
-        # STEP 3: Return appropriate state based on what was found
-        # =================================================================
-        if active_preview:
-            # Active generation detected
-            print(f"[Reconnect] Found active generation (preview age: {active_preview_age:.1f}s), {len(videos)} completed video(s)")
-            return videos, active_preview, f"🔄 Reconnected! Generation in progress... ({len(videos)} completed)", "Processing (click Reconnect to refresh)"
-
-        if videos:
-            # No active generation, but have recent completed videos
-            print(f"[Reconnect] Found {len(videos)} recent video(s) from current session")
-            return videos, None, f"✅ Reconnected! Found {len(videos)} recent video(s)", ""
-
-        # Nothing to restore
-        print("[Reconnect] No active or recent jobs found")
-        return [], None, "Ready to generate", ""
-
-    except Exception as e:
-        print(f"[Reconnect] Error checking jobs: {e}")
-        import traceback
-        traceback.print_exc()
-        return [], None, "Ready to generate", ""
-
-
 # =============================================================================
 # UNIFIED QUEUE-BASED GENERATION (Browser-Independent with Live Updates)
 # =============================================================================
@@ -2413,6 +2248,53 @@ def create_interface():
                         }
                     });
                 }, 1000);
+
+                // Auto-reconnect check on page load
+                setTimeout(async () => {
+                    try {
+                        console.log('[Auto-Reconnect] Checking for active generation...');
+                        const response = await fetch('/gradio_api/reconnect_state');
+                        const data = await response.json();
+
+                        if (data.active || data.videos.length > 0) {
+                            console.log('[Auto-Reconnect] Found state:', data);
+
+                            // Update status text
+                            const statusEl = document.querySelector('#k1_batch_progress textarea');
+                            if (statusEl) {
+                                statusEl.value = data.status;
+                                statusEl.dispatchEvent(new Event('input', { bubbles: true }));
+                            }
+
+                            // Update progress text
+                            const progressEl = document.querySelector('#k1_progress_text textarea');
+                            if (progressEl) {
+                                progressEl.value = data.progress;
+                                progressEl.dispatchEvent(new Event('input', { bubbles: true }));
+                            }
+
+                            // Update preview video if active
+                            if (data.preview && data.active) {
+                                const fileUrl = '/gradio_api/file=' + data.preview.replace(/\\/g, '/');
+                                const previewContainer = document.querySelector('#k1_preview_video');
+                                if (previewContainer) {
+                                    const videoEl = previewContainer.querySelector('video');
+                                    if (videoEl) {
+                                        videoEl.src = fileUrl;
+                                        videoEl.load();
+                                        console.log('[Auto-Reconnect] Updated preview video');
+                                    }
+                                }
+                            }
+
+                            console.log('[Auto-Reconnect] UI updated');
+                        } else {
+                            console.log('[Auto-Reconnect] No active generation found');
+                        }
+                    } catch (e) {
+                        console.log('[Auto-Reconnect] Check failed (server might be starting):', e.message);
+                    }
+                }, 2000);
             }
             """)
 
@@ -2831,6 +2713,8 @@ def create_interface():
                                     statusEl.value = data.status;
                                     statusEl.dispatchEvent(new Event('input', { bubbles: true }));
                                     console.log('[Reconnect] Updated status:', data.status);
+                                } else {
+                                    console.log('[Reconnect] Status element not found');
                                 }
 
                                 // Update progress text
@@ -2839,24 +2723,63 @@ def create_interface():
                                     progressEl.value = data.progress;
                                     progressEl.dispatchEvent(new Event('input', { bubbles: true }));
                                     console.log('[Reconnect] Updated progress:', data.progress);
+                                } else {
+                                    console.log('[Reconnect] Progress element not found');
                                 }
 
                                 // Update preview video if active
                                 if (data.preview && data.active) {
-                                    const previewVideo = document.querySelector('#k1_preview_video video');
-                                    if (previewVideo) {
-                                        // Convert file path to Gradio file URL
-                                        const fileUrl = '/gradio_api/file=' + encodeURIComponent(data.preview);
-                                        previewVideo.src = fileUrl;
-                                        previewVideo.load();
-                                        console.log('[Reconnect] Updated preview:', fileUrl);
+                                    console.log('[Reconnect] Attempting to update preview video...');
+                                    // Convert file path to Gradio file URL
+                                    const fileUrl = '/gradio_api/file=' + data.preview.replace(/\\/g, '/');
+                                    console.log('[Reconnect] Preview URL:', fileUrl);
+
+                                    // Try multiple selectors for Gradio video component
+                                    const previewContainer = document.querySelector('#k1_preview_video');
+                                    console.log('[Reconnect] Preview container:', previewContainer);
+
+                                    if (previewContainer) {
+                                        // Find video element within the container
+                                        let videoEl = previewContainer.querySelector('video');
+                                        console.log('[Reconnect] Video element:', videoEl);
+
+                                        if (videoEl) {
+                                            // Update video source
+                                            videoEl.src = fileUrl;
+                                            videoEl.load();
+                                            videoEl.play().catch(e => console.log('[Reconnect] Autoplay blocked:', e));
+                                            console.log('[Reconnect] Updated video src');
+                                        } else {
+                                            // Video element might not exist yet - try to create it
+                                            console.log('[Reconnect] No video element found, trying source element');
+                                            const sourceEl = previewContainer.querySelector('source');
+                                            if (sourceEl) {
+                                                sourceEl.src = fileUrl;
+                                                const video = sourceEl.parentElement;
+                                                if (video && video.tagName === 'VIDEO') {
+                                                    video.load();
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        console.log('[Reconnect] Preview container #k1_preview_video not found');
+                                        // Try alternative selector
+                                        const altVideo = document.querySelector('[data-testid="video"] video');
+                                        if (altVideo) {
+                                            altVideo.src = fileUrl;
+                                            altVideo.load();
+                                            console.log('[Reconnect] Updated via alternative selector');
+                                        }
                                     }
                                 }
 
                                 // Log gallery info for debugging
                                 if (data.videos && data.videos.length > 0) {
                                     console.log('[Reconnect] Videos available:', data.videos.length);
-                                    data.videos.forEach((v, i) => console.log(`  [${i}] ${v.path}`));
+                                    data.videos.forEach((v, i) => {
+                                        const url = '/gradio_api/file=' + v.path.replace(/\\/g, '/');
+                                        console.log(`  [${i}] ${v.label}: ${url}`);
+                                    });
                                 }
 
                                 return data.status;
@@ -3535,94 +3458,6 @@ def create_interface():
                     fn=refresh_recent_outputs,
                     inputs=[recent_output_folder, recent_max_files],
                     outputs=[recent_gallery, recent_status]
-                )
-
-            # =====================================================================
-            # JOB QUEUE TAB - Browser-Independent Generation
-            # =====================================================================
-            with gr.Tab("Job Queue", id="queue"):
-                gr.Markdown("""
-                ## Browser-Independent Generation
-
-                **Video generation continues even if you close your browser!**
-
-                Using Gradio's built-in queue system, jobs continue processing server-side.
-
-                ### How It Works:
-                1. Click "Generate Video" - job runs on the server
-                2. If browser disconnects, generation continues in the background
-                3. Videos are saved to the `outputs/` folder automatically
-                4. Use the **Recent Outputs** tab to find completed videos after reconnecting
-
-                ### Notes:
-                - One job runs at a time (queue processes sequentially)
-                - Check the Recent Outputs tab to see all completed videos
-                """)
-
-                with gr.Row():
-                    queue_status_display = gr.Textbox(
-                        label="Queue Status",
-                        interactive=False,
-                        value="Click 'Refresh Queue' to see status"
-                    )
-                    refresh_queue_btn = gr.Button("Refresh Queue", variant="secondary")
-
-                with gr.Row():
-                    job_list_display = gr.Textbox(
-                        label="Jobs (Recent 20)",
-                        interactive=False,
-                        lines=15,
-                        value="Click 'Refresh Queue' to see jobs"
-                    )
-
-                with gr.Row():
-                    job_id_input = gr.Textbox(
-                        label="Job ID",
-                        placeholder="Enter job ID to cancel or view",
-                        scale=2
-                    )
-                    cancel_job_btn = gr.Button("Cancel Job", variant="stop")
-                    clear_completed_btn = gr.Button("Clear Completed Jobs", variant="secondary")
-
-                with gr.Row():
-                    queue_action_status = gr.Textbox(
-                        label="Action Result",
-                        interactive=False
-                    )
-
-                with gr.Row():
-                    with gr.Column():
-                        job_video_output = gr.Video(label="Job Video Output")
-                    with gr.Column():
-                        job_preview_output = gr.Video(label="Job Preview")
-
-                with gr.Row():
-                    job_status_display = gr.Textbox(label="Job Status", interactive=False)
-                    job_progress_display = gr.Textbox(label="Job Progress", interactive=False)
-
-                poll_job_btn = gr.Button("Check Job Status", variant="primary")
-
-                # Event handlers
-                refresh_queue_btn.click(
-                    fn=get_queue_display,
-                    outputs=[queue_status_display, job_list_display]
-                )
-
-                cancel_job_btn.click(
-                    fn=cancel_queued_job,
-                    inputs=[job_id_input],
-                    outputs=[queue_action_status]
-                )
-
-                clear_completed_btn.click(
-                    fn=clear_completed_jobs,
-                    outputs=[queue_action_status]
-                )
-
-                poll_job_btn.click(
-                    fn=poll_job_status,
-                    inputs=[job_id_input],
-                    outputs=[job_video_output, job_preview_output, job_status_display, job_progress_display]
                 )
 
     return demo
