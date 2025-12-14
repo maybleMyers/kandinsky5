@@ -1349,3 +1349,171 @@ def get_T2V_pipeline_with_block_swap(
         conf=conf,
         offload=offload,
     )
+
+
+def get_T2V_pipeline_dual_gpu(
+    device0: torch.device = torch.device('cuda:0'),
+    device1: torch.device = torch.device('cuda:1'),
+    resolution: int = 512,
+    cache_dir: str = "./weights/",
+    conf_path: str = None,
+    checkpoint_path_override: str = None,
+    attention_config_override: dict = None,
+    quantized_qwen: bool = False,
+    text_token_padding: bool = True,
+    attention_engine: str = "auto",
+    blocks_in_memory: int = 4,
+    dtype: torch.dtype = torch.bfloat16,
+    text_encoder_dtype: torch.dtype = None,
+    vae_dtype: torch.dtype = None,
+    computation_dtype: torch.dtype = None,
+    vae_temporal_tile_frames: int = None,
+    vae_temporal_stride_frames: int = None,
+    vae_spatial_tile_height: int = None,
+    vae_spatial_tile_width: int = None,
+):
+    """
+    Create dual GPU T2V pipeline with block swapping on each GPU.
+
+    Loads two independent DiT models, one per GPU, enabling pipeline parallelism
+    where diffusion steps are split between GPUs for faster single video generation.
+
+    Args:
+        device0: First GPU device
+        device1: Second GPU device
+        resolution: Target resolution (default: 512)
+        cache_dir: Directory to cache downloaded weights
+        conf_path: Path to config YAML file
+        checkpoint_path_override: Override checkpoint path
+        attention_config_override: Override attention config
+        quantized_qwen: Use quantized Qwen encoder
+        text_token_padding: Enable text token padding
+        attention_engine: Attention implementation to use
+        blocks_in_memory: Number of transformer blocks to keep in GPU memory per GPU
+        dtype: Data type for model weights (default: torch.bfloat16)
+
+    Returns:
+        Kandinsky5DualGPUPipeline with two block-swapping enabled DiT models
+    """
+    from .dual_gpu_pipeline import Kandinsky5DualGPUPipeline
+
+    # Set component dtypes (fall back to dtype if not specified)
+    if text_encoder_dtype is None:
+        text_encoder_dtype = dtype
+    if vae_dtype is None:
+        vae_dtype = dtype
+    if computation_dtype is None:
+        computation_dtype = dtype
+
+    os.makedirs(cache_dir, exist_ok=True)
+
+    # Load config
+    if conf_path is None:
+        raise ValueError("For dual GPU pipeline, conf_path must be specified")
+
+    conf = OmegaConf.load(conf_path)
+    conf.model.dit_params.attention_engine = attention_engine
+
+    # Override attention config if provided
+    if attention_config_override is not None:
+        if not hasattr(conf.model, 'attention'):
+            conf.model.attention = {}
+        conf.model.attention.update(attention_config_override)
+
+    # Build text embedder - T2V mode (keep on CPU)
+    print("[DUAL GPU] Loading text embedder...", flush=True)
+    t0 = time.perf_counter()
+    conf.model.text_embedder.qwen.mode = "t2v"
+    text_embedder = get_text_embedder(
+        conf.model.text_embedder,
+        device="cpu",
+        quantized_qwen=quantized_qwen,
+        text_token_padding=text_token_padding,
+        dtype=text_encoder_dtype,
+    )
+    print(f"[DUAL GPU] Text embedder loaded in {time.perf_counter() - t0:.1f}s", flush=True)
+
+    # Build VAE (keep on CPU, will move as needed)
+    print("[DUAL GPU] Loading VAE...", flush=True)
+    t0 = time.perf_counter()
+    vae = build_vae(
+        conf.model.vae,
+        dtype=vae_dtype,
+        temporal_tile_frames=vae_temporal_tile_frames,
+        temporal_stride_frames=vae_temporal_stride_frames,
+        spatial_tile_height=vae_spatial_tile_height,
+        spatial_tile_width=vae_spatial_tile_width
+    )
+    vae = vae.eval()
+    print(f"[DUAL GPU] VAE loaded in {time.perf_counter() - t0:.1f}s", flush=True)
+
+    # Use checkpoint_path_override if provided, otherwise use config value
+    checkpoint_path = checkpoint_path_override if checkpoint_path_override else conf.model.checkpoint_path
+
+    dit_params_dict = OmegaConf.to_container(conf.model.dit_params, resolve=True)
+    dit_params_dict['dtype'] = computation_dtype
+
+    # === Load DiT for GPU 0 ===
+    print(f"\n[DUAL GPU] Loading DiT for GPU 0 ({device0})...", flush=True)
+    t0 = time.perf_counter()
+
+    with torch.device('meta'):
+        dit_gpu0 = get_dit_with_block_swap(
+            dit_params_dict,
+            blocks_in_memory=blocks_in_memory,
+            enable_block_swap=True
+        )
+    dit_gpu0 = dit_gpu0.to_empty(device='cpu')
+    reinit_rope_buffers(dit_gpu0)
+
+    print(f"[DUAL GPU] Loading weights for GPU 0 from {checkpoint_path}", flush=True)
+    state_dict = load_state_dict_mmap(checkpoint_path)
+    state_dict = {k: v.to(computation_dtype) if v.dtype in [torch.float32, torch.float16, torch.bfloat16] else v
+                  for k, v in state_dict.items()}
+    dit_gpu0.load_state_dict(state_dict, assign=True)
+    # Set target device for block swapping
+    dit_gpu0._target_device = device0
+    print(f"[DUAL GPU] DiT GPU 0 loaded in {time.perf_counter() - t0:.1f}s", flush=True)
+
+    # === Load DiT for GPU 1 ===
+    print(f"\n[DUAL GPU] Loading DiT for GPU 1 ({device1})...", flush=True)
+    t0 = time.perf_counter()
+
+    with torch.device('meta'):
+        dit_gpu1 = get_dit_with_block_swap(
+            dit_params_dict,
+            blocks_in_memory=blocks_in_memory,
+            enable_block_swap=True
+        )
+    dit_gpu1 = dit_gpu1.to_empty(device='cpu')
+    reinit_rope_buffers(dit_gpu1)
+
+    # Reload state dict for second model (each needs its own copy)
+    print(f"[DUAL GPU] Loading weights for GPU 1 from {checkpoint_path}", flush=True)
+    state_dict = load_state_dict_mmap(checkpoint_path)
+    state_dict = {k: v.to(computation_dtype) if v.dtype in [torch.float32, torch.float16, torch.bfloat16] else v
+                  for k, v in state_dict.items()}
+    dit_gpu1.load_state_dict(state_dict, assign=True)
+    # Set target device for block swapping
+    dit_gpu1._target_device = device1
+    print(f"[DUAL GPU] DiT GPU 1 loaded in {time.perf_counter() - t0:.1f}s", flush=True)
+
+    # Clear state dict from memory
+    del state_dict
+    import gc
+    gc.collect()
+
+    print(f"\n[DUAL GPU] Both DiT models loaded successfully!")
+    print(f"  GPU 0: {device0} (blocks_in_memory={blocks_in_memory})")
+    print(f"  GPU 1: {device1} (blocks_in_memory={blocks_in_memory})")
+
+    return Kandinsky5DualGPUPipeline(
+        dit_gpu0=dit_gpu0,
+        dit_gpu1=dit_gpu1,
+        vae=vae,
+        text_embedder=text_embedder,
+        conf=conf,
+        device0=device0,
+        device1=device1,
+        resolution=resolution,
+    )

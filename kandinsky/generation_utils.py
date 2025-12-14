@@ -305,10 +305,18 @@ def generate(
     preview_interval=None,
     preview_suffix=None,
     stop_check=None,
+    # Pipeline parallelism parameters:
+    start_step=0,           # Start from this step (0-indexed)
+    end_step=None,          # End at this step (None = num_steps)
+    initial_latent=None,    # Continue from this latent instead of random noise
 ):
-    g = torch.Generator(device="cuda")
-    g.manual_seed(seed)
-    img = torch.randn(*shape, device=device, generator=g)
+    # Handle pipeline parallelism - use provided latent or generate new noise
+    if initial_latent is not None:
+        img = initial_latent.to(device)
+    else:
+        g = torch.Generator(device="cuda")
+        g.manual_seed(seed)
+        img = torch.randn(*shape, device=device, generator=g)
 
     # Store original noise for early-stop decode
     original_noise = img.clone()
@@ -317,7 +325,15 @@ def generate(
     timesteps = torch.linspace(1, 0, num_steps + 1, device=device)
     timesteps = scheduler_scale * timesteps / (1 + (scheduler_scale - 1) * timesteps)
 
-    for i, (timestep, timestep_diff) in enumerate(tqdm(list(zip(timesteps[:-1], torch.diff(timesteps))))):
+    # Handle step range for pipeline parallelism
+    if end_step is None:
+        end_step = num_steps
+
+    # Create step pairs for the specified range
+    step_pairs = list(zip(timesteps[:-1], torch.diff(timesteps)))[start_step:end_step]
+
+    for i, (timestep, timestep_diff) in enumerate(tqdm(step_pairs, initial=start_step, total=end_step)):
+        actual_step = start_step + i  # Track actual step number for logging
         time = timestep.unsqueeze(0)
         if model.visual_cond:
             visual_cond = torch.zeros_like(img)
@@ -352,29 +368,29 @@ def generate(
         if stop_check is not None:
             action = stop_check()
             if action in ("decode", "save"):
-                print(f"\n>>> Early stop requested at step {i + 1}/{num_steps} - action: {action}", flush=True)
+                print(f"\n>>> Early stop requested at step {actual_step + 1}/{num_steps} - action: {action}", flush=True)
                 return {
                     "action": action,
                     "latents": img,
-                    "step": i + 1,
+                    "step": actual_step + 1,
                     "total_steps": num_steps,
                     "original_noise": original_noise,
                     "timesteps": timesteps
                 }
 
-        if previewer is not None and preview_interval and (i + 1) % preview_interval == 0 and (i + 1) < num_steps:
+        if previewer is not None and preview_interval and (actual_step + 1) % preview_interval == 0 and (actual_step + 1) < num_steps:
             import sys
-            print(f"\n>>> PREVIEW TRIGGER at step {i + 1}/{num_steps} (interval={preview_interval})", flush=True)
+            print(f"\n>>> PREVIEW TRIGGER at step {actual_step + 1}/{num_steps} (interval={preview_interval})", flush=True)
             sys.stdout.flush()
             print(f">>> img shape before permute: {img.shape}", flush=True)
             try:
                 preview_latent = img.permute(3, 0, 1, 2).unsqueeze(0)
                 print(f">>> preview_latent shape after permute+unsqueeze: {preview_latent.shape}", flush=True)
-                previewer.preview(preview_latent.squeeze(0), i, preview_suffix=preview_suffix)
+                previewer.preview(preview_latent.squeeze(0), actual_step, preview_suffix=preview_suffix)
                 print(f">>> Preview completed successfully", flush=True)
                 sys.stdout.flush()
             except Exception as e:
-                print(f">>> ERROR during preview generation at step {i + 1}: {e}", flush=True)
+                print(f">>> ERROR during preview generation at step {actual_step + 1}: {e}", flush=True)
                 import traceback
                 traceback.print_exc()
                 sys.stdout.flush()
@@ -2513,5 +2529,231 @@ def generate_sample_i2v_from_checkpoint(
     if offload or force_offload:
         vae = vae.to('cpu', non_blocking=True)
     torch.cuda.empty_cache()
+
+    return images
+
+
+@torch.no_grad()
+def generate_sample_t2v_pipeline_parallel(
+    shape,
+    caption,
+    dit_gpu0,
+    dit_gpu1,
+    vae,
+    conf,
+    text_embedder,
+    num_steps=50,
+    guidance_weight=5.0,
+    scheduler_scale=5.0,
+    negative_caption="",
+    clip_prompt=None,
+    seed=6554,
+    device0=torch.device('cuda:0'),
+    device1=torch.device('cuda:1'),
+    vae_device=None,
+    progress=True,
+):
+    """
+    Generate video using pipeline parallelism across two GPUs.
+
+    GPU 0 runs diffusion steps 0 to N/2, then transfers latent to GPU 1.
+    GPU 1 runs diffusion steps N/2 to N, then decodes with VAE.
+
+    Args:
+        shape: Output shape (bs, duration, height, width, dim)
+        caption: Text prompt
+        dit_gpu0: DiT model on GPU 0 (with block swapping)
+        dit_gpu1: DiT model on GPU 1 (with block swapping)
+        vae: VAE model (will be moved to vae_device for decode)
+        conf: Model configuration
+        text_embedder: Text encoder
+        num_steps: Total diffusion steps
+        guidance_weight: CFG weight
+        scheduler_scale: Scheduler scale factor
+        negative_caption: Negative prompt
+        clip_prompt: Optional CLIP prompt
+        seed: Random seed
+        device0: First GPU device
+        device1: Second GPU device
+        vae_device: Device for VAE decode (defaults to device1)
+        progress: Show progress bar
+
+    Returns:
+        Generated video tensor
+    """
+    if vae_device is None:
+        vae_device = device1
+
+    bs, duration, height, width, dim = shape
+    mid_step = num_steps // 2
+
+    print(f"\n{'='*60}")
+    print(f"Pipeline Parallel Generation")
+    print(f"  Total steps: {num_steps}")
+    print(f"  GPU 0 steps: 0-{mid_step}")
+    print(f"  GPU 1 steps: {mid_step}-{num_steps}")
+    print(f"{'='*60}\n")
+
+    # === Phase 1: Text Encoding (on GPU 0) ===
+    print("[PIPELINE] Phase 1: Text encoding on GPU 0...", flush=True)
+    t0 = time.perf_counter()
+    text_embedder = text_embedder.to(device0)
+
+    clip_texts = [clip_prompt] if clip_prompt else None
+    bs_text_embed, text_cu_seqlens, attention_mask = text_embedder.encode(
+        [caption], type_of_content="video", clip_texts=clip_texts
+    )
+    bs_null_text_embed, null_text_cu_seqlens, null_attention_mask = text_embedder.encode(
+        [negative_caption], type_of_content="video"
+    )
+    print(f"[PIPELINE] Text encoding done in {time.perf_counter() - t0:.1f}s", flush=True)
+
+    # Offload text encoder
+    text_embedder = text_embedder.to('cpu')
+    torch.cuda.empty_cache()
+
+    # Prepare embeddings for both GPUs
+    text_cu_seqlens_val = text_cu_seqlens.to(device=device0)[-1].item()
+    null_text_cu_seqlens_val = null_text_cu_seqlens.to(device=device0)[-1].item()
+
+    # GPU 0 embeddings
+    bs_text_embed_gpu0 = {k: v.to(device=device0, dtype=torch.bfloat16) for k, v in bs_text_embed.items()}
+    bs_null_text_embed_gpu0 = {k: v.to(device=device0, dtype=torch.bfloat16) for k, v in bs_null_text_embed.items()}
+    attention_mask_gpu0 = attention_mask.to(device=device0)
+    null_attention_mask_gpu0 = null_attention_mask.to(device=device0)
+
+    # GPU 1 embeddings (copy)
+    bs_text_embed_gpu1 = {k: v.to(device=device1, dtype=torch.bfloat16) for k, v in bs_text_embed.items()}
+    bs_null_text_embed_gpu1 = {k: v.to(device=device1, dtype=torch.bfloat16) for k, v in bs_null_text_embed.items()}
+    attention_mask_gpu1 = attention_mask.to(device=device1)
+    null_attention_mask_gpu1 = null_attention_mask.to(device=device1)
+
+    # RoPE positions
+    visual_rope_pos = [
+        torch.arange(duration),
+        torch.arange(height // conf.model.dit_params.patch_size[1]),
+        torch.arange(width // conf.model.dit_params.patch_size[2]),
+    ]
+    text_rope_pos = torch.arange(text_cu_seqlens_val)
+    null_text_rope_pos = torch.arange(null_text_cu_seqlens_val)
+
+    # === Phase 2: GPU 0 - First half of steps ===
+    print(f"\n[PIPELINE] Phase 2: GPU 0 running steps 0-{mid_step}...", flush=True)
+    t0 = time.perf_counter()
+
+    # Ensure DiT GPU 0 is ready
+    log_vram_usage("BEFORE GPU 0 DiT INFERENCE", dit=dit_gpu0, vae=None, text_embedder=None)
+
+    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        intermediate_latent = generate(
+            dit_gpu0,
+            device0,
+            (bs * duration, height, width, dim),
+            num_steps,
+            bs_text_embed_gpu0,
+            bs_null_text_embed_gpu0,
+            visual_rope_pos,
+            text_rope_pos,
+            null_text_rope_pos,
+            guidance_weight,
+            scheduler_scale,
+            None,  # first_frames (T2V has no conditioning frames)
+            conf,
+            seed=seed,
+            progress=progress,
+            attention_mask=attention_mask_gpu0,
+            null_attention_mask=null_attention_mask_gpu0,
+            start_step=0,
+            end_step=mid_step,
+        )
+
+    gpu0_time = time.perf_counter() - t0
+    print(f"[PIPELINE] GPU 0 completed in {gpu0_time:.1f}s", flush=True)
+
+    # Offload GPU 0 blocks to CPU
+    if hasattr(dit_gpu0, 'offload_all_blocks'):
+        dit_gpu0.offload_all_blocks()
+    torch.cuda.empty_cache()
+
+    # === Phase 3: Transfer latent to GPU 1 ===
+    print(f"\n[PIPELINE] Phase 3: Transferring latent to GPU 1...", flush=True)
+    t0 = time.perf_counter()
+    intermediate_latent = intermediate_latent.to(device1)
+    transfer_time = time.perf_counter() - t0
+    print(f"[PIPELINE] Transfer completed in {transfer_time*1000:.1f}ms", flush=True)
+
+    # === Phase 4: GPU 1 - Second half of steps ===
+    print(f"\n[PIPELINE] Phase 4: GPU 1 running steps {mid_step}-{num_steps}...", flush=True)
+    t0 = time.perf_counter()
+
+    log_vram_usage("BEFORE GPU 1 DiT INFERENCE", dit=dit_gpu1, vae=None, text_embedder=None)
+
+    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        final_latent = generate(
+            dit_gpu1,
+            device1,
+            (bs * duration, height, width, dim),
+            num_steps,
+            bs_text_embed_gpu1,
+            bs_null_text_embed_gpu1,
+            visual_rope_pos,
+            text_rope_pos,
+            null_text_rope_pos,
+            guidance_weight,
+            scheduler_scale,
+            None,  # first_frames
+            conf,
+            seed=seed,
+            progress=progress,
+            attention_mask=attention_mask_gpu1,
+            null_attention_mask=null_attention_mask_gpu1,
+            start_step=mid_step,
+            end_step=num_steps,
+            initial_latent=intermediate_latent,
+        )
+
+    gpu1_time = time.perf_counter() - t0
+    print(f"[PIPELINE] GPU 1 completed in {gpu1_time:.1f}s", flush=True)
+
+    # Offload GPU 1 blocks
+    if hasattr(dit_gpu1, 'offload_all_blocks'):
+        dit_gpu1.offload_all_blocks()
+    torch.cuda.empty_cache()
+
+    # === Phase 5: VAE Decode ===
+    print(f"\n[PIPELINE] Phase 5: VAE decoding on {vae_device}...", flush=True)
+    t0 = time.perf_counter()
+
+    vae = vae.to(vae_device)
+
+    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        images = final_latent.reshape(
+            bs,
+            -1,
+            final_latent.shape[-3],
+            final_latent.shape[-2],
+            final_latent.shape[-1],
+        )
+        images = images.to(device=vae_device)
+        images = (images / vae.config.scaling_factor).permute(0, 4, 1, 2, 3)
+        images = vae.decode(images).sample
+        images = ((images.clamp(-1.0, 1.0) + 1.0) * 127.5).to(torch.uint8)
+
+    vae_time = time.perf_counter() - t0
+    print(f"[PIPELINE] VAE decode completed in {vae_time:.1f}s", flush=True)
+
+    # Offload VAE
+    vae = vae.to('cpu')
+    torch.cuda.empty_cache()
+
+    # Summary
+    print(f"\n{'='*60}")
+    print(f"Pipeline Parallel Generation Complete!")
+    print(f"  GPU 0 time: {gpu0_time:.1f}s")
+    print(f"  Transfer time: {transfer_time*1000:.1f}ms")
+    print(f"  GPU 1 time: {gpu1_time:.1f}s")
+    print(f"  VAE time: {vae_time:.1f}s")
+    print(f"  Total DiT time: {gpu0_time + gpu1_time:.1f}s")
+    print(f"{'='*60}\n")
 
     return images
