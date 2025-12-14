@@ -2675,6 +2675,12 @@ def generate_sample_t2v_pipeline_parallel(
     print(f"\n[CFG PARALLEL] Phase 3: Running {num_steps} diffusion steps with parallel CFG...", flush=True)
     t0 = time.perf_counter()
 
+    # Disable torch.compile/dynamo for threaded execution (not compatible with ThreadPoolExecutor)
+    # Save original state and completely disable dynamo
+    original_dynamo_disable = torch._dynamo.config.disable
+    torch._dynamo.config.disable = True
+    torch._dynamo.reset()
+
     # Storage for results from parallel execution
     cond_result = [None]
     uncond_result = [None]
@@ -2768,6 +2774,9 @@ def generate_sample_t2v_pipeline_parallel(
 
     diffusion_time = time.perf_counter() - t0
     print(f"[CFG PARALLEL] Diffusion completed in {diffusion_time:.1f}s", flush=True)
+
+    # Restore dynamo config
+    torch._dynamo.config.disable = original_dynamo_disable
 
     # Offload DiT blocks
     if hasattr(dit_gpu0, 'offload_all_blocks'):
