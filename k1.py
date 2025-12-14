@@ -1288,6 +1288,97 @@ def clear_completed_jobs() -> str:
 
 
 # =============================================================================
+# RECONNECTION SUPPORT - Auto-restore UI state on page load
+# =============================================================================
+
+def check_and_restore_active_jobs():
+    """
+    Called on page load - finds any running/recent jobs and restores UI state.
+
+    This enables seamless reconnection after browser disconnect:
+    - Detects active generations by checking for recently-modified preview files
+    - Shows any completed videos from the current session (last 30 minutes)
+    - User sees their generation progress immediately on reconnect
+
+    Returns:
+        Tuple of (videos, preview, status, progress)
+    """
+    try:
+        # =================================================================
+        # STEP 1: Check for active generation by looking for
+        #         recently-modified preview files in outputs/previews/
+        # =================================================================
+        preview_dir = os.path.join("outputs", "previews")
+        active_preview = None
+        active_preview_age = float('inf')
+
+        if os.path.exists(preview_dir):
+            now = time.time()
+            for filename in os.listdir(preview_dir):
+                if filename.startswith("latent_preview_k1_") and filename.endswith(".mp4"):
+                    filepath = os.path.join(preview_dir, filename)
+                    try:
+                        mtime = os.path.getmtime(filepath)
+                        age = now - mtime
+                        # Consider preview "active" if modified within last 30 minutes
+                        # (generation steps can take a long time on slower hardware)
+                        if age < 1800 and age < active_preview_age:
+                            active_preview = filepath
+                            active_preview_age = age
+                    except OSError:
+                        continue
+
+        # =================================================================
+        # STEP 2: Find completed videos from current session (last 3 hours)
+        # =================================================================
+        videos = []
+        outputs_dir = "outputs"
+        if os.path.exists(outputs_dir):
+            now = time.time()
+            recent_videos = []
+            for filename in os.listdir(outputs_dir):
+                if filename.startswith("k1_") and filename.endswith(".mp4"):
+                    filepath = os.path.join(outputs_dir, filename)
+                    try:
+                        mtime = os.path.getmtime(filepath)
+                        # Only show videos from last 3 hours (same session)
+                        if now - mtime < 10800:
+                            recent_videos.append((filepath, mtime))
+                    except OSError:
+                        continue
+
+            # Sort by newest first
+            recent_videos.sort(key=lambda x: x[1], reverse=True)
+            for filepath, _ in recent_videos[:10]:
+                seed_match = re.search(r'_(\d+)\.mp4$', filepath)
+                seed_label = f"Seed: {seed_match.group(1)}" if seed_match else "Completed"
+                videos.append((filepath, seed_label))
+
+        # =================================================================
+        # STEP 3: Return appropriate state based on what was found
+        # =================================================================
+        if active_preview:
+            # Active generation detected
+            print(f"[Reconnect] Found active generation (preview age: {active_preview_age:.1f}s), {len(videos)} completed video(s)")
+            return videos, active_preview, f"🔄 Reconnected! Generation in progress... ({len(videos)} completed)", "Processing (click Reconnect to refresh)"
+
+        if videos:
+            # No active generation, but have recent completed videos
+            print(f"[Reconnect] Found {len(videos)} recent video(s) from current session")
+            return videos, None, f"✅ Reconnected! Found {len(videos)} recent video(s)", ""
+
+        # Nothing to restore
+        print("[Reconnect] No active or recent jobs found")
+        return [], None, "Ready to generate", ""
+
+    except Exception as e:
+        print(f"[Reconnect] Error checking jobs: {e}")
+        import traceback
+        traceback.print_exc()
+        return [], None, "Ready to generate", ""
+
+
+# =============================================================================
 # UNIFIED QUEUE-BASED GENERATION (Browser-Independent with Live Updates)
 # =============================================================================
 # These functions provide the same UX as direct generation but use the queue
@@ -2365,13 +2456,15 @@ def create_interface():
                             interactive=False
                         )                        
                     with gr.Column(scale=2):
-                        batch_progress = gr.Textbox(label="Status", interactive=False, value="")
-                        progress_text = gr.Textbox(label="Progress", interactive=False, value="")
+                        batch_progress = gr.Textbox(label="Status", interactive=False, value="", elem_id="k1_batch_progress")
+                        progress_text = gr.Textbox(label="Progress", interactive=False, value="", elem_id="k1_progress_text")
                         save_latents_checkbox = gr.Checkbox(label="Save Latents Before VAE Decode", value=False)
 
                 with gr.Row():
                     generate_btn = gr.Button("Generate Video", elem_classes="green-btn")
                     stop_btn = gr.Button("Stop Generation", variant="stop")
+                    reconnect_btn = gr.Button("🔄 Reconnect", variant="secondary", scale=0.5,
+                                              elem_classes="light-blue-btn")
 
                 with gr.Row():
                     with gr.Column():
@@ -2546,19 +2639,19 @@ def create_interface():
 
                 with gr.Accordion("Model Settings & Performance", open=True):
                     with gr.Row():
-                        use_mixed_weights = gr.Checkbox(label="Use Mixed Weights", value=False, info="Preserve fp32 for critical layers (norms, embeddings)")
+                        use_mixed_weights = gr.Checkbox(label="Use Mixed Weights", value=True, info="Preserve fp32 for critical layers (norms, embeddings)")
                         use_int8 = gr.Checkbox(label="Use int8 matmul (legacy)", value=False, info="Legacy INT8 quantization")
-                        use_torch_compile = gr.Checkbox(label="Use torch.compile", value=False, info="Slower startup (2-5 min) but faster inference")
+                        use_torch_compile = gr.Checkbox(label="Use torch.compile", value=True, info="Slower startup (2-5 min) but faster inference")
                         use_magcache = gr.Checkbox(label="Use MagCache", value=False, info="Skip redundant computations (50-step models only)")
                     with gr.Row():
                         use_sdnq = gr.Checkbox(label="Use SDNQ (recommended)", value=False, info="20-40% faster than legacy INT8 with auto-tuned Triton kernels")
                         sdnq_weights_dtype = gr.Radio(choices=["int8", "fp8", "int4"], label="SDNQ Weights", value="int8", info="int8=best balance, fp8=H100+, int4=experimental")
-                        sdnq_triton_mm = gr.Checkbox(label="Triton MM", value=True, info="Use Triton int8 kernel (faster on 4090/5090)")
-                        sdnq_compile = gr.Checkbox(label="torch.compile SDNQ", value=True, info="Compile SDNQ kernels (better throughput after warmup)")
+                        sdnq_triton_mm = gr.Checkbox(label="Triton MM", value=False, info="Use Triton int8 kernel (faster on 4090/5090)")
+                        sdnq_compile = gr.Checkbox(label="torch.compile SDNQ", value=False, info="Compile SDNQ kernels (better throughput after warmup)")
                     with gr.Row():
                         enable_block_swap = gr.Checkbox(label="Enable Block Swap", value=True, info="Required for 24GB GPUs")
                         offload_inactive = gr.Checkbox(label="Offload Inactive Models", value=False, info="Offload text encoder & VAE to CPU when not in use (auto-enabled with block swap)")
-                        blocks_in_memory = gr.Slider(minimum=1, maximum=60, step=1, label="Blocks in Memory", value=2, info="Number of transformer blocks to keep in GPU memory")
+                        blocks_in_memory = gr.Slider(minimum=1, maximum=60, step=1, label="Blocks in Memory", value=6, info="Number of transformer blocks to keep in GPU memory")
                     with gr.Row():
                         dtype_select = gr.Radio(choices=["bfloat16", "float16", "float32", "fp8_scaled"], label="Default Data Type", value="bfloat16", info="Used for all components if specific dtypes not set. fp8_scaled provides ~50% memory savings.")
                     with gr.Accordion("Advanced: Component-Specific Data Types", open=False):
@@ -2716,6 +2809,63 @@ def create_interface():
                 stop_btn.click(
                     fn=stop_generation,
                     outputs=[batch_progress]
+                )
+
+                # Manual reconnect button - uses JS to fetch API and update UI directly
+                # This bypasses Gradio's queue/SSE mechanism which can block
+                reconnect_btn.click(
+                    fn=None,
+                    inputs=None,
+                    outputs=[batch_progress],
+                    js=r"""
+                        async () => {
+                            try {
+                                console.log('[Reconnect] Fetching state from API...');
+                                const response = await fetch('/gradio_api/reconnect_state');
+                                const data = await response.json();
+                                console.log('[Reconnect] Got state:', data);
+
+                                // Update status text
+                                const statusEl = document.querySelector('#k1_batch_progress textarea');
+                                if (statusEl) {
+                                    statusEl.value = data.status;
+                                    statusEl.dispatchEvent(new Event('input', { bubbles: true }));
+                                    console.log('[Reconnect] Updated status:', data.status);
+                                }
+
+                                // Update progress text
+                                const progressEl = document.querySelector('#k1_progress_text textarea');
+                                if (progressEl) {
+                                    progressEl.value = data.progress;
+                                    progressEl.dispatchEvent(new Event('input', { bubbles: true }));
+                                    console.log('[Reconnect] Updated progress:', data.progress);
+                                }
+
+                                // Update preview video if active
+                                if (data.preview && data.active) {
+                                    const previewVideo = document.querySelector('#k1_preview_video video');
+                                    if (previewVideo) {
+                                        // Convert file path to Gradio file URL
+                                        const fileUrl = '/gradio_api/file=' + encodeURIComponent(data.preview);
+                                        previewVideo.src = fileUrl;
+                                        previewVideo.load();
+                                        console.log('[Reconnect] Updated preview:', fileUrl);
+                                    }
+                                }
+
+                                // Log gallery info for debugging
+                                if (data.videos && data.videos.length > 0) {
+                                    console.log('[Reconnect] Videos available:', data.videos.length);
+                                    data.videos.forEach((v, i) => console.log(`  [${i}] ${v.path}`));
+                                }
+
+                                return data.status;
+                            } catch (e) {
+                                console.error('[Reconnect] Error:', e);
+                                return 'Reconnect failed: ' + e.message;
+                            }
+                        }
+                    """
                 )
 
                 stop_decode_btn.click(
@@ -3031,15 +3181,15 @@ def create_interface():
 
                 with gr.Accordion("Model Settings & Performance", open=True):
                     with gr.Row():
-                        v2v_use_mixed_weights = gr.Checkbox(label="Use Mixed Weights", value=False, info="Preserve fp32 for critical layers (norms, embeddings)")
+                        v2v_use_mixed_weights = gr.Checkbox(label="Use Mixed Weights", value=True, info="Preserve fp32 for critical layers (norms, embeddings)")
                         v2v_use_int8 = gr.Checkbox(label="Use int8 matmul (legacy)", value=False, info="Legacy INT8 quantization")
-                        v2v_use_torch_compile = gr.Checkbox(label="Use torch.compile", value=False, info="Slower startup (2-5 min) but faster inference")
+                        v2v_use_torch_compile = gr.Checkbox(label="Use torch.compile", value=True, info="Slower startup (2-5 min) but faster inference")
                         v2v_use_magcache = gr.Checkbox(label="Use MagCache", value=False, info="Skip redundant computations (50-step models only)")
                     with gr.Row():
                         v2v_use_sdnq = gr.Checkbox(label="Use SDNQ (recommended)", value=False, info="20-40% faster than legacy INT8 with auto-tuned Triton kernels")
                         v2v_sdnq_weights_dtype = gr.Radio(choices=["int8", "fp8", "int4"], label="SDNQ Weights", value="int8", info="int8=best balance, fp8=H100+, int4=experimental")
-                        v2v_sdnq_triton_mm = gr.Checkbox(label="Triton MM", value=True, info="Use Triton int8 kernel (faster on 4090/5090)")
-                        v2v_sdnq_compile = gr.Checkbox(label="torch.compile SDNQ", value=True, info="Compile SDNQ kernels (better throughput after warmup)")
+                        v2v_sdnq_triton_mm = gr.Checkbox(label="Triton MM", value=False, info="Use Triton int8 kernel (faster on 4090/5090)")
+                        v2v_sdnq_compile = gr.Checkbox(label="torch.compile SDNQ", value=False, info="Compile SDNQ kernels (better throughput after warmup)")
                     with gr.Row():
                         v2v_enable_block_swap = gr.Checkbox(label="Enable Block Swap", value=True, info="Required for 24GB GPUs")
                         v2v_offload_inactive = gr.Checkbox(label="Offload Inactive Models", value=False, info="Offload text encoder & VAE to CPU when not in use (auto-enabled with block swap)")
