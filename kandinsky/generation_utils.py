@@ -2713,10 +2713,15 @@ def generate_sample_t2v_pipeline_parallel(
                         attention_mask=uncond_attention_mask,
                     )
 
+    # Create timesteps on both devices (model expects tensors, not floats)
+    timesteps_gpu1 = timesteps.to(device1)
+
     iterator = tqdm(range(num_steps), desc="CFG Parallel Steps") if progress else range(num_steps)
 
     for i in iterator:
-        timestep = timesteps[i].item()
+        # Keep as tensors on respective devices
+        timestep_gpu0 = timesteps[i:i+1]  # Shape [1] tensor on device0
+        timestep_gpu1 = timesteps_gpu1[i:i+1]  # Shape [1] tensor on device1
         timestep_diff = (timesteps[i + 1] - timesteps[i]).item()
 
         # Sync latents between GPUs before each step
@@ -2725,8 +2730,8 @@ def generate_sample_t2v_pipeline_parallel(
 
         # Run BOTH forward passes in PARALLEL using threads
         with ThreadPoolExecutor(max_workers=2) as executor:
-            future_cond = executor.submit(run_conditional, img_gpu0, timestep)
-            future_uncond = executor.submit(run_unconditional, img_gpu1, timestep)
+            future_cond = executor.submit(run_conditional, img_gpu0, timestep_gpu0)
+            future_uncond = executor.submit(run_unconditional, img_gpu1, timestep_gpu1)
             # Wait for both to complete
             future_cond.result()
             future_uncond.result()
