@@ -2641,6 +2641,9 @@ def generate_sample_t2v_pipeline_parallel(
     print(f"\n[PIPELINE] Phase 2: GPU 0 running steps 0-{mid_step}...", flush=True)
     t0 = time.perf_counter()
 
+    # Move DiT GPU 0 non-block components to GPU (blocks stay on CPU for block swap)
+    dit_gpu0.to(device0, non_blocking=True)
+
     # Ensure DiT GPU 0 is ready
     log_vram_usage("BEFORE GPU 0 DiT INFERENCE", dit=dit_gpu0, vae=None, text_embedder=None)
 
@@ -2685,6 +2688,9 @@ def generate_sample_t2v_pipeline_parallel(
     # === Phase 4: GPU 1 - Second half of steps ===
     print(f"\n[PIPELINE] Phase 4: GPU 1 running steps {mid_step}-{num_steps}...", flush=True)
     t0 = time.perf_counter()
+
+    # Move DiT GPU 1 non-block components to GPU (blocks stay on CPU for block swap)
+    dit_gpu1.to(device1, non_blocking=True)
 
     log_vram_usage("BEFORE GPU 1 DiT INFERENCE", dit=dit_gpu1, vae=None, text_embedder=None)
 
