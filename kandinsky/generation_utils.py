@@ -2693,41 +2693,41 @@ def generate_sample_t2v_pipeline_parallel(
             return torch.cat([img, visual_cond, visual_cond_mask], dim=-1)
         return img
 
+    @torch._dynamo.disable()
     def run_conditional(x, t_val):
         """Run conditional forward pass on GPU 0"""
         with torch.cuda.device(device0):
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                with torch._dynamo.utils.disable_cache_limit():
-                    model_input = prepare_model_input(x, device0)
-                    cond_result[0] = dit_gpu0(
-                        model_input,
-                        cond_text_embed["text_embeds"],
-                        cond_text_embed["pooled_embed"],
-                        t_val * 1000,
-                        visual_rope_pos_gpu0,
-                        text_rope_pos,
-                        scale_factor=conf.metrics.scale_factor,
-                        sparse_params=None,
-                        attention_mask=cond_attention_mask,
-                    )
+                model_input = prepare_model_input(x, device0)
+                cond_result[0] = dit_gpu0(
+                    model_input,
+                    cond_text_embed["text_embeds"],
+                    cond_text_embed["pooled_embed"],
+                    t_val * 1000,
+                    visual_rope_pos_gpu0,
+                    text_rope_pos,
+                    scale_factor=conf.metrics.scale_factor,
+                    sparse_params=None,
+                    attention_mask=cond_attention_mask,
+                )
 
+    @torch._dynamo.disable()
     def run_unconditional(x, t_val):
         """Run unconditional forward pass on GPU 1"""
         with torch.cuda.device(device1):
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                with torch._dynamo.utils.disable_cache_limit():
-                    model_input = prepare_model_input(x, device1)
-                    uncond_result[0] = dit_gpu1(
-                        model_input,
-                        uncond_text_embed["text_embeds"],
-                        uncond_text_embed["pooled_embed"],
-                        t_val * 1000,
-                        visual_rope_pos_gpu1,
-                        null_text_rope_pos,
-                        scale_factor=conf.metrics.scale_factor,
-                        sparse_params=None,
-                        attention_mask=uncond_attention_mask,
-                    )
+                model_input = prepare_model_input(x, device1)
+                uncond_result[0] = dit_gpu1(
+                    model_input,
+                    uncond_text_embed["text_embeds"],
+                    uncond_text_embed["pooled_embed"],
+                    t_val * 1000,
+                    visual_rope_pos_gpu1,
+                    null_text_rope_pos,
+                    scale_factor=conf.metrics.scale_factor,
+                    sparse_params=None,
+                    attention_mask=uncond_attention_mask,
+                )
 
     # Create timesteps on both devices (model expects tensors, not floats)
     timesteps_gpu1 = timesteps.to(device1)
