@@ -2554,17 +2554,22 @@ def generate_sample_t2v_pipeline_parallel(
     progress=True,
 ):
     """
-    Generate video using pipeline parallelism across two GPUs.
+    Generate video using TRUE CFG parallelism across two GPUs.
 
-    GPU 0 runs diffusion steps 0 to N/2, then transfers latent to GPU 1.
-    GPU 1 runs diffusion steps N/2 to N, then decodes with VAE.
+    At each diffusion step:
+    - GPU 0 runs the CONDITIONAL forward pass (with text prompt)
+    - GPU 1 runs the UNCONDITIONAL forward pass (with negative prompt)
+    - Both run SIMULTANEOUSLY using threading
+    - Results are combined: pred = uncond + guidance * (cond - uncond)
+
+    This gives ~2x speedup on DiT inference since both GPUs work at the same time.
 
     Args:
         shape: Output shape (bs, duration, height, width, dim)
         caption: Text prompt
-        dit_gpu0: DiT model on GPU 0 (with block swapping)
-        dit_gpu1: DiT model on GPU 1 (with block swapping)
-        vae: VAE model (will be moved to vae_device for decode)
+        dit_gpu0: DiT model on GPU 0 (runs conditional pass)
+        dit_gpu1: DiT model on GPU 1 (runs unconditional pass)
+        vae: VAE model
         conf: Model configuration
         text_embedder: Text encoder
         num_steps: Total diffusion steps
@@ -2573,29 +2578,32 @@ def generate_sample_t2v_pipeline_parallel(
         negative_caption: Negative prompt
         clip_prompt: Optional CLIP prompt
         seed: Random seed
-        device0: First GPU device
-        device1: Second GPU device
-        vae_device: Device for VAE decode (defaults to device1)
+        device0: First GPU device (conditional)
+        device1: Second GPU device (unconditional)
+        vae_device: Device for VAE decode (defaults to device0)
         progress: Show progress bar
 
     Returns:
         Generated video tensor
     """
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
     if vae_device is None:
-        vae_device = device1
+        vae_device = device0
 
     bs, duration, height, width, dim = shape
-    mid_step = num_steps // 2
 
     print(f"\n{'='*60}")
-    print(f"Pipeline Parallel Generation")
+    print(f"CFG Parallel Generation (TRUE PARALLELISM)")
     print(f"  Total steps: {num_steps}")
-    print(f"  GPU 0 steps: 0-{mid_step}")
-    print(f"  GPU 1 steps: {mid_step}-{num_steps}")
+    print(f"  GPU 0: Conditional pass (text prompt)")
+    print(f"  GPU 1: Unconditional pass (negative prompt)")
+    print(f"  Both GPUs run SIMULTANEOUSLY at each step")
     print(f"{'='*60}\n")
 
     # === Phase 1: Text Encoding (on GPU 0) ===
-    print("[PIPELINE] Phase 1: Text encoding on GPU 0...", flush=True)
+    print("[CFG PARALLEL] Phase 1: Text encoding...", flush=True)
     t0 = time.perf_counter()
     text_embedder = text_embedder.to(device0)
 
@@ -2606,139 +2614,160 @@ def generate_sample_t2v_pipeline_parallel(
     bs_null_text_embed, null_text_cu_seqlens, null_attention_mask = text_embedder.encode(
         [negative_caption], type_of_content="video"
     )
-    print(f"[PIPELINE] Text encoding done in {time.perf_counter() - t0:.1f}s", flush=True)
+    print(f"[CFG PARALLEL] Text encoding done in {time.perf_counter() - t0:.1f}s", flush=True)
 
     # Offload text encoder
     text_embedder = text_embedder.to('cpu')
     torch.cuda.empty_cache()
 
-    # Prepare embeddings for both GPUs
+    # Prepare embeddings - GPU 0 gets conditional, GPU 1 gets unconditional
     text_cu_seqlens_val = text_cu_seqlens.to(device=device0)[-1].item()
     null_text_cu_seqlens_val = null_text_cu_seqlens.to(device=device0)[-1].item()
 
-    # GPU 0 embeddings
-    bs_text_embed_gpu0 = {k: v.to(device=device0, dtype=torch.bfloat16) for k, v in bs_text_embed.items()}
-    bs_null_text_embed_gpu0 = {k: v.to(device=device0, dtype=torch.bfloat16) for k, v in bs_null_text_embed.items()}
-    attention_mask_gpu0 = attention_mask.to(device=device0)
-    null_attention_mask_gpu0 = null_attention_mask.to(device=device0)
+    # GPU 0: Conditional embeddings (text prompt)
+    cond_text_embed = {k: v.to(device=device0, dtype=torch.bfloat16) for k, v in bs_text_embed.items()}
+    cond_attention_mask = attention_mask.to(device=device0)
 
-    # GPU 1 embeddings (copy)
-    bs_text_embed_gpu1 = {k: v.to(device=device1, dtype=torch.bfloat16) for k, v in bs_text_embed.items()}
-    bs_null_text_embed_gpu1 = {k: v.to(device=device1, dtype=torch.bfloat16) for k, v in bs_null_text_embed.items()}
-    attention_mask_gpu1 = attention_mask.to(device=device1)
-    null_attention_mask_gpu1 = null_attention_mask.to(device=device1)
+    # GPU 1: Unconditional embeddings (negative prompt)
+    uncond_text_embed = {k: v.to(device=device1, dtype=torch.bfloat16) for k, v in bs_null_text_embed.items()}
+    uncond_attention_mask = null_attention_mask.to(device=device1)
 
-    # RoPE positions
-    visual_rope_pos = [
+    # RoPE positions for each GPU
+    text_rope_pos = torch.arange(text_cu_seqlens_val)
+    null_text_rope_pos = torch.arange(null_text_cu_seqlens_val)
+
+    visual_rope_pos_gpu0 = [
         torch.arange(duration),
         torch.arange(height // conf.model.dit_params.patch_size[1]),
         torch.arange(width // conf.model.dit_params.patch_size[2]),
     ]
-    text_rope_pos = torch.arange(text_cu_seqlens_val)
-    null_text_rope_pos = torch.arange(null_text_cu_seqlens_val)
+    visual_rope_pos_gpu1 = [
+        torch.arange(duration),
+        torch.arange(height // conf.model.dit_params.patch_size[1]),
+        torch.arange(width // conf.model.dit_params.patch_size[2]),
+    ]
 
-    # === Phase 2: GPU 0 - First half of steps ===
-    print(f"\n[PIPELINE] Phase 2: GPU 0 running steps 0-{mid_step}...", flush=True)
+    # === Phase 2: Initialize models and latent ===
+    print("[CFG PARALLEL] Phase 2: Initializing models...", flush=True)
+
+    # Move DiT models to their GPUs
+    dit_gpu0.to(device0, non_blocking=True)
+    dit_gpu1.to(device1, non_blocking=True)
+    torch.cuda.synchronize(device0)
+    torch.cuda.synchronize(device1)
+
+    log_vram_usage("AFTER DiT INITIALIZATION", dit=dit_gpu0, vae=None, text_embedder=None)
+
+    # Initialize latent noise on GPU 0
+    g = torch.Generator(device=device0)
+    g.manual_seed(seed)
+    latent_shape = (bs * duration, height, width, dim)
+    img_gpu0 = torch.randn(*latent_shape, device=device0, generator=g, dtype=torch.bfloat16)
+
+    # Create copy on GPU 1 (both GPUs need the same latent for their respective passes)
+    img_gpu1 = img_gpu0.to(device1)
+
+    # Timestep schedule
+    timesteps = torch.linspace(1, 0, num_steps + 1, device=device0)
+    timesteps = scheduler_scale * timesteps / (1 + (scheduler_scale - 1) * timesteps)
+
+    # === Phase 3: CFG Parallel Diffusion Loop ===
+    print(f"\n[CFG PARALLEL] Phase 3: Running {num_steps} diffusion steps with parallel CFG...", flush=True)
     t0 = time.perf_counter()
 
-    # Move DiT GPU 0 non-block components to GPU (blocks stay on CPU for block swap)
-    dit_gpu0.to(device0, non_blocking=True)
+    # Storage for results from parallel execution
+    cond_result = [None]
+    uncond_result = [None]
 
-    # Ensure DiT GPU 0 is ready
-    log_vram_usage("BEFORE GPU 0 DiT INFERENCE", dit=dit_gpu0, vae=None, text_embedder=None)
+    def run_conditional(x, t_val):
+        """Run conditional forward pass on GPU 0"""
+        with torch.cuda.device(device0):
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                with torch._dynamo.utils.disable_cache_limit():
+                    cond_result[0] = dit_gpu0(
+                        x,
+                        cond_text_embed["text_embeds"],
+                        cond_text_embed["pooled_embed"],
+                        t_val * 1000,
+                        visual_rope_pos_gpu0,
+                        text_rope_pos,
+                        scale_factor=conf.metrics.scale_factor,
+                        sparse_params=None,
+                        attention_mask=cond_attention_mask,
+                    )
 
-    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-        intermediate_latent = generate(
-            dit_gpu0,
-            device0,
-            (bs * duration, height, width, dim),
-            num_steps,
-            bs_text_embed_gpu0,
-            bs_null_text_embed_gpu0,
-            visual_rope_pos,
-            text_rope_pos,
-            null_text_rope_pos,
-            guidance_weight,
-            scheduler_scale,
-            None,  # first_frames (T2V has no conditioning frames)
-            conf,
-            seed=seed,
-            progress=progress,
-            attention_mask=attention_mask_gpu0,
-            null_attention_mask=null_attention_mask_gpu0,
-            start_step=0,
-            end_step=mid_step,
-        )
+    def run_unconditional(x, t_val):
+        """Run unconditional forward pass on GPU 1"""
+        with torch.cuda.device(device1):
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                with torch._dynamo.utils.disable_cache_limit():
+                    uncond_result[0] = dit_gpu1(
+                        x,
+                        uncond_text_embed["text_embeds"],
+                        uncond_text_embed["pooled_embed"],
+                        t_val * 1000,
+                        visual_rope_pos_gpu1,
+                        null_text_rope_pos,
+                        scale_factor=conf.metrics.scale_factor,
+                        sparse_params=None,
+                        attention_mask=uncond_attention_mask,
+                    )
 
-    gpu0_time = time.perf_counter() - t0
-    print(f"[PIPELINE] GPU 0 completed in {gpu0_time:.1f}s", flush=True)
+    iterator = tqdm(range(num_steps), desc="CFG Parallel Steps") if progress else range(num_steps)
 
-    # Offload GPU 0 blocks to CPU
+    for i in iterator:
+        timestep = timesteps[i].item()
+        timestep_diff = (timesteps[i + 1] - timesteps[i]).item()
+
+        # Sync latents between GPUs before each step
+        img_gpu1 = img_gpu0.to(device1, non_blocking=True)
+        torch.cuda.synchronize(device1)
+
+        # Run BOTH forward passes in PARALLEL using threads
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            future_cond = executor.submit(run_conditional, img_gpu0, timestep)
+            future_uncond = executor.submit(run_unconditional, img_gpu1, timestep)
+            # Wait for both to complete
+            future_cond.result()
+            future_uncond.result()
+
+        # Get results
+        pred_cond = cond_result[0]  # On GPU 0
+        pred_uncond = uncond_result[0]  # On GPU 1
+
+        # Transfer unconditional result to GPU 0 for CFG combination
+        pred_uncond_gpu0 = pred_uncond.to(device0, non_blocking=True)
+        torch.cuda.synchronize(device0)
+
+        # CFG combination: pred = uncond + guidance * (cond - uncond)
+        pred_velocity = pred_uncond_gpu0 + guidance_weight * (pred_cond - pred_uncond_gpu0)
+
+        # Euler step update
+        img_gpu0 = img_gpu0 + timestep_diff * pred_velocity
+
+    diffusion_time = time.perf_counter() - t0
+    print(f"[CFG PARALLEL] Diffusion completed in {diffusion_time:.1f}s", flush=True)
+
+    # Offload DiT blocks
     if hasattr(dit_gpu0, 'offload_all_blocks'):
         dit_gpu0.offload_all_blocks()
-    torch.cuda.empty_cache()
-
-    # === Phase 3: Transfer latent to GPU 1 ===
-    print(f"\n[PIPELINE] Phase 3: Transferring latent to GPU 1...", flush=True)
-    t0 = time.perf_counter()
-    intermediate_latent = intermediate_latent.to(device1)
-    transfer_time = time.perf_counter() - t0
-    print(f"[PIPELINE] Transfer completed in {transfer_time*1000:.1f}ms", flush=True)
-
-    # === Phase 4: GPU 1 - Second half of steps ===
-    print(f"\n[PIPELINE] Phase 4: GPU 1 running steps {mid_step}-{num_steps}...", flush=True)
-    t0 = time.perf_counter()
-
-    # Move DiT GPU 1 non-block components to GPU (blocks stay on CPU for block swap)
-    dit_gpu1.to(device1, non_blocking=True)
-
-    log_vram_usage("BEFORE GPU 1 DiT INFERENCE", dit=dit_gpu1, vae=None, text_embedder=None)
-
-    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-        final_latent = generate(
-            dit_gpu1,
-            device1,
-            (bs * duration, height, width, dim),
-            num_steps,
-            bs_text_embed_gpu1,
-            bs_null_text_embed_gpu1,
-            visual_rope_pos,
-            text_rope_pos,
-            null_text_rope_pos,
-            guidance_weight,
-            scheduler_scale,
-            None,  # first_frames
-            conf,
-            seed=seed,
-            progress=progress,
-            attention_mask=attention_mask_gpu1,
-            null_attention_mask=null_attention_mask_gpu1,
-            start_step=mid_step,
-            end_step=num_steps,
-            initial_latent=intermediate_latent,
-        )
-
-    gpu1_time = time.perf_counter() - t0
-    print(f"[PIPELINE] GPU 1 completed in {gpu1_time:.1f}s", flush=True)
-
-    # Offload GPU 1 blocks
     if hasattr(dit_gpu1, 'offload_all_blocks'):
         dit_gpu1.offload_all_blocks()
     torch.cuda.empty_cache()
 
-    # === Phase 5: VAE Decode ===
-    print(f"\n[PIPELINE] Phase 5: VAE decoding on {vae_device}...", flush=True)
+    # === Phase 4: VAE Decode ===
+    print(f"\n[CFG PARALLEL] Phase 4: VAE decoding on {vae_device}...", flush=True)
     t0 = time.perf_counter()
 
     vae = vae.to(vae_device)
 
     with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-        images = final_latent.reshape(
+        images = img_gpu0.reshape(
             bs,
             -1,
-            final_latent.shape[-3],
-            final_latent.shape[-2],
-            final_latent.shape[-1],
+            img_gpu0.shape[-3],
+            img_gpu0.shape[-2],
+            img_gpu0.shape[-1],
         )
         images = images.to(device=vae_device)
         images = (images / vae.config.scaling_factor).permute(0, 4, 1, 2, 3)
@@ -2746,7 +2775,7 @@ def generate_sample_t2v_pipeline_parallel(
         images = ((images.clamp(-1.0, 1.0) + 1.0) * 127.5).to(torch.uint8)
 
     vae_time = time.perf_counter() - t0
-    print(f"[PIPELINE] VAE decode completed in {vae_time:.1f}s", flush=True)
+    print(f"[CFG PARALLEL] VAE decode completed in {vae_time:.1f}s", flush=True)
 
     # Offload VAE
     vae = vae.to('cpu')
@@ -2754,12 +2783,10 @@ def generate_sample_t2v_pipeline_parallel(
 
     # Summary
     print(f"\n{'='*60}")
-    print(f"Pipeline Parallel Generation Complete!")
-    print(f"  GPU 0 time: {gpu0_time:.1f}s")
-    print(f"  Transfer time: {transfer_time*1000:.1f}ms")
-    print(f"  GPU 1 time: {gpu1_time:.1f}s")
+    print(f"CFG Parallel Generation Complete!")
+    print(f"  Diffusion time: {diffusion_time:.1f}s ({num_steps} steps)")
     print(f"  VAE time: {vae_time:.1f}s")
-    print(f"  Total DiT time: {gpu0_time + gpu1_time:.1f}s")
+    print(f"  Avg time per step: {diffusion_time/num_steps:.2f}s")
     print(f"{'='*60}\n")
 
     return images

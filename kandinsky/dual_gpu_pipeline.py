@@ -1,9 +1,12 @@
 """
 Dual GPU Pipeline for Kandinsky 5 with Block Swapping.
 
-Enables pipeline parallelism across two GPUs where each GPU has its own model copy
-with independent block swapping to CPU. This allows generating video faster by
-splitting diffusion steps between GPUs.
+Enables TRUE CFG parallelism across two GPUs where:
+- GPU 0 runs conditional forward passes (text prompt)
+- GPU 1 runs unconditional forward passes (negative prompt)
+- Both GPUs run SIMULTANEOUSLY at each diffusion step
+
+This gives ~2x speedup on DiT inference since both GPUs work at the same time.
 """
 
 from typing import Union
@@ -21,10 +24,15 @@ torch._dynamo.config.suppress_errors = True
 
 class Kandinsky5DualGPUPipeline:
     """
-    Dual GPU pipeline for Kandinsky 5 video generation.
+    Dual GPU pipeline for Kandinsky 5 video generation with TRUE CFG parallelism.
 
-    Each GPU has its own DiT model with independent block swapping.
-    Steps are split between GPUs for pipeline parallelism.
+    At each diffusion step:
+    - GPU 0 runs the conditional forward pass (with text prompt)
+    - GPU 1 runs the unconditional forward pass (with negative prompt)
+    - Both run SIMULTANEOUSLY using threading
+    - Results are combined: pred = uncond + guidance * (cond - uncond)
+
+    This gives ~2x speedup on DiT inference compared to single GPU.
     """
 
     def __init__(
@@ -129,7 +137,10 @@ class Kandinsky5DualGPUPipeline:
         progress: bool = True,
     ):
         """
-        Generate video using pipeline parallelism across two GPUs.
+        Generate video using TRUE CFG parallelism across two GPUs.
+
+        Both GPUs work SIMULTANEOUSLY at each step - GPU 0 handles conditional,
+        GPU 1 handles unconditional, results are combined after each step.
 
         Args:
             text: Text prompt for video generation
@@ -193,7 +204,7 @@ class Kandinsky5DualGPUPipeline:
             seed=seed,
             device0=self.device0,
             device1=self.device1,
-            vae_device=self.device1,  # Decode on GPU 1
+            vae_device=self.device0,  # Decode on GPU 0 (where final latent is)
             progress=progress,
         )
 
