@@ -1455,14 +1455,14 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
             wn, hn = b, a
 
         if wn > 1:
-            wt = ceil(w / wn / 8) * 8 + 16
-            ws = wt - 32
+            wt = ceil(w / wn / 8) * 8 + 64  # 64px extra for overlap
+            ws = wt - 64                     # 64px overlap for seamless blending
         else:
             wt = w
             ws = w
         if hn > 1:
-            ht = ceil(h / hn / 8) * 8 + 16
-            hs = ht - 32
+            ht = ceil(h / hn / 8) * 8 + 64  # 64px extra for overlap
+            hs = ht - 64                     # 64px overlap for seamless blending
         else:
             ht = h
             hs = h
