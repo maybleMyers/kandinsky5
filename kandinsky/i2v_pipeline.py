@@ -787,7 +787,7 @@ def _encode_video_chunked(pil_frames, num_video_frames, target_h, target_w, vae,
 
                 # Encode this chunk - VAE will apply spatial tiling based on our settings
                 # Using opt_tiling=True so VAE computes optimal tiling based on our manually set tile dimensions
-                latent_dist = vae.encode(chunk, opt_tiling=True).latent_dist
+                latent_dist = vae.encode(chunk, opt_tiling=False).latent_dist
                 # Use .mode() for deterministic or .sample() for stochastic (musubi-tuner uses mode)
                 latent_chunk = latent_dist.mode() if use_deterministic else latent_dist.sample()
                 latent_chunk = latent_chunk * vae.config.scaling_factor
