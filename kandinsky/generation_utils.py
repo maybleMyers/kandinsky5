@@ -678,6 +678,10 @@ def generate_v2v(
     """
     Generate video continuation using visual conditioning (like I2V but with multiple frames).
 
+    IMPORTANT: The model is trained with visual_cond_mask=1 ONLY for frame 0.
+    Additional conditioning frames are used as soft guidance through flow-matched
+    initialization, NOT as hard anchors with mask=1.
+
     Args:
         model: DiT model
         device: Device to use
@@ -707,7 +711,7 @@ def generate_v2v(
     # Store original noise for early-stop decode
     original_noise = img.clone()
 
-    # Store noise for conditioning frames - will be used to add appropriate noise at each step
+    # Store noise for conditioning frames (frames 1 to N-1) for flow-matched initialization
     cond_noise = img[:num_cond_frames].clone()
 
     sparse_params = get_sparse_params(conf, {"visual": img}, device)
@@ -717,6 +721,8 @@ def generate_v2v(
     # Initialize APG momentum buffer if enabled
     momentum_buffer = MomentumBuffer(apg_momentum) if use_apg else None
 
+    cond_latents_device = cond_latents.to(device=device, dtype=torch.bfloat16)
+
     for i, (timestep, timestep_diff) in enumerate(tqdm(list(zip(timesteps[:-1], torch.diff(timesteps))))):
         time = timestep.unsqueeze(0)
 
@@ -725,9 +731,18 @@ def generate_v2v(
             visual_cond_mask = torch.zeros(
                 [*img.shape[:-1], 1], dtype=img.dtype, device=img.device
             )
-            cond_latents_device = cond_latents.to(device=img.device, dtype=img.dtype)
-            img[:num_cond_frames] = cond_latents_device
-            visual_cond_mask[:num_cond_frames] = 1
+
+            # Frame 0: Hard anchor with mask=1 (as trained)
+            img[0:1] = cond_latents_device[0:1]
+            visual_cond_mask[0:1] = 1
+
+            # Frames 1 to N-1: Flow-matched soft guidance (mask=0)
+            # x_t = (1 - t) * x_clean + t * noise
+            if num_cond_frames > 1:
+                t = timestep.item()
+                flow_matched_cond = (1 - t) * cond_latents_device[1:num_cond_frames] + t * cond_noise[1:num_cond_frames]
+                img[1:num_cond_frames] = flow_matched_cond
+                # visual_cond_mask[1:num_cond_frames] stays 0 - NOT hard anchors
 
             model_input = torch.cat([img, visual_cond, visual_cond_mask], dim=-1)
         else:
@@ -805,8 +820,9 @@ def generate_v2v(
             except Exception as e:
                 print(f">>> ERROR during preview generation at step {i + 1}: {e}", flush=True)
 
-    # Ensure conditioning frames are exactly preserved in final output
-    img[:num_cond_frames] = cond_latents.to(device=img.device, dtype=img.dtype)
+    # Only preserve frame 0 exactly (the hard anchor)
+    # Frames 1 to N-1 are soft guidance and use denoised result
+    img[0:1] = cond_latents[0:1].to(device=img.device, dtype=img.dtype)
     return img
 
 
@@ -836,18 +852,18 @@ def generate_v2v_join(
     use_apg=False,
     apg_momentum=-0.75,
     apg_norm_threshold=55.0,
-    # Noise scheduling parameters for end frames
-    end_noise_schedule="progressive",  # "progressive", "fixed", "symmetric"
-    end_noise_start=1.0,  # Initial noise level for end frames (1.0 = full noise, 0.0 = clean)
-    end_noise_end=0.0,    # Final noise level for end frames
-    start_noise_schedule="fixed",  # Usually keep start frames clean
-    start_noise_level=0.0,  # Noise level for start frames (0.0 = clean)
+    # End frame blending (0.0 = use denoised result, 1.0 = use target)
+    end_blend_weight=0.0,
 ):
     """
     Generate video joining with dual conditioning (start and end frames).
     Creates a seamless transition between two videos by conditioning on:
-    - Last N frames of video1 (start)
-    - First N frames of video2 (end)
+    - Frame 0 of start video (hard anchor with mask=1, as trained)
+    - End frames as soft guidance (flow-matched initialization, mask=0)
+
+    IMPORTANT: The model is trained with visual_cond_mask=1 ONLY for frame 0.
+    End frames are NOT hard anchors - they guide generation through flow-matched
+    latent initialization. This allows natural motion instead of "frozen" frames.
 
     Args:
         model: DiT model
@@ -864,14 +880,8 @@ def generate_v2v_join(
         start_cond_latents: Start conditioning latents [num_cond_frames, H, W, C]
         end_cond_latents: End conditioning latents [num_cond_frames, H, W, C]
         conf: Model configuration
-        end_noise_schedule: Noise schedule for end frames:
-            - "progressive": Noise decreases from end_noise_start to end_noise_end over steps
-            - "fixed": Use constant noise level (end_noise_start)
-            - "symmetric": Match the timestep (same as middle region would have)
-        end_noise_start: Initial noise level for end frames (1.0 = full noise, 0.0 = clean)
-        end_noise_end: Final noise level for end frames (only for "progressive")
-        start_noise_schedule: Noise schedule for start frames (usually "fixed")
-        start_noise_level: Noise level for start frames (0.0 = clean anchoring)
+        end_blend_weight: Final blend weight for end frames (0.0 = use denoised result,
+                          1.0 = use target latent). Default 0.0 for smooth transitions.
         ...
 
     Returns:
@@ -888,7 +898,7 @@ def generate_v2v_join(
     # Store original noise for early-stop decode
     original_noise = img.clone()
 
-    # Store noise for conditioning frames to enable noise injection
+    # Store noise for flow-matched initialization of non-anchor frames
     start_noise = img[:num_start_cond_frames].clone()
     end_noise = img[-num_end_cond_frames:].clone()
 
@@ -896,53 +906,41 @@ def generate_v2v_join(
     timesteps = torch.linspace(1, 0, num_steps + 1, device=device)
     timesteps = scheduler_scale * timesteps / (1 + (scheduler_scale - 1) * timesteps)
 
-    # Pre-compute noise schedule for end frames
-    if end_noise_schedule == "progressive":
-        # Linear interpolation from end_noise_start to end_noise_end
-        end_noise_levels = torch.linspace(end_noise_start, end_noise_end, num_steps, device=device)
-    elif end_noise_schedule == "symmetric":
-        # Use the same timestep as middle region
-        end_noise_levels = timesteps[:-1].clone()
-    else:  # "fixed"
-        end_noise_levels = torch.full((num_steps,), end_noise_start, device=device)
-
-    # Log noise schedule info
-    print(f">>> End noise schedule: {end_noise_schedule}")
-    print(f">>> End noise levels: start={end_noise_levels[0].item():.4f}, mid={end_noise_levels[num_steps//2].item():.4f}, end={end_noise_levels[-1].item():.4f}")
-
     # Initialize APG momentum buffer if enabled
     momentum_buffer = MomentumBuffer(apg_momentum) if use_apg else None
 
+    # Pre-convert to device
+    start_cond_device = start_cond_latents.to(device=device, dtype=torch.bfloat16)
+    end_cond_device = end_cond_latents.to(device=device, dtype=torch.bfloat16)
+
+    print(f">>> V2V Join: Frame 0 = hard anchor (mask=1), end frames = flow-matched soft guidance (mask=0)")
+    print(f">>> End blend weight: {end_blend_weight} (0=denoised, 1=target)")
+
     for i, (timestep, timestep_diff) in enumerate(tqdm(list(zip(timesteps[:-1], torch.diff(timesteps))))):
         time = timestep.unsqueeze(0)
+        t = timestep.item()
 
         if model.visual_cond:
             visual_cond = torch.zeros_like(img)
             visual_cond_mask = torch.zeros(
                 [*img.shape[:-1], 1], dtype=img.dtype, device=img.device
             )
-            # Set BOTH start and end conditioning frames
-            start_cond_device = start_cond_latents.to(device=img.device, dtype=img.dtype)
-            end_cond_device = end_cond_latents.to(device=img.device, dtype=img.dtype)
 
-            # Apply noise scheduling to start frames
-            if start_noise_schedule == "fixed" and start_noise_level > 0:
-                noisy_start = start_cond_device + start_noise_level * start_noise
-                img[:num_start_cond_frames] = noisy_start
-            else:
-                img[:num_start_cond_frames] = start_cond_device
+            # Frame 0 ONLY: Hard anchor with mask=1 (as trained)
+            img[0:1] = start_cond_device[0:1]
+            visual_cond_mask[0:1] = 1
 
-            # Apply noise scheduling to end frames
-            end_noise_level = end_noise_levels[i]
-            if end_noise_level > 0:
-                # Add noise proportional to the schedule: x_noisy = x_clean + sigma * noise
-                noisy_end = end_cond_device + end_noise_level * end_noise
-                img[-num_end_cond_frames:] = noisy_end
-            else:
-                img[-num_end_cond_frames:] = end_cond_device
+            # Start frames 1 to N-1: Flow-matched soft guidance (mask=0)
+            if num_start_cond_frames > 1:
+                flow_matched_start = (1 - t) * start_cond_device[1:num_start_cond_frames] + t * start_noise[1:num_start_cond_frames]
+                img[1:num_start_cond_frames] = flow_matched_start
+                # visual_cond_mask stays 0 - NOT hard anchors
 
-            visual_cond_mask[:num_start_cond_frames] = 1
-            visual_cond_mask[-num_end_cond_frames:] = 1
+            # End frames: Flow-matched soft guidance toward target (mask=0)
+            # x_t = (1 - t) * x_clean + t * noise
+            flow_matched_end = (1 - t) * end_cond_device + t * end_noise
+            img[-num_end_cond_frames:] = flow_matched_end
+            # visual_cond_mask[-num_end_cond_frames:] stays 0 - NOT hard anchors
 
             model_input = torch.cat([img, visual_cond, visual_cond_mask], dim=-1)
         else:
@@ -1021,9 +1019,19 @@ def generate_v2v_join(
             except Exception as e:
                 print(f">>> ERROR during preview generation at step {i + 1}: {e}", flush=True)
 
-    # Ensure conditioning frames are exactly preserved in final output
-    img[:num_start_cond_frames] = start_cond_latents.to(device=img.device, dtype=img.dtype)
-    img[-num_end_cond_frames:] = end_cond_latents.to(device=img.device, dtype=img.dtype)
+    # Frame 0: Hard anchor - preserve exactly
+    img[0:1] = start_cond_latents[0:1].to(device=img.device, dtype=img.dtype)
+
+    # Start frames 1 to N-1: Use denoised result (soft guidance worked)
+    # (no replacement needed - they're already in img from denoising)
+
+    # End frames: Soft blend between denoised result and target
+    # end_blend_weight=0 means use denoised result (smooth transition)
+    # end_blend_weight=1 means use target (may cause jump)
+    if end_blend_weight > 0:
+        end_target = end_cond_latents.to(device=img.device, dtype=img.dtype)
+        img[-num_end_cond_frames:] = (1 - end_blend_weight) * img[-num_end_cond_frames:] + end_blend_weight * end_target
+
     return img
 
 
@@ -1056,12 +1064,8 @@ def generate_sample_v2v_join(
     use_apg=False,
     apg_momentum=-0.75,
     apg_norm_threshold=55.0,
-    # Noise scheduling parameters
-    end_noise_schedule="progressive",
-    end_noise_start=1.0,
-    end_noise_end=0.0,
-    start_noise_schedule="fixed",
-    start_noise_level=0.0,
+    # End frame blending (0.0 = use denoised result, 1.0 = use target)
+    end_blend_weight=0.0,
 ):
     """
     Generate video joining with dual conditioning (start and end frames).
@@ -1076,6 +1080,8 @@ def generate_sample_v2v_join(
         text_embedder: Text embedder
         start_cond_latents: Start conditioning latents [num_cond_frames, H, W, C] from video1
         end_cond_latents: End conditioning latents [num_cond_frames, H, W, C] from video2
+        end_blend_weight: Final blend weight for end frames (0.0 = use denoised result,
+                          1.0 = use target latent). Default 0.0 for smooth transitions.
         ...
 
     Returns:
@@ -1168,12 +1174,7 @@ def generate_sample_v2v_join(
                 use_apg=use_apg,
                 apg_momentum=apg_momentum,
                 apg_norm_threshold=apg_norm_threshold,
-                # Pass noise scheduling parameters
-                end_noise_schedule=end_noise_schedule,
-                end_noise_start=end_noise_start,
-                end_noise_end=end_noise_end,
-                start_noise_schedule=start_noise_schedule,
-                start_noise_level=start_noise_level,
+                end_blend_weight=end_blend_weight,
             )
 
     # Handle early stop results

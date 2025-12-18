@@ -157,12 +157,8 @@ def generate_video(
     sdnq_weights_dtype: str = "int8",
     sdnq_triton_mm: bool = True,
     sdnq_compile: bool = True,
-    # End frame noise scheduling
-    end_noise_schedule: str = "progressive",
-    end_noise_start: float = 1.0,
-    end_noise_end: float = 0.0,
-    start_noise_schedule: str = "fixed",
-    start_noise_level: float = 0.0,
+    # End frame blending (0.0 = use denoised result, 1.0 = use target)
+    end_blend_weight: float = 0.0,
 ) -> Generator[Tuple[List[Tuple[str, str]], Optional[str], str, str], None, None]:
     global stop_event, current_process, current_output_filename
     stop_event.clear()
@@ -279,11 +275,7 @@ def generate_video(
             if end_image:
                 command.extend(["--end_image", str(end_image)])
                 # Add noise scheduling parameters for end frame
-                command.extend(["--end_noise_schedule", str(end_noise_schedule)])
-                command.extend(["--end_noise_start", str(end_noise_start)])
-                command.extend(["--end_noise_end", str(end_noise_end)])
-                command.extend(["--start_noise_schedule", str(start_noise_schedule)])
-                command.extend(["--start_noise_level", str(start_noise_level)])
+                command.extend(["--end_blend_weight", str(end_blend_weight)])
             # Pass width and height for i2v mode to resize the input image
             command.extend(["--width", str(int(width))])
             command.extend(["--height", str(int(height))])
@@ -570,12 +562,8 @@ def generate_v2v_video(
     sdnq_weights_dtype: str = "int8",
     sdnq_triton_mm: bool = True,
     sdnq_compile: bool = True,
-    # End frame noise scheduling (for video joining mode)
-    end_noise_schedule: str = "fixed",  # Default to "fixed" for backward compatibility
-    end_noise_start: float = 0.0,       # Default to 0.0 (clean end frames) for backward compatibility
-    end_noise_end: float = 0.0,
-    start_noise_schedule: str = "fixed",
-    start_noise_level: float = 0.0,
+    # End frame blending (0.0 = use denoised result, 1.0 = use target)
+    end_blend_weight: float = 0.0,
 ) -> Generator[Tuple[List[Tuple[str, str]], Optional[str], str, str], None, None]:
     """Generate video from video input (video continuation/v2v mode)."""
     global stop_event, current_process, current_output_filename
@@ -702,20 +690,10 @@ def generate_v2v_video(
         # Add second video or ending image if provided (joining mode)
         if input_video2:
             command.extend(["--video2", str(input_video2)])
-            # Add noise scheduling parameters for video joining (end frame control)
-            command.extend(["--end_noise_schedule", str(end_noise_schedule)])
-            command.extend(["--end_noise_start", str(end_noise_start)])
-            command.extend(["--end_noise_end", str(end_noise_end)])
-            command.extend(["--start_noise_schedule", str(start_noise_schedule)])
-            command.extend(["--start_noise_level", str(start_noise_level)])
+            command.extend(["--end_blend_weight", str(end_blend_weight)])
         elif input_image2:
             command.extend(["--end_image", str(input_image2)])
-            # Add noise scheduling parameters for video + end image mode
-            command.extend(["--end_noise_schedule", str(end_noise_schedule)])
-            command.extend(["--end_noise_start", str(end_noise_start)])
-            command.extend(["--end_noise_end", str(end_noise_end)])
-            command.extend(["--start_noise_schedule", str(start_noise_schedule)])
-            command.extend(["--start_noise_level", str(start_noise_level)])
+            command.extend(["--end_blend_weight", str(end_blend_weight)])
 
         command.extend(["--num_cond_frames", str(int(num_cond_frames))])
         if normalize_frames and int(normalize_frames) > 0:
@@ -1017,11 +995,7 @@ def submit_to_queue(
     sdnq_weights_dtype: str = "int8",
     sdnq_triton_mm: bool = True,
     sdnq_compile: bool = True,
-    end_noise_schedule: str = "progressive",
-    end_noise_start: float = 1.0,
-    end_noise_end: float = 0.0,
-    start_noise_schedule: str = "fixed",
-    start_noise_level: float = 0.0,
+    end_blend_weight: float = 0.0,
 ) -> str:
     """
     Submit generation job(s) to the queue.
@@ -1127,11 +1101,7 @@ def submit_to_queue(
                 command.extend(["--image", str(input_image)])
             if end_image:
                 command.extend(["--end_image", str(end_image)])
-                command.extend(["--end_noise_schedule", str(end_noise_schedule)])
-                command.extend(["--end_noise_start", str(end_noise_start)])
-                command.extend(["--end_noise_end", str(end_noise_end)])
-                command.extend(["--start_noise_schedule", str(start_noise_schedule)])
-                command.extend(["--start_noise_level", str(start_noise_level)])
+                command.extend(["--end_blend_weight", str(end_blend_weight)])
 
         command.extend(["--width", str(int(width))])
         command.extend(["--height", str(int(height))])
@@ -1271,11 +1241,7 @@ def generate_via_queue(
     sdnq_weights_dtype: str = "int8",
     sdnq_triton_mm: bool = True,
     sdnq_compile: bool = True,
-    end_noise_schedule: str = "progressive",
-    end_noise_start: float = 1.0,
-    end_noise_end: float = 0.0,
-    start_noise_schedule: str = "fixed",
-    start_noise_level: float = 0.0,
+    end_blend_weight: float = 0.0,
 ):
     """
     Submit job(s) to queue and return initial state for polling.
@@ -1305,8 +1271,7 @@ def generate_via_queue(
         use_prompt_expansion, clip_prompt, save_latents,
         enable_ultravico, ultravico_alpha, ultravico_suppress_harmonics, ultravico_beta,
         use_sdnq, sdnq_weights_dtype, sdnq_triton_mm, sdnq_compile,
-        end_noise_schedule, end_noise_start, end_noise_end,
-        start_noise_schedule, start_noise_level,
+        end_blend_weight,
     )
 
     # Parse job/batch IDs from result message
@@ -2355,40 +2320,15 @@ def create_interface():
                         with gr.Accordion("End Frame Settings", open=False):
                             end_image = gr.Image(label="End Image (optional - for start-to-end video)", type="filepath")
                             gr.Markdown("""
-                            **Noise Scheduling:** Control how the end/target image is revealed during generation.
-                            - **Progressive** (default): End frame starts hidden (noisy) and gradually emerges, reducing glitches.
-                            - **Fixed**: Constant noise level throughout (use 0.0 for original behavior).
-                            - **Symmetric**: End frame follows same noise schedule as middle frames.
+                            **End Blend Weight:** Control how the final end frames are blended.
+                            - **0.0** (default): Use denoised result for smooth transitions.
+                            - **1.0**: Use target end frame exactly (may cause visible jumps).
                             """)
-                            end_noise_schedule = gr.Dropdown(
-                                label="End Noise Schedule",
-                                choices=["progressive", "fixed", "symmetric"],
-                                value="progressive",
-                                info="How noise decreases for end frames during denoising"
+                            end_blend_weight = gr.Slider(
+                                minimum=0.0, maximum=1.0, value=0.0, step=0.05,
+                                label="End Blend Weight",
+                                info="0.0 = smooth denoised result, 1.0 = exact target (may jump)"
                             )
-                            with gr.Row():
-                                end_noise_start = gr.Slider(
-                                    minimum=0.0, maximum=1.0, value=1.0, step=0.05,
-                                    label="End Noise Start",
-                                    info="Initial noise level (1.0 = fully hidden, 0.0 = clean)"
-                                )
-                                end_noise_end = gr.Slider(
-                                    minimum=0.0, maximum=1.0, value=0.0, step=0.05,
-                                    label="End Noise End",
-                                    info="Final noise level (0.0 = fully revealed)"
-                                )
-                            with gr.Row():
-                                start_noise_schedule = gr.Dropdown(
-                                    label="Start Noise Schedule",
-                                    choices=["fixed", "progressive"],
-                                    value="fixed",
-                                    info="Usually keep 'fixed' with level 0.0 for clean anchoring"
-                                )
-                                start_noise_level = gr.Slider(
-                                    minimum=0.0, maximum=1.0, value=0.0, step=0.05,
-                                    label="Start Noise Level",
-                                    info="Noise level for start frames (0.0 = clean anchor)"
-                                )
 
                         gr.Markdown("### Generation Parameters")
                         mode = gr.Dropdown(
@@ -2681,8 +2621,7 @@ def create_interface():
                         save_latents_checkbox,
                         enable_ultravico, ultravico_alpha, ultravico_suppress_harmonics, ultravico_beta,
                         use_sdnq, sdnq_weights_dtype, sdnq_triton_mm, sdnq_compile,
-                        # End frame noise scheduling
-                        end_noise_schedule, end_noise_start, end_noise_end, start_noise_schedule, start_noise_level
+                        end_blend_weight
                     ],
                     outputs=[output, preview_output, batch_progress, progress_text]
                 )
@@ -2892,44 +2831,19 @@ def create_interface():
                             info="Number of frames to blend at join points (0=off). Smoothly transitions color/brightness to reduce flash."
                         )
 
-                        with gr.Accordion("End Frame Noise Scheduling (for Video Joining)", open=False):
+                        with gr.Accordion("End Frame Blending (for Video Joining)", open=False):
                             gr.Markdown("""
-                            **Noise Scheduling for Video Joining:** Control how the end/target video frames are revealed during generation.
-                            - **Fixed** (default): Clean end frames throughout - preserves original behavior, smooth transitions.
-                            - **Progressive**: End frames start hidden (noisy) and gradually emerge - can help with difficult transitions.
-                            - **Symmetric**: End frames follow same noise schedule as middle frames.
+                            **End Blend Weight:** Control how the final end frames are blended in video join mode.
+                            - **0.0** (default): Use denoised result for smooth transitions.
+                            - **1.0**: Use target end frame exactly (may cause visible jumps).
 
-                            **Tip:** Use "fixed" with 0.0 noise (default) for most cases. Try "progressive" if you see glitches at join points.
+                            **Tip:** Keep at 0.0 for smooth transitions. Increase only if you need exact frame matching.
                             """)
-                            v2v_end_noise_schedule = gr.Dropdown(
-                                label="End Noise Schedule",
-                                choices=["fixed", "progressive", "symmetric"],
-                                value="fixed",
-                                info="How end frames are treated during denoising"
+                            v2v_end_blend_weight = gr.Slider(
+                                minimum=0.0, maximum=1.0, value=0.0, step=0.05,
+                                label="End Blend Weight",
+                                info="0.0 = smooth denoised result, 1.0 = exact target (may jump)"
                             )
-                            with gr.Row():
-                                v2v_end_noise_start = gr.Slider(
-                                    minimum=0.0, maximum=1.0, value=0.0, step=0.05,
-                                    label="End Noise Start",
-                                    info="Initial noise level (0.0 = clean, 1.0 = fully hidden)"
-                                )
-                                v2v_end_noise_end = gr.Slider(
-                                    minimum=0.0, maximum=1.0, value=0.0, step=0.05,
-                                    label="End Noise End",
-                                    info="Final noise level (0.0 = fully revealed)"
-                                )
-                            with gr.Row():
-                                v2v_start_noise_schedule = gr.Dropdown(
-                                    label="Start Noise Schedule",
-                                    choices=["fixed", "progressive"],
-                                    value="fixed",
-                                    info="Usually keep 'fixed' with level 0.0 for clean anchoring"
-                                )
-                                v2v_start_noise_level = gr.Slider(
-                                    minimum=0.0, maximum=1.0, value=0.0, step=0.05,
-                                    label="Start Noise Level",
-                                    info="Noise level for start frames (0.0 = clean anchor)"
-                                )
 
                         v2v_mode = gr.Dropdown(
                             label="Mode",
@@ -3274,8 +3188,7 @@ def create_interface():
                         v2v_enable_denoise, v2v_denoise_strength,
                         v2v_enable_ultravico, v2v_ultravico_alpha, v2v_ultravico_suppress_harmonics, v2v_ultravico_beta,
                         v2v_use_sdnq, v2v_sdnq_weights_dtype, v2v_sdnq_triton_mm, v2v_sdnq_compile,
-                        v2v_end_noise_schedule, v2v_end_noise_start, v2v_end_noise_end,
-                        v2v_start_noise_schedule, v2v_start_noise_level
+                        v2v_end_blend_weight
                     ],
                     outputs=[v2v_output, v2v_preview_output, v2v_batch_progress, v2v_progress_text]
                 )
