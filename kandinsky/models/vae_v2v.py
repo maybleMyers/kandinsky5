@@ -1033,10 +1033,17 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
         for i_idx, row in enumerate(rows):
             result_row = []
             for j_idx, tile in enumerate(row):
+                # Calculate ACTUAL overlap based on tile positions (fixes seam bug with edge tiles)
                 if i_idx > 0:
-                    tile = self.blend_v(rows[i_idx - 1][j_idx], tile, blend_height)
+                    prev_end_h = i_positions[i_idx - 1] + self.tile_sample_min_height
+                    curr_start_h = i_positions[i_idx]
+                    actual_overlap_h = (prev_end_h - curr_start_h) // self.spatial_compression_ratio
+                    tile = self.blend_v(rows[i_idx - 1][j_idx], tile, actual_overlap_h)
                 if j_idx > 0:
-                    tile = self.blend_h(row[j_idx - 1], tile, blend_width)
+                    prev_end_w = j_positions[j_idx - 1] + self.tile_sample_min_width
+                    curr_start_w = j_positions[j_idx]
+                    actual_overlap_w = (prev_end_w - curr_start_w) // self.spatial_compression_ratio
+                    tile = self.blend_h(row[j_idx - 1], tile, actual_overlap_w)
 
                 # Calculate actual stride to next tile (handles edge tiles with non-uniform spacing)
                 if i_idx == len(rows) - 1:
@@ -1142,10 +1149,17 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
         for i_idx, row in enumerate(rows):
             result_row = []
             for j_idx, tile in enumerate(row):
+                # Calculate ACTUAL overlap based on tile positions (fixes seam bug with edge tiles)
                 if i_idx > 0:
-                    tile = self.blend_v(rows[i_idx - 1][j_idx], tile, blend_height)
+                    # Overlap in latent space, convert to pixel space for blending
+                    prev_end_latent = i_range[i_idx - 1] + tile_latent_min_height
+                    actual_overlap_h = (prev_end_latent - i_range[i_idx]) * self.spatial_compression_ratio
+                    tile = self.blend_v(rows[i_idx - 1][j_idx], tile, actual_overlap_h)
                 if j_idx > 0:
-                    tile = self.blend_h(row[j_idx - 1], tile, blend_width)
+                    # Overlap in latent space, convert to pixel space for blending
+                    prev_end_latent = j_range[j_idx - 1] + tile_latent_min_width
+                    actual_overlap_w = (prev_end_latent - j_range[j_idx]) * self.spatial_compression_ratio
+                    tile = self.blend_h(row[j_idx - 1], tile, actual_overlap_w)
 
                 # Calculate actual stride to next tile (handles edge tiles with non-uniform spacing)
                 if i_idx == len(rows) - 1:

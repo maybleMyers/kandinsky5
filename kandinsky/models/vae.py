@@ -867,8 +867,8 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
         self, z: torch.Tensor, return_dict: bool = True
     ) -> Union[DecoderOutput, torch.Tensor]:
         """
-        Conservative decoding: dynamically calculates maximum tile sizes based on
-        available GPU memory. Falls back from aggressive decode on OOM.
+        Conservative decoding: uses small fixed tile sizes guaranteed to fit in memory.
+        Falls back from aggressive decode on OOM.
         """
         _, _, num_frames, height, width = z.shape
         h_pix = height * self.spatial_compression_ratio  # latent to pixel
@@ -882,75 +882,25 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
         old_f = self.tile_sample_min_num_frames
         old_sf = self.tile_sample_stride_num_frames
 
-        # Clear cache first to maximize available memory
+        # Clear cache to maximize available memory
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-            free_mem = torch.cuda.mem_get_info()[0]
-        else:
-            free_mem = 8 * 1024 * 1024 * 1024  # Assume 8GB if no CUDA
 
-        # Apply 50% safety margin since we just OOMed
-        safe_mem = free_mem * 0.5
-        # Memory per pixel: ~256 * 17 * 8 bytes (channels * temporal_expansion * dtype)
-        max_area = safe_mem / (256 * 17 * 8)
+        # CONSERVATIVE MODE: Force small tiles that are guaranteed to fit
+        # Using 192x192 tiles with 64px overlap (128px stride)
+        tile_h = min(192, h_pix)
+        tile_w = min(192, w_pix)
+        stride_h = tile_h - 64 if tile_h > 64 else tile_h
+        stride_w = tile_w - 64 if tile_w > 64 else tile_w
 
-        # Calculate optimal tile sizes based on available memory
-        if h_pix * w_pix <= max_area:
-            # Full resolution fits - no spatial tiling needed
-            tile_h, tile_w = h_pix, w_pix
-            stride_h, stride_w = h_pix, w_pix
-        else:
-            # Use source-style factorization for optimal tiles
-            k = max(h_pix / w_pix, w_pix / h_pix)
-            N = ceil(h_pix * w_pix / max_area)
-
-            # Factorize to get number of tiles in each dimension
-            def factorize(n, aspect):
-                a = sqrt(n / aspect)
-                b = sqrt(n * aspect)
-                aa = [floor(a), ceil(a)]
-                bb = [floor(b), ceil(b)]
-                for a_val in aa:
-                    for b_val in bb:
-                        if a_val * b_val >= n:
-                            return a_val, b_val
-                return ceil(a), ceil(b)
-
-            a, b = factorize(N, k)
-            if h_pix >= w_pix:
-                wn, hn = a, b
-            else:
-                wn, hn = b, a
-
-            # Calculate tile sizes with proper overlap (64px)
-            if wn > 1:
-                tile_w = ceil(w_pix / wn / 8) * 8 + 64
-                stride_w = tile_w - 64
-            else:
-                tile_w = w_pix
-                stride_w = w_pix
-
-            if hn > 1:
-                tile_h = ceil(h_pix / hn / 8) * 8 + 64
-                stride_h = tile_h - 64
-            else:
-                tile_h = h_pix
-                stride_h = h_pix
-
-        # Apply minimum floor of 128x128 and ensure tiles don't exceed dimensions
-        tile_h = max(128, min(tile_h, h_pix))
-        tile_w = max(128, min(tile_w, w_pix))
-        stride_h = max(64, min(stride_h, tile_h - 64)) if tile_h < h_pix else h_pix
-        stride_w = max(64, min(stride_w, tile_w - 64)) if tile_w < w_pix else w_pix
-
-        # Apply calculated tile settings
+        # Apply tile settings
         self.tile_sample_min_height = int(tile_h)
         self.tile_sample_min_width = int(tile_w)
         self.tile_sample_stride_height = int(stride_h)
         self.tile_sample_stride_width = int(stride_w)
-        # Conservative temporal settings
-        self.tile_sample_min_num_frames = 12
-        self.tile_sample_stride_num_frames = 8
+        # Small temporal chunks for memory safety
+        self.tile_sample_min_num_frames = 8
+        self.tile_sample_stride_num_frames = 4
 
         tile_latent_min_height = self.tile_sample_min_height // self.spatial_compression_ratio
         tile_latent_min_width = self.tile_sample_min_width // self.spatial_compression_ratio
@@ -958,7 +908,7 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
 
         print(f"\nVAE Conservative Mode: Using {self.tile_sample_min_height}x{self.tile_sample_min_width} tiles "
               f"(stride: {self.tile_sample_stride_height}x{self.tile_sample_stride_width}), "
-              f"{self.tile_sample_min_num_frames} temporal frames (free mem: {free_mem / 1024**3:.1f}GB)")
+              f"{self.tile_sample_min_num_frames} temporal frames")
 
         try:
             if self.use_framewise_decoding and num_frames > (
@@ -1125,10 +1075,17 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
         for i_idx, row in enumerate(rows):
             result_row = []
             for j_idx, tile in enumerate(row):
+                # Calculate ACTUAL overlap based on tile positions (fixes seam bug with edge tiles)
                 if i_idx > 0:
-                    tile = self.blend_v(rows[i_idx - 1][j_idx], tile, blend_height)
+                    prev_end_h = i_positions[i_idx - 1] + self.tile_sample_min_height
+                    curr_start_h = i_positions[i_idx]
+                    actual_overlap_h = (prev_end_h - curr_start_h) // self.spatial_compression_ratio
+                    tile = self.blend_v(rows[i_idx - 1][j_idx], tile, actual_overlap_h)
                 if j_idx > 0:
-                    tile = self.blend_h(row[j_idx - 1], tile, blend_width)
+                    prev_end_w = j_positions[j_idx - 1] + self.tile_sample_min_width
+                    curr_start_w = j_positions[j_idx]
+                    actual_overlap_w = (prev_end_w - curr_start_w) // self.spatial_compression_ratio
+                    tile = self.blend_h(row[j_idx - 1], tile, actual_overlap_w)
 
                 # Calculate actual stride to next tile (handles edge tiles with non-uniform spacing)
                 if i_idx == len(rows) - 1:
@@ -1235,10 +1192,17 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
         for i_idx, row in enumerate(rows):
             result_row = []
             for j_idx, tile in enumerate(row):
+                # Calculate ACTUAL overlap based on tile positions (fixes seam bug with edge tiles)
                 if i_idx > 0:
-                    tile = self.blend_v(rows[i_idx - 1][j_idx], tile, blend_height)
+                    # Overlap in latent space, convert to pixel space for blending
+                    prev_end_latent = i_range[i_idx - 1] + tile_latent_min_height
+                    actual_overlap_h = (prev_end_latent - i_range[i_idx]) * self.spatial_compression_ratio
+                    tile = self.blend_v(rows[i_idx - 1][j_idx], tile, actual_overlap_h)
                 if j_idx > 0:
-                    tile = self.blend_h(row[j_idx - 1], tile, blend_width)
+                    # Overlap in latent space, convert to pixel space for blending
+                    prev_end_latent = j_range[j_idx - 1] + tile_latent_min_width
+                    actual_overlap_w = (prev_end_latent - j_range[j_idx]) * self.spatial_compression_ratio
+                    tile = self.blend_h(row[j_idx - 1], tile, actual_overlap_w)
 
                 # Calculate actual stride to next tile (handles edge tiles with non-uniform spacing)
                 if i_idx == len(rows) - 1:
