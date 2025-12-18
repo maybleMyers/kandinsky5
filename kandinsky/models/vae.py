@@ -990,13 +990,33 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
         blend_width = tile_latent_min_width - tile_latent_stride_width
 
         rows = []
-        for i in range(
+        # Build list of tile positions ensuring full coverage
+        i_positions = list(range(
             0, height - self.tile_sample_min_height + 1, self.tile_sample_stride_height
-        ):
+        ))
+        j_positions = list(range(
+            0, width - self.tile_sample_min_width + 1, self.tile_sample_stride_width
+        ))
+
+        # Handle edge case where dimensions exactly equal tile size
+        if not i_positions:
+            i_positions = [0]
+        if not j_positions:
+            j_positions = [0]
+
+        # CRITICAL: Ensure last tile covers the full dimension
+        # Without this, edge pixels are lost when image size isn't perfectly aligned with stride
+        last_valid_i = height - self.tile_sample_min_height
+        if i_positions[-1] < last_valid_i:
+            i_positions.append(last_valid_i)
+
+        last_valid_j = width - self.tile_sample_min_width
+        if j_positions[-1] < last_valid_j:
+            j_positions.append(last_valid_j)
+
+        for i in i_positions:
             row = []
-            for j in range(
-                0, width - self.tile_sample_min_width + 1, self.tile_sample_stride_width
-            ):
+            for j in j_positions:
                 tile = x[
                     :,
                     :,
@@ -1073,6 +1093,22 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
         rows = []
         i_range = list(range(0, height - tile_latent_min_height + 1, tile_latent_stride_height))
         j_range = list(range(0, width - tile_latent_min_width + 1, tile_latent_stride_width))
+
+        # Handle edge case where dimensions exactly equal tile size
+        if not i_range:
+            i_range = [0]
+        if not j_range:
+            j_range = [0]
+
+        # CRITICAL: Ensure last tile covers the full dimension
+        # Without this, edge pixels are lost when latent size isn't perfectly aligned with stride
+        last_valid_i = height - tile_latent_min_height
+        if i_range[-1] < last_valid_i:
+            i_range.append(last_valid_i)
+
+        last_valid_j = width - tile_latent_min_width
+        if j_range[-1] < last_valid_j:
+            j_range.append(last_valid_j)
 
         for i in i_range:
             row = []
