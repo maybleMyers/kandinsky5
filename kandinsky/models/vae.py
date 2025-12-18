@@ -1174,6 +1174,19 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
         i_range = list(range(0, height - self.tile_sample_min_height + 1, self.tile_sample_stride_height))
         j_range = list(range(0, width - self.tile_sample_min_width + 1, self.tile_sample_stride_width))
 
+        # Ensure we cover all pixels - add final tile positions if needed
+        last_i = height - self.tile_sample_min_height
+        if i_range and i_range[-1] < last_i:
+            i_range.append(last_i)
+        elif not i_range:
+            i_range = [0]
+
+        last_j = width - self.tile_sample_min_width
+        if j_range and j_range[-1] < last_j:
+            j_range.append(last_j)
+        elif not j_range:
+            j_range = [0]
+
         for i in i_range:
             row = []
             for j in j_range:
@@ -1259,6 +1272,19 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
         i_range = list(range(0, height - tile_latent_min_height + 1, tile_latent_stride_height))
         j_range = list(range(0, width - tile_latent_min_width + 1, tile_latent_stride_width))
 
+        # Ensure we cover all pixels - add final tile positions if needed
+        last_i = height - tile_latent_min_height
+        if i_range and i_range[-1] < last_i:
+            i_range.append(last_i)
+        elif not i_range:
+            i_range = [0]
+
+        last_j = width - tile_latent_min_width
+        if j_range and j_range[-1] < last_j:
+            j_range.append(last_j)
+        elif not j_range:
+            j_range = [0]
+
         for i in i_range:
             row = []
             for j in j_range:
@@ -1328,6 +1354,14 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
             self.tile_sample_stride_num_frames,
         ))
 
+        # Ensure we cover all frames - add final chunk if needed
+        # The last chunk must start at a position where it can capture the remaining frames
+        last_required_start = num_frames - self.tile_sample_min_num_frames - 1
+        if temporal_chunks and temporal_chunks[-1] < last_required_start:
+            temporal_chunks.append(last_required_start)
+        elif not temporal_chunks:
+            temporal_chunks = [0]
+
         for i in tqdm(temporal_chunks, desc="VAE temporal encoding", unit="chunk"):
             tile = x[:, :, i : i + self.tile_sample_min_num_frames + 1, :, :]
             # Use >= to ensure tiling triggers when dimensions equal tile size
@@ -1395,6 +1429,14 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
             num_frames - tile_latent_min_num_frames + 1,
             tile_latent_stride_num_frames,
         ))
+
+        # Ensure we cover all frames - add final chunk if needed
+        # The last chunk must start at a position where it can capture the remaining frames
+        last_required_start = num_frames - tile_latent_min_num_frames - 1
+        if temporal_chunks and temporal_chunks[-1] < last_required_start:
+            temporal_chunks.append(last_required_start)
+        elif not temporal_chunks:
+            temporal_chunks = [0]
 
         for i in tqdm(temporal_chunks, desc="VAE temporal decoding", unit="chunk"):
             tile = z[:, :, i : i + tile_latent_min_num_frames + 1, :, :]
