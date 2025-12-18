@@ -1050,7 +1050,7 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
             self.tile_sample_min_height // self.spatial_compression_ratio
         )
         tile_latent_min_width = (
-            self.tile_sample_stride_width // self.spatial_compression_ratio
+            self.tile_sample_min_width // self.spatial_compression_ratio
         )
         tile_latent_min_num_frames = (
             self.tile_sample_min_num_frames // self.temporal_compression_ratio
@@ -1174,17 +1174,10 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
         i_range = list(range(0, height - self.tile_sample_min_height + 1, self.tile_sample_stride_height))
         j_range = list(range(0, width - self.tile_sample_min_width + 1, self.tile_sample_stride_width))
 
-        # Ensure we cover all pixels - add final tile positions if needed
-        last_i = height - self.tile_sample_min_height
-        if i_range and i_range[-1] < last_i:
-            i_range.append(last_i)
-        elif not i_range:
+        # Handle edge case where dimensions exactly equal tile size
+        if not i_range:
             i_range = [0]
-
-        last_j = width - self.tile_sample_min_width
-        if j_range and j_range[-1] < last_j:
-            j_range.append(last_j)
-        elif not j_range:
+        if not j_range:
             j_range = [0]
 
         for i in i_range:
@@ -1272,17 +1265,10 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
         i_range = list(range(0, height - tile_latent_min_height + 1, tile_latent_stride_height))
         j_range = list(range(0, width - tile_latent_min_width + 1, tile_latent_stride_width))
 
-        # Ensure we cover all pixels - add final tile positions if needed
-        last_i = height - tile_latent_min_height
-        if i_range and i_range[-1] < last_i:
-            i_range.append(last_i)
-        elif not i_range:
+        # Handle edge case where dimensions exactly equal tile size
+        if not i_range:
             i_range = [0]
-
-        last_j = width - tile_latent_min_width
-        if j_range and j_range[-1] < last_j:
-            j_range.append(last_j)
-        elif not j_range:
+        if not j_range:
             j_range = [0]
 
         for i in i_range:
