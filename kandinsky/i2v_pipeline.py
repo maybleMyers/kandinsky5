@@ -68,6 +68,9 @@ def v2v_safe_tiling(vae):
         vae.tile_sample_stride_height = 192
         vae.tile_sample_stride_width = 192
 
+        # Set flag to skip tile setup in encode() so our settings aren't overwritten
+        vae._skip_tile_setup = True
+
         yield vae
     finally:
         # Restore original methods
@@ -79,6 +82,9 @@ def v2v_safe_tiling(vae):
         vae.tile_sample_min_width = original_tile_min_width
         vae.tile_sample_stride_height = original_tile_stride_height
         vae.tile_sample_stride_width = original_tile_stride_width
+
+        # Reset the skip flag
+        vae._skip_tile_setup = False
 
 
 # =============================================================================
@@ -753,10 +759,10 @@ def _encode_video_full(pil_frames, num_video_frames, target_h, target_w, vae, de
         del frame_tensors
 
         # Use VAE's built-in tiled encoding (handles temporal chunking with proper blending)
-        # In v2v mode, use opt_tiling=False to preserve the conservative tile sizes set by
-        # v2v_safe_tiling context (otherwise get_enc_optimal_tiling would override them)
+        # In v2v mode, the v2v_safe_tiling context sets _skip_tile_setup flag to preserve
+        # conservative tile sizes (so opt_tiling value doesn't matter in that case)
         print(f">>> Using VAE's built-in temporal tiled encoding with blending...", flush=True)
-        latent_dist = vae.encode(video_tensor, opt_tiling=not v2v_mode).latent_dist
+        latent_dist = vae.encode(video_tensor, opt_tiling=True).latent_dist
         # Use .mode() for deterministic or .sample() for stochastic (musubi-tuner uses mode)
         latents = latent_dist.mode() if use_deterministic else latent_dist.sample()
         latents = latents.squeeze(0).permute(1, 2, 3, 0)

@@ -720,6 +720,9 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
         self._manual_tile_sample_min_num_frames = None
         self._manual_tile_sample_stride_num_frames = None
 
+        # Flag to skip tile setup in encode() - used by v2v_safe_tiling context
+        self._skip_tile_setup = False
+
     def _encode(self, x: torch.Tensor) -> torch.Tensor:
         _, _, num_frames, height, width = x.shape
 
@@ -755,14 +758,17 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
                 [`~models.autoencoder_kl.AutoencoderKLOutput`] is returned,
                 otherwise a plain `tuple` is returned.
         """
-        if opt_tiling:
-            tile_size, tile_stride = self.get_enc_optimal_tiling(x.shape)
-        else:
-            b, _, f, h, w = x.shape
-            tile_size, tile_stride = (b, f, h, w), (f, h, w)
-        if tile_size != self.tile_size:
-            self.tile_size = tile_size
-            self.apply_tiling(tile_size, tile_stride)
+        # Skip tile setup if flag is set (used by v2v_safe_tiling context to preserve
+        # conservative tile sizes that were set externally)
+        if not self._skip_tile_setup:
+            if opt_tiling:
+                tile_size, tile_stride = self.get_enc_optimal_tiling(x.shape)
+            else:
+                b, _, f, h, w = x.shape
+                tile_size, tile_stride = (b, f, h, w), (f, h, w)
+            if tile_size != self.tile_size:
+                self.tile_size = tile_size
+                self.apply_tiling(tile_size, tile_stride)
 
         h = self._encode(x)
 
