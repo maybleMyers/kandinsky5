@@ -867,39 +867,66 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
         self, z: torch.Tensor, return_dict: bool = True
     ) -> Union[DecoderOutput, torch.Tensor]:
         """
-        Conservative decoding: resolution-based safe tiling.
-        Uses smaller tiles to guarantee memory safety at the cost of speed.
+        Conservative decoding: uses very small tiles to guarantee memory safety.
+        This is the fallback when aggressive decoding OOMs.
         """
         _, _, num_frames, height, width = z.shape
-        tile_latent_min_height = (
-            self.tile_sample_min_height // self.spatial_compression_ratio
-        )
-        tile_latent_min_width = (
-            self.tile_sample_stride_width // self.spatial_compression_ratio
-        )
-        tile_latent_min_num_frames = (
-            self.tile_sample_min_num_frames // self.temporal_compression_ratio
-        )
 
-        print(f"\nVAE Conservative Mode: Using {self.tile_sample_min_height}x{self.tile_sample_min_width} tiles")
+        # Force very small tiles for guaranteed memory safety
+        # 96x96 pixel tiles = 12x12 latent tiles
+        # This is smaller than the default to handle OOM situations
+        old_h = self.tile_sample_min_height
+        old_w = self.tile_sample_min_width
+        old_sh = self.tile_sample_stride_height
+        old_sw = self.tile_sample_stride_width
+        old_f = self.tile_sample_min_num_frames
+        old_sf = self.tile_sample_stride_num_frames
 
-        if self.use_framewise_decoding and num_frames > (
-            tile_latent_min_num_frames + 1
-        ):
-            return self._temporal_tiled_decode(z, return_dict=return_dict)
+        # Use very conservative settings
+        self.tile_sample_min_height = 96
+        self.tile_sample_min_width = 96
+        self.tile_sample_stride_height = 64
+        self.tile_sample_stride_width = 64
+        # Also reduce temporal chunk size for extra safety
+        self.tile_sample_min_num_frames = 8  # Smaller temporal chunks
+        self.tile_sample_stride_num_frames = 4
 
-        if self.use_tiling and (
-            width > tile_latent_min_width or height > tile_latent_min_height
-        ):
-            return self.tiled_decode(z, return_dict=return_dict)
+        tile_latent_min_height = self.tile_sample_min_height // self.spatial_compression_ratio
+        tile_latent_min_width = self.tile_sample_min_width // self.spatial_compression_ratio
+        tile_latent_min_num_frames = self.tile_sample_min_num_frames // self.temporal_compression_ratio
 
-        z = self.post_quant_conv(z)
-        dec = self.decoder(z)
+        print(f"\nVAE Conservative Mode: Using {self.tile_sample_min_height}x{self.tile_sample_min_width} tiles, {self.tile_sample_min_num_frames} temporal frames")
 
-        if not return_dict:
-            return (dec,)
+        # Clear cache before conservative decode to maximize available memory
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
-        return DecoderOutput(sample=dec)
+        try:
+            if self.use_framewise_decoding and num_frames > (
+                tile_latent_min_num_frames + 1
+            ):
+                return self._temporal_tiled_decode(z, return_dict=return_dict)
+
+            if self.use_tiling and (
+                width > tile_latent_min_width or height > tile_latent_min_height
+            ):
+                return self.tiled_decode(z, return_dict=return_dict)
+
+            z = self.post_quant_conv(z)
+            dec = self.decoder(z)
+
+            if not return_dict:
+                return (dec,)
+
+            return DecoderOutput(sample=dec)
+        finally:
+            # Restore original settings
+            self.tile_sample_min_height = old_h
+            self.tile_sample_min_width = old_w
+            self.tile_sample_stride_height = old_sh
+            self.tile_sample_stride_width = old_sw
+            self.tile_sample_min_num_frames = old_f
+            self.tile_sample_stride_num_frames = old_sf
 
     @apply_forward_hook
     def decode(
