@@ -867,14 +867,14 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
         self, z: torch.Tensor, return_dict: bool = True
     ) -> Union[DecoderOutput, torch.Tensor]:
         """
-        Conservative decoding: uses very small tiles to guarantee memory safety.
-        This is the fallback when aggressive decoding OOMs.
+        Conservative decoding: dynamically calculates maximum tile sizes based on
+        available GPU memory. Falls back from aggressive decode on OOM.
         """
         _, _, num_frames, height, width = z.shape
+        h_pix = height * self.spatial_compression_ratio  # latent to pixel
+        w_pix = width * self.spatial_compression_ratio
 
-        # Force very small tiles for guaranteed memory safety
-        # 96x96 pixel tiles = 12x12 latent tiles
-        # This is smaller than the default to handle OOM situations
+        # Save original settings
         old_h = self.tile_sample_min_height
         old_w = self.tile_sample_min_width
         old_sh = self.tile_sample_stride_height
@@ -882,24 +882,83 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
         old_f = self.tile_sample_min_num_frames
         old_sf = self.tile_sample_stride_num_frames
 
-        # Use very conservative settings
-        self.tile_sample_min_height = 96
-        self.tile_sample_min_width = 96
-        self.tile_sample_stride_height = 64
-        self.tile_sample_stride_width = 64
-        # Also reduce temporal chunk size for extra safety
-        self.tile_sample_min_num_frames = 8  # Smaller temporal chunks
-        self.tile_sample_stride_num_frames = 4
+        # Clear cache first to maximize available memory
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            free_mem = torch.cuda.mem_get_info()[0]
+        else:
+            free_mem = 8 * 1024 * 1024 * 1024  # Assume 8GB if no CUDA
+
+        # Apply 50% safety margin since we just OOMed
+        safe_mem = free_mem * 0.5
+        # Memory per pixel: ~256 * 17 * 8 bytes (channels * temporal_expansion * dtype)
+        max_area = safe_mem / (256 * 17 * 8)
+
+        # Calculate optimal tile sizes based on available memory
+        if h_pix * w_pix <= max_area:
+            # Full resolution fits - no spatial tiling needed
+            tile_h, tile_w = h_pix, w_pix
+            stride_h, stride_w = h_pix, w_pix
+        else:
+            # Use source-style factorization for optimal tiles
+            k = max(h_pix / w_pix, w_pix / h_pix)
+            N = ceil(h_pix * w_pix / max_area)
+
+            # Factorize to get number of tiles in each dimension
+            def factorize(n, aspect):
+                a = sqrt(n / aspect)
+                b = sqrt(n * aspect)
+                aa = [floor(a), ceil(a)]
+                bb = [floor(b), ceil(b)]
+                for a_val in aa:
+                    for b_val in bb:
+                        if a_val * b_val >= n:
+                            return a_val, b_val
+                return ceil(a), ceil(b)
+
+            a, b = factorize(N, k)
+            if h_pix >= w_pix:
+                wn, hn = a, b
+            else:
+                wn, hn = b, a
+
+            # Calculate tile sizes with proper overlap (64px)
+            if wn > 1:
+                tile_w = ceil(w_pix / wn / 8) * 8 + 64
+                stride_w = tile_w - 64
+            else:
+                tile_w = w_pix
+                stride_w = w_pix
+
+            if hn > 1:
+                tile_h = ceil(h_pix / hn / 8) * 8 + 64
+                stride_h = tile_h - 64
+            else:
+                tile_h = h_pix
+                stride_h = h_pix
+
+        # Apply minimum floor of 128x128 and ensure tiles don't exceed dimensions
+        tile_h = max(128, min(tile_h, h_pix))
+        tile_w = max(128, min(tile_w, w_pix))
+        stride_h = max(64, min(stride_h, tile_h - 64)) if tile_h < h_pix else h_pix
+        stride_w = max(64, min(stride_w, tile_w - 64)) if tile_w < w_pix else w_pix
+
+        # Apply calculated tile settings
+        self.tile_sample_min_height = int(tile_h)
+        self.tile_sample_min_width = int(tile_w)
+        self.tile_sample_stride_height = int(stride_h)
+        self.tile_sample_stride_width = int(stride_w)
+        # Conservative temporal settings
+        self.tile_sample_min_num_frames = 12
+        self.tile_sample_stride_num_frames = 8
 
         tile_latent_min_height = self.tile_sample_min_height // self.spatial_compression_ratio
         tile_latent_min_width = self.tile_sample_min_width // self.spatial_compression_ratio
         tile_latent_min_num_frames = self.tile_sample_min_num_frames // self.temporal_compression_ratio
 
-        print(f"\nVAE Conservative Mode: Using {self.tile_sample_min_height}x{self.tile_sample_min_width} tiles, {self.tile_sample_min_num_frames} temporal frames")
-
-        # Clear cache before conservative decode to maximize available memory
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        print(f"\nVAE Conservative Mode: Using {self.tile_sample_min_height}x{self.tile_sample_min_width} tiles "
+              f"(stride: {self.tile_sample_stride_height}x{self.tile_sample_stride_width}), "
+              f"{self.tile_sample_min_num_frames} temporal frames (free mem: {free_mem / 1024**3:.1f}GB)")
 
         try:
             if self.use_framewise_decoding and num_frames > (
