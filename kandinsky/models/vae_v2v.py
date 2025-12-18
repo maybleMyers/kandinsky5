@@ -1030,23 +1030,31 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
             rows.append(row)
 
         result_rows = []
-        for i, row in enumerate(rows):
+        for i_idx, row in enumerate(rows):
             result_row = []
-            for j, tile in enumerate(row):
-                if i > 0:
-                    tile = self.blend_v(rows[i - 1][j], tile, blend_height)
-                if j > 0:
-                    tile = self.blend_h(row[j - 1], tile, blend_width)
-                height_lim = (
-                    tile_latent_min_height
-                    if i == len(rows) - 1
-                    else tile_latent_stride_height
-                )
-                width_lim = (
-                    tile_latent_min_width
-                    if j == len(row) - 1
-                    else tile_latent_stride_width
-                )
+            for j_idx, tile in enumerate(row):
+                if i_idx > 0:
+                    tile = self.blend_v(rows[i_idx - 1][j_idx], tile, blend_height)
+                if j_idx > 0:
+                    tile = self.blend_h(row[j_idx - 1], tile, blend_width)
+
+                # Calculate actual stride to next tile (handles edge tiles with non-uniform spacing)
+                if i_idx == len(rows) - 1:
+                    # Last row: take remaining height
+                    height_lim = tile_latent_min_height
+                else:
+                    # Calculate actual distance to next tile position (in latent space)
+                    actual_stride_h = (i_positions[i_idx + 1] - i_positions[i_idx]) // self.spatial_compression_ratio
+                    height_lim = actual_stride_h
+
+                if j_idx == len(row) - 1:
+                    # Last column: take remaining width
+                    width_lim = tile_latent_min_width
+                else:
+                    # Calculate actual distance to next tile position (in latent space)
+                    actual_stride_w = (j_positions[j_idx + 1] - j_positions[j_idx]) // self.spatial_compression_ratio
+                    width_lim = actual_stride_w
+
                 result_row.append(tile[:, :, :, :height_lim, :width_lim])
             result_rows.append(torch.cat(result_row, dim=4))
 
@@ -1131,23 +1139,31 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
             rows.append(row)
 
         result_rows = []
-        for i, row in enumerate(rows):
+        for i_idx, row in enumerate(rows):
             result_row = []
-            for j, tile in enumerate(row):
-                if i > 0:
-                    tile = self.blend_v(rows[i - 1][j], tile, blend_height)
-                if j > 0:
-                    tile = self.blend_h(row[j - 1], tile, blend_width)
-                height_lim = (
-                    self.tile_sample_min_height
-                    if i == len(rows) - 1
-                    else self.tile_sample_stride_height
-                )
-                width_lim = (
-                    self.tile_sample_min_width
-                    if j == len(row) - 1
-                    else self.tile_sample_stride_width
-                )
+            for j_idx, tile in enumerate(row):
+                if i_idx > 0:
+                    tile = self.blend_v(rows[i_idx - 1][j_idx], tile, blend_height)
+                if j_idx > 0:
+                    tile = self.blend_h(row[j_idx - 1], tile, blend_width)
+
+                # Calculate actual stride to next tile (handles edge tiles with non-uniform spacing)
+                if i_idx == len(rows) - 1:
+                    # Last row: take remaining height
+                    height_lim = self.tile_sample_min_height
+                else:
+                    # Calculate actual distance to next tile position (in pixels)
+                    actual_stride_h = (i_range[i_idx + 1] - i_range[i_idx]) * self.spatial_compression_ratio
+                    height_lim = actual_stride_h
+
+                if j_idx == len(row) - 1:
+                    # Last column: take remaining width
+                    width_lim = self.tile_sample_min_width
+                else:
+                    # Calculate actual distance to next tile position (in pixels)
+                    actual_stride_w = (j_range[j_idx + 1] - j_range[j_idx]) * self.spatial_compression_ratio
+                    width_lim = actual_stride_w
+
                 result_row.append(tile[:, :, :, :height_lim, :width_lim])
             result_rows.append(torch.cat(result_row, dim=-1))
 
