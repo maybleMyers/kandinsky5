@@ -31,7 +31,8 @@ MEMORY_LIMIT_MB = 512
 def v2v_safe_tiling(vae):
     """
     Context manager that temporarily replaces VAE's tiled_encode/decode methods
-    with v2v-safe versions that ensure full edge coverage.
+    with v2v-safe versions that ensure full edge coverage, and forces spatial
+    tiling to avoid OOM during v2v encoding.
 
     The v2v versions add extra edge tiles when the image dimensions don't align
     perfectly with the tile stride, preventing loss of edge pixels.
@@ -47,16 +48,37 @@ def v2v_safe_tiling(vae):
     original_tiled_encode = vae.tiled_encode
     original_tiled_decode = vae.tiled_decode
 
+    # Save original tile sizes (get_enc_optimal_tiling can set these to full resolution,
+    # which bypasses spatial tiling and causes OOM during v2v)
+    original_tile_min_height = vae.tile_sample_min_height
+    original_tile_min_width = vae.tile_sample_min_width
+    original_tile_stride_height = vae.tile_sample_stride_height
+    original_tile_stride_width = vae.tile_sample_stride_width
+
     try:
         # Replace with v2v-safe methods (bound to this vae instance)
         import types
         vae.tiled_encode = types.MethodType(v2v_vae_class.tiled_encode, vae)
         vae.tiled_decode = types.MethodType(v2v_vae_class.tiled_decode, vae)
+
+        # Force conservative tile sizes to ensure spatial tiling is always used
+        # This prevents OOM when get_enc_optimal_tiling sets tiles to full resolution
+        vae.tile_sample_min_height = 256
+        vae.tile_sample_min_width = 256
+        vae.tile_sample_stride_height = 192
+        vae.tile_sample_stride_width = 192
+
         yield vae
     finally:
         # Restore original methods
         vae.tiled_encode = original_tiled_encode
         vae.tiled_decode = original_tiled_decode
+
+        # Restore original tile sizes
+        vae.tile_sample_min_height = original_tile_min_height
+        vae.tile_sample_min_width = original_tile_min_width
+        vae.tile_sample_stride_height = original_tile_stride_height
+        vae.tile_sample_stride_width = original_tile_stride_width
 
 
 # =============================================================================
@@ -691,7 +713,8 @@ def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24
         else:
             # Try VAE's built-in encoding for smaller videos
             latents = _encode_video_full(pil_frames, num_video_frames, target_h, target_w,
-                                          vae, device, vae_dtype, use_deterministic=use_deterministic)
+                                          vae, device, vae_dtype, use_deterministic=use_deterministic,
+                                          v2v_mode=v2v_mode)
 
     num_latent_frames = latents.shape[0]
 
@@ -701,12 +724,15 @@ def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24
     return latents, scale_factor, num_video_frames
 
 
-def _encode_video_full(pil_frames, num_video_frames, target_h, target_w, vae, device, vae_dtype, use_deterministic=True):
+def _encode_video_full(pil_frames, num_video_frames, target_h, target_w, vae, device, vae_dtype, use_deterministic=True, v2v_mode=False):
     """
     Encode video using VAE's built-in temporal tiled encoding.
     Works well for lower resolutions or shorter videos.
 
     Uses musubi-tuner style deterministic encoding with .mode() when use_deterministic=True.
+
+    When v2v_mode=True, uses opt_tiling=False to preserve the conservative tile sizes
+    set by the v2v_safe_tiling context manager (prevents OOM from dynamic tile sizing).
     """
     import torch.nn.functional as F_torch
 
@@ -727,8 +753,10 @@ def _encode_video_full(pil_frames, num_video_frames, target_h, target_w, vae, de
         del frame_tensors
 
         # Use VAE's built-in tiled encoding (handles temporal chunking with proper blending)
+        # In v2v mode, use opt_tiling=False to preserve the conservative tile sizes set by
+        # v2v_safe_tiling context (otherwise get_enc_optimal_tiling would override them)
         print(f">>> Using VAE's built-in temporal tiled encoding with blending...", flush=True)
-        latent_dist = vae.encode(video_tensor, opt_tiling=True).latent_dist
+        latent_dist = vae.encode(video_tensor, opt_tiling=not v2v_mode).latent_dist
         # Use .mode() for deterministic or .sample() for stochastic (musubi-tuner uses mode)
         latents = latent_dist.mode() if use_deterministic else latent_dist.sample()
         latents = latents.squeeze(0).permute(1, 2, 3, 0)
