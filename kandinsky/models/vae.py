@@ -721,21 +721,202 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
         self._manual_tile_sample_stride_num_frames = None
 
     def _encode(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Encode with automatic fallback strategy.
+        Tries aggressive (faster, larger tiles) approach first, falls back to conservative on OOM.
+        """
+        try:
+            return self._encode_aggressive(x)
+        except torch.cuda.OutOfMemoryError:
+            print(f"\nOOM during aggressive VAE encode, falling back to conservative tiling...")
+            torch.cuda.empty_cache()
+            return self._encode_conservative(x)
+
+    def _encode_aggressive(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Source-style encoding: minimal tiling based on available GPU memory.
+        Uses larger tiles or no tiling when memory permits for better performance.
+        """
         _, _, num_frames, height, width = x.shape
 
-        if self.use_framewise_decoding and num_frames > (
-            self.tile_sample_min_num_frames + 1
-        ):
-            return self._temporal_tiled_encode(x)
+        # Get source-style tiling (may return None for no spatial tiling)
+        tiling = self._get_source_style_tiling_encode(x.shape)
 
-        if self.use_tiling and (
-            width > self.tile_sample_min_width or height > self.tile_sample_min_height
-        ):
-            return self.tiled_encode(x)
+        # Temporal tiling defaults
+        tile_sample_min_num_frames = 16
 
-        x = self.encoder(x)
-        enc = self.quant_conv(x)
-        return enc
+        if tiling is None:
+            # No spatial tiling needed - check if temporal tiling required
+            if self.use_framewise_encoding and num_frames > (tile_sample_min_num_frames + 1):
+                # Set up for full-resolution temporal-only tiling
+                old_h, old_w = self.tile_sample_min_height, self.tile_sample_min_width
+                old_sh, old_sw = self.tile_sample_stride_height, self.tile_sample_stride_width
+
+                # Use full resolution (no spatial tiling)
+                self.tile_sample_min_height = height
+                self.tile_sample_min_width = width
+                self.tile_sample_stride_height = height
+                self.tile_sample_stride_width = width
+
+                try:
+                    print(f"\nVAE Encode Aggressive Mode: No spatial tiling (full {height}x{width}), temporal only")
+                    return self._temporal_tiled_encode(x)
+                finally:
+                    # Restore original settings
+                    self.tile_sample_min_height = old_h
+                    self.tile_sample_min_width = old_w
+                    self.tile_sample_stride_height = old_sh
+                    self.tile_sample_stride_width = old_sw
+            else:
+                # Direct encode - no tiling at all
+                print(f"\nVAE Encode Aggressive Mode: Direct encode (no tiling)")
+                enc = self.encoder(x)
+                enc = self.quant_conv(enc)
+                return enc
+        else:
+            # Use calculated larger tiles from source-style approach
+            ht, wt, hs, ws = tiling
+            old_h, old_w = self.tile_sample_min_height, self.tile_sample_min_width
+            old_sh, old_sw = self.tile_sample_stride_height, self.tile_sample_stride_width
+
+            self.tile_sample_min_height = ht
+            self.tile_sample_min_width = wt
+            self.tile_sample_stride_height = hs
+            self.tile_sample_stride_width = ws
+
+            try:
+                print(f"\nVAE Encode Aggressive Mode: Using {ht}x{wt} tiles (stride: {hs}x{ws})")
+                # Check temporal tiling first
+                if self.use_framewise_encoding and num_frames > (tile_sample_min_num_frames + 1):
+                    return self._temporal_tiled_encode(x)
+                else:
+                    return self.tiled_encode(x)
+            finally:
+                # Restore original settings
+                self.tile_sample_min_height = old_h
+                self.tile_sample_min_width = old_w
+                self.tile_sample_stride_height = old_sh
+                self.tile_sample_stride_width = old_sw
+
+    def _encode_conservative(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Conservative encoding: resolution-based safe tiling.
+        Uses smaller tiles to guarantee memory safety at the cost of speed.
+        """
+        _, _, num_frames, height, width = x.shape
+
+        # Calculate conservative tile sizes based on resolution (same logic as decode)
+        total_pixels = height * width
+
+        if total_pixels <= 768 * 512:  # Low-res
+            tile_h, tile_w = 256, 256
+            stride_h, stride_w = 192, 192
+        elif total_pixels <= 960 * 544:  # Medium-res
+            tile_h, tile_w = 192, 192
+            stride_h, stride_w = 160, 160
+        elif total_pixels <= 1280 * 704:  # High-res
+            tile_h, tile_w = 128, 128
+            stride_h, stride_w = 96, 96
+        else:  # Ultra-high-res
+            tile_h, tile_w = 96, 96
+            stride_h, stride_w = 64, 64
+
+        # Ensure tiles don't exceed actual dimensions
+        tile_h = min(tile_h, height)
+        tile_w = min(tile_w, width)
+        stride_h = min(stride_h, max(16, tile_h - 32))
+        stride_w = min(stride_w, max(16, tile_w - 32))
+
+        # Save and set conservative tiling
+        old_h, old_w = self.tile_sample_min_height, self.tile_sample_min_width
+        old_sh, old_sw = self.tile_sample_stride_height, self.tile_sample_stride_width
+        old_use_tiling = self.use_tiling
+
+        self.tile_sample_min_height = tile_h
+        self.tile_sample_min_width = tile_w
+        self.tile_sample_stride_height = stride_h
+        self.tile_sample_stride_width = stride_w
+        self.use_tiling = True
+
+        tile_sample_min_num_frames = 16
+
+        print(f"\nVAE Encode Conservative Mode: Using {tile_h}x{tile_w} tiles (stride: {stride_h}x{stride_w})")
+
+        try:
+            if self.use_framewise_encoding and num_frames > (tile_sample_min_num_frames + 1):
+                return self._temporal_tiled_encode(x)
+
+            if self.use_tiling and (
+                width >= tile_w or height >= tile_h
+            ):
+                return self.tiled_encode(x)
+
+            enc = self.encoder(x)
+            enc = self.quant_conv(enc)
+            return enc
+        finally:
+            # Restore original settings
+            self.tile_sample_min_height = old_h
+            self.tile_sample_min_width = old_w
+            self.tile_sample_stride_height = old_sh
+            self.tile_sample_stride_width = old_sw
+            self.use_tiling = old_use_tiling
+
+    def _get_source_style_tiling_encode(self, shape: List[int]):
+        """
+        Source repository's memory-based tile calculation for ENCODING.
+        Returns None if no spatial tiling needed, otherwise returns (tile_h, tile_w, stride_h, stride_w).
+
+        Note: Uses a more conservative memory estimate than decode because the encoder
+        has larger intermediate tensors at the input resolution.
+        """
+        _, _, f, h, w = shape
+
+        free_mem = torch.cuda.mem_get_info()[0]
+        # More conservative for encode: encoder has 4x more intermediate memory needs
+        # because it processes at full pixel resolution with expanding channel counts
+        max_area = free_mem / 256 / 17 / 32  # 4x more conservative than decode
+        num_vals = 256 * 17 * (h + 32) * (w + 32)
+
+        # If we can fit entire frame in memory without tiling
+        if h * w < max_area and num_vals < 2**31:
+            return None  # Signal no spatial tiling needed
+
+        # Calculate minimal tiling based on memory
+        k = max(h / w, w / h)
+        N = max(ceil(h * w / max_area), ceil(num_vals / 2**31))
+
+        def factorize(n, k):
+            a = sqrt(n / k)
+            b = sqrt(n * k)
+            aa = [floor(a), ceil(a)]
+            bb = [floor(b), ceil(b)]
+            for a_val in aa:
+                for b_val in bb:
+                    if a_val * b_val >= n:
+                        return a_val, b_val
+            return ceil(a), ceil(b)
+
+        a, b = factorize(N, k)
+        if h >= w:
+            wn, hn = a, b
+        else:
+            wn, hn = b, a
+
+        if wn > 1:
+            wt = ceil(w / wn / 8) * 8 + 16
+            ws = wt - 32
+        else:
+            wt = w
+            ws = w
+        if hn > 1:
+            ht = ceil(h / hn / 8) * 8 + 16
+            hs = ht - 32
+        else:
+            ht = h
+            hs = h
+
+        return (ht, wt, hs, ws)  # tile_h, tile_w, stride_h, stride_w
 
     @apply_forward_hook
     def encode(
@@ -990,13 +1171,12 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
         blend_width = tile_latent_min_width - tile_latent_stride_width
 
         rows = []
-        for i in range(
-            0, height - self.tile_sample_min_height + 1, self.tile_sample_stride_height
-        ):
+        i_range = list(range(0, height - self.tile_sample_min_height + 1, self.tile_sample_stride_height))
+        j_range = list(range(0, width - self.tile_sample_min_width + 1, self.tile_sample_stride_width))
+
+        for i in i_range:
             row = []
-            for j in range(
-                0, width - self.tile_sample_min_width + 1, self.tile_sample_stride_width
-            ):
+            for j in j_range:
                 tile = x[
                     :,
                     :,
@@ -1007,6 +1187,11 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
                 tile = self.encoder(tile).clone()
                 tile = self.quant_conv(tile)
                 row.append(tile)
+
+                # Clear cache every few tiles to prevent memory accumulation
+                if (len(row) % 4 == 0) and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
             rows.append(row)
 
         result_rows = []
@@ -1131,19 +1316,25 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
         tile_latent_stride_num_frames = (
             self.tile_sample_stride_num_frames // self.temporal_compression_ratio
         )
+        # Ensure stride is at least 1 to avoid range() error
+        if tile_latent_stride_num_frames < 1:
+            tile_latent_stride_num_frames = 1
         blend_num_frames = tile_latent_min_num_frames - tile_latent_stride_num_frames
 
         row = []
-        # for i in range(0, num_frames, self.tile_sample_stride_num_frames):
-        for i in range(
+        temporal_chunks = list(range(
             0,
             num_frames - self.tile_sample_min_num_frames + 1,
             self.tile_sample_stride_num_frames,
-        ):
+        ))
+
+        for i in tqdm(temporal_chunks, desc="VAE temporal encoding", unit="chunk"):
             tile = x[:, :, i : i + self.tile_sample_min_num_frames + 1, :, :]
+            # Use >= to ensure tiling triggers when dimensions equal tile size
+            # (previously used > which skipped tiling when exactly equal)
             if self.use_tiling and (
-                height > self.tile_sample_min_height
-                or width > self.tile_sample_min_width
+                height >= self.tile_sample_min_height
+                or width >= self.tile_sample_min_width
             ):
                 tile = self.tiled_encode(tile)
             else:
@@ -1152,6 +1343,10 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
             if i > 0:
                 tile = tile[:, :, 1:, :, :]
             row.append(tile)
+
+            # Clear cache after each temporal chunk to free memory
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         result_row = []
         for i, tile in enumerate(row):
@@ -1282,47 +1477,55 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
     def get_enc_optimal_tiling(
         self, shape: List[int]
     ) -> Tuple[Tuple[int, int, int, int], Tuple[int, int, int]]:
-        """Returns optimal tiling for given shape."""
-        h, w = shape[3:]
+        """
+        Returns optimal tiling for encoding given shape.
+        Uses resolution-based safe defaults similar to decode, with more conservative
+        memory estimates since encoding operates at full pixel resolution.
 
-        free_mem = torch.cuda.mem_get_info()[0]
-        max_area = free_mem / 256 / 17 / 8
+        Note: The actual tiling decisions are now made by _encode_aggressive and
+        _encode_conservative which have their own tiling logic. This method provides
+        initial safe defaults for the encode() method's apply_tiling call.
+        """
+        # If manual tiling is enabled, respect those settings
+        if self.use_manual_tiling:
+            min_frames = self._manual_tile_sample_min_num_frames if self._manual_tile_sample_min_num_frames is not None else self.tile_sample_min_num_frames
+            stride_frames = self._manual_tile_sample_stride_num_frames if self._manual_tile_sample_stride_num_frames is not None else self.tile_sample_stride_num_frames
+            return (
+                (1, min_frames + 1,
+                 self.tile_sample_min_height, self.tile_sample_min_width),
+                (stride_frames,
+                 self.tile_sample_stride_height, self.tile_sample_stride_width)
+            )
 
-        if h * w < max_area:
-            return (1, 17, h, w), (8, h, w)
+        h, w = shape[3:]  # Pixel dimensions
 
-        def factorize(n, k):
-            a = sqrt(n / k)
-            b = sqrt(n * k)
-            aa = [floor(a), ceil(a)]
-            bb = [floor(b), ceil(b)]
-            for a in aa:
-                for b in bb:
-                    if a * b >= n:
-                        return a, b
+        # Resolution-based adaptive tiling (same logic as decode for consistency)
+        total_pixels = h * w
 
-        k = max(h / w, w / h)
-        N = ceil(h * w / max_area)
-        a, b = factorize(N, k)
-        if h >= w:
-            wn, hn = a, b
-        else:
-            wn, hn = b, a
+        if total_pixels <= 768 * 512:  # Low-res (e.g., 768x512)
+            tile_h, tile_w = 256, 256
+            stride_h, stride_w = 192, 192
+        elif total_pixels <= 960 * 544:  # Medium-res (e.g., 960x544)
+            tile_h, tile_w = 192, 192
+            stride_h, stride_w = 160, 160
+        elif total_pixels <= 1280 * 704:  # High-res (e.g., 1280x704)
+            tile_h, tile_w = 128, 128
+            stride_h, stride_w = 96, 96
+        else:  # Ultra-high-res (e.g., 1920x1080)
+            tile_h, tile_w = 96, 96
+            stride_h, stride_w = 64, 64
 
-        if wn > 1:
-            wt = ceil(w / wn / 8) * 8 + 16
-            ws = wt - 32
-        else:
-            wt = w
-            ws = w
-        if hn > 1:
-            ht = ceil(h / hn / 8) * 8 + 16
-            hs = ht - 32
-        else:
-            ht = h
-            hs = h
+        # Ensure tiles don't exceed actual dimensions
+        tile_h = min(tile_h, h)
+        tile_w = min(tile_w, w)
+        stride_h = min(stride_h, max(16, tile_h - 32))
+        stride_w = min(stride_w, max(16, tile_w - 32))
 
-        return (1, 17, ht, wt), (8, hs, ws)
+        # Temporal tiling defaults
+        tile_f = 16   # Default temporal tile size (pixel-space frames)
+        stride_f = 12  # Default temporal stride (pixel-space frames)
+
+        return (1, tile_f + 1, tile_h, tile_w), (stride_f, stride_h, stride_w)
 
     def get_dec_optimal_tiling(
         self, shape: List[int]
