@@ -1107,13 +1107,14 @@ if __name__ == "__main__":
         if pipe.offload or force_offload:
             pipe.vae = pipe.vae.to(pipe.device_map["vae"], non_blocking=True)
 
-        # Encode video to latents
+        # Encode video to latents (v2v_mode ensures edge-safe tiling)
         print(f">>> Encoding video to latent space...", flush=True)
         video_latents, scale_factor, num_frames = encode_video_to_latents(
             args.video,
             pipe.vae,
             pipe.device_map["vae"],
-            alignment=alignment
+            alignment=alignment,
+            v2v_mode=True  # Use edge-safe tiling for v2v to prevent pixel loss
         )
 
         # Offload VAE after encoding

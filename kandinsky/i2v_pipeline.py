@@ -1,5 +1,6 @@
 from math import floor, sqrt
 from typing import Union, Tuple, Optional
+from contextlib import contextmanager, nullcontext
 
 import transformers
 import torch
@@ -9,6 +10,7 @@ from torchvision.transforms import ToPILImage
 from PIL import Image
 
 from .generation_utils import generate_sample_i2v, generate_sample_v2v, generate_sample_denoise
+from .models import vae_v2v
 
 torch._dynamo.config.suppress_errors = True
 torch._dynamo.config.verbose = True
@@ -19,6 +21,42 @@ MAX_DIMENSION = 2048  # Maximum pixels per dimension to fit within RoPE max_pos=
 # Memory limit for chunked operations (from musubi-tuner)
 # Reduce if you see OOM during encoding
 MEMORY_LIMIT_MB = 512
+
+
+# =============================================================================
+# V2V-safe tiling context manager
+# =============================================================================
+
+@contextmanager
+def v2v_safe_tiling(vae):
+    """
+    Context manager that temporarily replaces VAE's tiled_encode/decode methods
+    with v2v-safe versions that ensure full edge coverage.
+
+    The v2v versions add extra edge tiles when the image dimensions don't align
+    perfectly with the tile stride, preventing loss of edge pixels.
+
+    Usage:
+        with v2v_safe_tiling(vae):
+            latents = vae.encode(video_tensor, opt_tiling=True).latent_dist.mode()
+    """
+    # Get the v2v-safe methods from the AutoencoderKLHunyuanVideo class in vae_v2v
+    v2v_vae_class = vae_v2v.AutoencoderKLHunyuanVideo
+
+    # Save original methods
+    original_tiled_encode = vae.tiled_encode
+    original_tiled_decode = vae.tiled_decode
+
+    try:
+        # Replace with v2v-safe methods (bound to this vae instance)
+        import types
+        vae.tiled_encode = types.MethodType(v2v_vae_class.tiled_encode, vae)
+        vae.tiled_decode = types.MethodType(v2v_vae_class.tiled_decode, vae)
+        yield vae
+    finally:
+        # Restore original methods
+        vae.tiled_encode = original_tiled_encode
+        vae.tiled_decode = original_tiled_decode
 
 
 # =============================================================================
@@ -549,7 +587,7 @@ def get_conditioning_video_and_image(video_path, end_image, num_frames, vae, dev
     return start_latents, end_latents, scale_factor
 
 
-def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24, max_frames=None, use_deterministic=True):
+def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24, max_frames=None, use_deterministic=True, v2v_mode=False):
     """
     Load a video file and encode to latent space with proper temporal compression.
 
@@ -570,6 +608,8 @@ def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24
         max_frames: Maximum number of video frames to process (None = all frames)
         use_deterministic: If True, use .mode() for deterministic encoding (musubi-tuner style).
                           If False, use .sample() for stochastic encoding.
+        v2v_mode: If True, use v2v-safe tiling that ensures full edge coverage.
+                  This prevents loss of edge pixels when dimensions don't align with tile stride.
 
     Returns:
         Tuple of (latents, scale_factor, num_video_frames)
@@ -636,15 +676,22 @@ def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24
                   (pixels_per_frame > 1024 * 768) or \
                   (total_pixels * 4 > free_mem * 0.3)  # Video tensor would use >30% of free mem
 
-    if use_chunked:
-        print(f">>> High-res/long video detected, using chunked encoding directly...", flush=True)
-        latents = _encode_video_chunked(pil_frames, num_video_frames, target_h, target_w,
-                                         vae, device, vae_dtype, expected_latent_frames,
-                                         use_deterministic=use_deterministic)
-    else:
-        # Try VAE's built-in encoding for smaller videos
-        latents = _encode_video_full(pil_frames, num_video_frames, target_h, target_w,
-                                      vae, device, vae_dtype, use_deterministic=use_deterministic)
+    # Use v2v-safe tiling context when in v2v mode to prevent edge pixel loss
+    tiling_context = v2v_safe_tiling(vae) if v2v_mode else nullcontext()
+
+    with tiling_context:
+        if v2v_mode:
+            print(f">>> V2V mode: using edge-safe tiling", flush=True)
+
+        if use_chunked:
+            print(f">>> High-res/long video detected, using chunked encoding directly...", flush=True)
+            latents = _encode_video_chunked(pil_frames, num_video_frames, target_h, target_w,
+                                             vae, device, vae_dtype, expected_latent_frames,
+                                             use_deterministic=use_deterministic)
+        else:
+            # Try VAE's built-in encoding for smaller videos
+            latents = _encode_video_full(pil_frames, num_video_frames, target_h, target_w,
+                                          vae, device, vae_dtype, use_deterministic=use_deterministic)
 
     num_latent_frames = latents.shape[0]
 
@@ -1461,9 +1508,9 @@ class Kandinsky5DenoisePipeline:
         frames_per_chunk = int(chunk_seconds * 24 / 4 + 1)  # Match Kandinsky frame rate
         print(f">>> Processing video in chunks of ~{chunk_seconds}s ({frames_per_chunk} frames per chunk)", flush=True)
 
-        # Encode full video to latents
+        # Encode full video to latents (v2v_mode ensures edge-safe tiling)
         video_latents, scale_factor, total_frames = encode_video_to_latents(
-            video_path, self.vae, self.device_map["vae"], alignment=alignment
+            video_path, self.vae, self.device_map["vae"], alignment=alignment, v2v_mode=True
         )
 
         # Offload VAE after encoding
