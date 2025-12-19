@@ -17,6 +17,19 @@ import json
 import io
 from PIL import Image
 import tiktoken
+import imageio_ffmpeg
+
+def get_ffmpeg_path():
+    """Get ffmpeg executable path from imageio_ffmpeg."""
+    return imageio_ffmpeg.get_ffmpeg_exe()
+
+def get_ffprobe_path():
+    """Get ffprobe executable path from imageio_ffmpeg."""
+    ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+    # ffprobe is in the same directory as ffmpeg
+    if sys.platform == 'win32':
+        return ffmpeg_path.replace('ffmpeg.exe', 'ffprobe.exe')
+    return ffmpeg_path.replace('ffmpeg', 'ffprobe')
 
 # Job queue system for browser-independent generation
 from job_queue import get_queue, JobStatus
@@ -1768,7 +1781,7 @@ def decode_from_latents(
 def extract_video_metadata(video_path: str) -> Dict:
     """Extract metadata from video file using ffprobe."""
     cmd = [
-        'ffprobe',
+        get_ffprobe_path(),
         '-v', 'quiet',
         '-print_format', 'json',
         '-show_format',
@@ -1796,7 +1809,7 @@ def add_metadata_to_video(video_path: str, parameters: dict) -> None:
 
     # FFmpeg command to add metadata without re-encoding
     cmd = [
-        'ffmpeg',
+        get_ffmpeg_path(),
         '-i', video_path,
         '-metadata', f'comment={params_json}',
         '-codec', 'copy',
@@ -1820,7 +1833,7 @@ def get_video_info(video_path: str) -> dict:
     try:
         # Select first video stream and get specific entries
         cmd = [
-            'ffprobe',
+            get_ffprobe_path(),
             '-v', 'error',
             '-select_streams', 'v:0',
             '-show_entries', 'stream=width,height,r_frame_rate,duration',
@@ -1852,7 +1865,7 @@ def get_video_info(video_path: str) -> dict:
         duration = float(video_stream.get('duration', 0))
         if duration == 0:
             # Fallback to format duration if stream duration is missing
-            cmd_fmt = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'json', video_path]
+            cmd_fmt = [get_ffprobe_path(), '-v', 'error', '-show_entries', 'format=duration', '-of', 'json', video_path]
             res_fmt = subprocess.run(cmd_fmt, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             data_fmt = json.loads(res_fmt.stdout)
             duration = float(data_fmt.get('format', {}).get('duration', 0))
