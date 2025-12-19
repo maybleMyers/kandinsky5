@@ -1983,6 +1983,7 @@ def generate_denoise(
     guidance_weight,
     scheduler_scale,
     conf,
+    seed=6554,
     progress=False,
     attention_mask=None,
     null_attention_mask=None,
@@ -2026,15 +2027,19 @@ def generate_denoise(
     # Save the clean first frame if we need to preserve it
     first_frame_clean = latents[0:1].clone() if preserve_first_frame else None
 
-    # Generate noise and create noisy latents at start_timestep
+    # Generate noise using seeded generator (same as i2v for consistency)
+    g = torch.Generator(device=device)
+    g.manual_seed(seed)
+
+    # Generate noise with same shape as latents, using seeded generator
     # Flow matching: x_t = (1-t)*x_0 + t*noise
     # Higher start_timestep = more noise = more different from original
-    noise = torch.randn_like(latents)
+    noise = torch.randn(latents.shape, device=device, dtype=latents.dtype, generator=g)
     t = start_timestep
     img = (1 - t) * latents + t * noise
 
     # Debug: verify noise mixing ratio
-    print(f">>> V2V Denoise: strength={start_timestep:.2f} -> {(1-t)*100:.0f}% original + {t*100:.0f}% noise", flush=True)
+    print(f">>> V2V Denoise: seed={seed}, strength={start_timestep:.2f} -> {(1-t)*100:.0f}% original + {t*100:.0f}% noise", flush=True)
 
     # Restore the first frame to clean (no noise) if preserving
     if preserve_first_frame:
@@ -2275,6 +2280,7 @@ def generate_sample_denoise(
                     guidance_weight=guidance_weight,
                     scheduler_scale=scheduler_scale,
                     conf=conf,
+                    seed=seed,
                     progress=progress,
                     attention_mask=attention_mask,
                     null_attention_mask=null_attention_mask,
