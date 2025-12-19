@@ -26,6 +26,5 @@ ninja
 numpy
 bitsandbytes
 peft
-#gradio == 5.23.1 local in modules
-ffmpeg
+gradio == 5.23.1
 tiktoken

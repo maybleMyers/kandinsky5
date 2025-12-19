@@ -1533,6 +1533,90 @@ class App(FastAPI):
                 return True
             return False
 
+        @router.get("/reconnect_state")
+        def get_reconnect_state():
+            """
+            Custom endpoint for browser reconnection - bypasses Gradio queue.
+            Returns JSON with active generation state that frontend JS can use
+            to update UI components directly.
+            """
+            import re
+            result = {
+                "active": False,
+                "preview": None,
+                "videos": [],
+                "status": "Ready to generate",
+                "progress": ""
+            }
+
+            try:
+                # Get base directory from blocks
+                base_dir = os.path.dirname(os.path.abspath(__file__))
+                # Go up to kandinsky5 directory
+                kandinsky_dir = os.path.dirname(os.path.dirname(base_dir))
+
+                # Check for active preview files (modified within last 30 minutes)
+                preview_dir = os.path.join(kandinsky_dir, "outputs", "previews")
+                active_preview = None
+                active_preview_age = float('inf')
+
+                if os.path.exists(preview_dir):
+                    now = time.time()
+                    for filename in os.listdir(preview_dir):
+                        if filename.startswith("latent_preview_k1_") and filename.endswith(".mp4"):
+                            filepath = os.path.join(preview_dir, filename)
+                            try:
+                                mtime = os.path.getmtime(filepath)
+                                age = now - mtime
+                                if age < 1800 and age < active_preview_age:  # 30 minutes
+                                    active_preview = filepath
+                                    active_preview_age = age
+                            except OSError:
+                                continue
+
+                # Find completed videos from last 3 hours
+                outputs_dir = os.path.join(kandinsky_dir, "outputs")
+                videos = []
+                if os.path.exists(outputs_dir):
+                    now = time.time()
+                    recent_videos = []
+                    for filename in os.listdir(outputs_dir):
+                        if filename.startswith("k1_") and filename.endswith(".mp4"):
+                            filepath = os.path.join(outputs_dir, filename)
+                            try:
+                                mtime = os.path.getmtime(filepath)
+                                if now - mtime < 10800:  # 3 hours
+                                    recent_videos.append((filepath, mtime))
+                            except OSError:
+                                continue
+
+                    recent_videos.sort(key=lambda x: x[1], reverse=True)
+                    for filepath, _ in recent_videos[:10]:
+                        seed_match = re.search(r'_(\d+)\.mp4$', filepath)
+                        seed_label = f"Seed: {seed_match.group(1)}" if seed_match else "Completed"
+                        videos.append({"path": filepath, "label": seed_label})
+
+                if active_preview:
+                    result["active"] = True
+                    result["preview"] = active_preview
+                    result["videos"] = videos
+                    result["status"] = f"🔄 Reconnected! Generation in progress... ({len(videos)} completed)"
+                    result["progress"] = f"Preview age: {active_preview_age:.0f}s (click Reconnect to refresh)"
+                    print(f"[Reconnect API] Found active generation (preview age: {active_preview_age:.1f}s), {len(videos)} video(s)")
+                elif videos:
+                    result["videos"] = videos
+                    result["status"] = f"✅ Reconnected! Found {len(videos)} recent video(s)"
+                    print(f"[Reconnect API] Found {len(videos)} recent video(s)")
+                else:
+                    print("[Reconnect API] No active or recent jobs found")
+
+            except Exception as e:
+                print(f"[Reconnect API] Error: {e}")
+                import traceback
+                traceback.print_exc()
+
+            return ORJSONResponse(content=result)
+
         @router.get("/theme.css", response_class=PlainTextResponse)
         @app.get("/theme.css", response_class=PlainTextResponse)
         def theme_css():

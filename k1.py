@@ -17,9 +17,15 @@ import json
 import io
 from PIL import Image
 import tiktoken
+import imageio_ffmpeg
+import av
+
+def get_ffmpeg_path():
+    """Get ffmpeg executable path from imageio_ffmpeg."""
+    return imageio_ffmpeg.get_ffmpeg_exe()
 
 # Job queue system for browser-independent generation
-from job_queue import get_queue, JobQueue, JobStatus, Job, format_job_for_display
+from job_queue import get_queue, JobStatus
 
 # Initialize tiktoken encoder for fast token counting
 enc = tiktoken.get_encoding("cl100k_base")
@@ -157,12 +163,8 @@ def generate_video(
     sdnq_weights_dtype: str = "int8",
     sdnq_triton_mm: bool = True,
     sdnq_compile: bool = True,
-    # End frame noise scheduling
-    end_noise_schedule: str = "progressive",
-    end_noise_start: float = 1.0,
-    end_noise_end: float = 0.0,
-    start_noise_schedule: str = "fixed",
-    start_noise_level: float = 0.0,
+    # End frame blending (0.0 = use denoised result, 1.0 = use target)
+    end_blend_weight: float = 0.0,
 ) -> Generator[Tuple[List[Tuple[str, str]], Optional[str], str, str], None, None]:
     global stop_event, current_process, current_output_filename
     stop_event.clear()
@@ -279,11 +281,7 @@ def generate_video(
             if end_image:
                 command.extend(["--end_image", str(end_image)])
                 # Add noise scheduling parameters for end frame
-                command.extend(["--end_noise_schedule", str(end_noise_schedule)])
-                command.extend(["--end_noise_start", str(end_noise_start)])
-                command.extend(["--end_noise_end", str(end_noise_end)])
-                command.extend(["--start_noise_schedule", str(start_noise_schedule)])
-                command.extend(["--start_noise_level", str(start_noise_level)])
+                command.extend(["--end_blend_weight", str(end_blend_weight)])
             # Pass width and height for i2v mode to resize the input image
             command.extend(["--width", str(int(width))])
             command.extend(["--height", str(int(height))])
@@ -570,12 +568,8 @@ def generate_v2v_video(
     sdnq_weights_dtype: str = "int8",
     sdnq_triton_mm: bool = True,
     sdnq_compile: bool = True,
-    # End frame noise scheduling (for video joining mode)
-    end_noise_schedule: str = "fixed",  # Default to "fixed" for backward compatibility
-    end_noise_start: float = 0.0,       # Default to 0.0 (clean end frames) for backward compatibility
-    end_noise_end: float = 0.0,
-    start_noise_schedule: str = "fixed",
-    start_noise_level: float = 0.0,
+    # End frame blending (0.0 = use denoised result, 1.0 = use target)
+    end_blend_weight: float = 0.0,
 ) -> Generator[Tuple[List[Tuple[str, str]], Optional[str], str, str], None, None]:
     """Generate video from video input (video continuation/v2v mode)."""
     global stop_event, current_process, current_output_filename
@@ -702,20 +696,10 @@ def generate_v2v_video(
         # Add second video or ending image if provided (joining mode)
         if input_video2:
             command.extend(["--video2", str(input_video2)])
-            # Add noise scheduling parameters for video joining (end frame control)
-            command.extend(["--end_noise_schedule", str(end_noise_schedule)])
-            command.extend(["--end_noise_start", str(end_noise_start)])
-            command.extend(["--end_noise_end", str(end_noise_end)])
-            command.extend(["--start_noise_schedule", str(start_noise_schedule)])
-            command.extend(["--start_noise_level", str(start_noise_level)])
+            command.extend(["--end_blend_weight", str(end_blend_weight)])
         elif input_image2:
             command.extend(["--end_image", str(input_image2)])
-            # Add noise scheduling parameters for video + end image mode
-            command.extend(["--end_noise_schedule", str(end_noise_schedule)])
-            command.extend(["--end_noise_start", str(end_noise_start)])
-            command.extend(["--end_noise_end", str(end_noise_end)])
-            command.extend(["--start_noise_schedule", str(start_noise_schedule)])
-            command.extend(["--start_noise_level", str(start_noise_level)])
+            command.extend(["--end_blend_weight", str(end_blend_weight)])
 
         command.extend(["--num_cond_frames", str(int(num_cond_frames))])
         if normalize_frames and int(normalize_frames) > 0:
@@ -1017,11 +1001,7 @@ def submit_to_queue(
     sdnq_weights_dtype: str = "int8",
     sdnq_triton_mm: bool = True,
     sdnq_compile: bool = True,
-    end_noise_schedule: str = "progressive",
-    end_noise_start: float = 1.0,
-    end_noise_end: float = 0.0,
-    start_noise_schedule: str = "fixed",
-    start_noise_level: float = 0.0,
+    end_blend_weight: float = 0.0,
 ) -> str:
     """
     Submit generation job(s) to the queue.
@@ -1127,11 +1107,7 @@ def submit_to_queue(
                 command.extend(["--image", str(input_image)])
             if end_image:
                 command.extend(["--end_image", str(end_image)])
-                command.extend(["--end_noise_schedule", str(end_noise_schedule)])
-                command.extend(["--end_noise_start", str(end_noise_start)])
-                command.extend(["--end_noise_end", str(end_noise_end)])
-                command.extend(["--start_noise_schedule", str(start_noise_schedule)])
-                command.extend(["--start_noise_level", str(start_noise_level)])
+                command.extend(["--end_blend_weight", str(end_blend_weight)])
 
         command.extend(["--width", str(int(width))])
         command.extend(["--height", str(int(height))])
@@ -1213,80 +1189,6 @@ def submit_to_queue(
         return f"Batch queued: {batch_id} ({batch_count} jobs: {', '.join(jobs_created)})"
 
 
-def get_queue_display() -> Tuple[str, str]:
-    """
-    Get queue status for display.
-
-    Returns:
-        Tuple of (queue_status_text, job_list_text)
-    """
-    queue = get_queue()
-    stats = queue.get_queue_stats()
-
-    status_text = f"Queue: {stats['pending']} pending, {stats['running']} running, {stats['completed']} completed, {stats['failed']} failed"
-
-    jobs = queue.get_all_jobs(limit=20)
-    if not jobs:
-        job_list = "No jobs in queue"
-    else:
-        lines = []
-        for job in jobs:
-            lines.append(format_job_for_display(job))
-        job_list = "\n".join(lines)
-
-    return status_text, job_list
-
-
-def poll_job_status(job_id: str) -> Tuple[Optional[str], Optional[str], str, str]:
-    """
-    Poll a specific job's status.
-
-    Returns:
-        Tuple of (video_path, preview_path, status_text, progress_text)
-    """
-    queue = get_queue()
-    job = queue.get_job(job_id)
-
-    if not job:
-        return None, None, f"Job {job_id} not found", ""
-
-    video_path = None
-    preview_path = None
-
-    if job.status == JobStatus.COMPLETED.value:
-        if os.path.exists(job.output_filename):
-            video_path = job.output_filename
-        status_text = f"Completed in {job.elapsed_time:.1f}s"
-    elif job.status == JobStatus.RUNNING.value:
-        status_text = f"Running ({job.progress:.0f}%)"
-        if job.preview_path and os.path.exists(job.preview_path):
-            preview_path = job.preview_path
-    elif job.status == JobStatus.FAILED.value:
-        status_text = f"Failed: {job.error_message}"
-    elif job.status == JobStatus.CANCELLED.value:
-        status_text = "Cancelled"
-    else:
-        status_text = "Pending in queue"
-
-    return video_path, preview_path, status_text, job.progress_text
-
-
-def cancel_queued_job(job_id: str) -> str:
-    """Cancel a job by ID."""
-    queue = get_queue()
-    job = queue.cancel_job(job_id)
-    if job:
-        return f"Cancelled job {job_id}"
-    return f"Could not cancel job {job_id}"
-
-
-def clear_completed_jobs() -> str:
-    """Remove all completed/failed/cancelled jobs from the queue."""
-    queue = get_queue()
-    removed = queue.cleanup_old_jobs(max_age_hours=0)
-    return f"Removed {removed} completed jobs"
-
-
 # =============================================================================
 # UNIFIED QUEUE-BASED GENERATION (Browser-Independent with Live Updates)
 # =============================================================================
@@ -1345,11 +1247,7 @@ def generate_via_queue(
     sdnq_weights_dtype: str = "int8",
     sdnq_triton_mm: bool = True,
     sdnq_compile: bool = True,
-    end_noise_schedule: str = "progressive",
-    end_noise_start: float = 1.0,
-    end_noise_end: float = 0.0,
-    start_noise_schedule: str = "fixed",
-    start_noise_level: float = 0.0,
+    end_blend_weight: float = 0.0,
 ):
     """
     Submit job(s) to queue and return initial state for polling.
@@ -1379,8 +1277,7 @@ def generate_via_queue(
         use_prompt_expansion, clip_prompt, save_latents,
         enable_ultravico, ultravico_alpha, ultravico_suppress_harmonics, ultravico_beta,
         use_sdnq, sdnq_weights_dtype, sdnq_triton_mm, sdnq_compile,
-        end_noise_schedule, end_noise_start, end_noise_end,
-        start_noise_schedule, start_noise_level,
+        end_blend_weight,
     )
 
     # Parse job/batch IDs from result message
@@ -1875,22 +1772,12 @@ def decode_from_latents(
 
 
 def extract_video_metadata(video_path: str) -> Dict:
-    """Extract metadata from video file using ffprobe."""
-    cmd = [
-        'ffprobe',
-        '-v', 'quiet',
-        '-print_format', 'json',
-        '-show_format',
-        video_path
-    ]
-
+    """Extract metadata from video file using PyAV."""
     try:
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-        metadata = json.loads(result.stdout.decode('utf-8'))
-        if 'format' in metadata and 'tags' in metadata['format']:
-            comment = metadata['format']['tags'].get('comment', '{}')
+        with av.open(video_path) as container:
+            # Get comment metadata from container
+            comment = container.metadata.get('comment', '{}')
             return json.loads(comment)
-        return {}
     except Exception as e:
         print(f"Metadata extraction failed: {str(e)}")
         return {}
@@ -1905,7 +1792,7 @@ def add_metadata_to_video(video_path: str, parameters: dict) -> None:
 
     # FFmpeg command to add metadata without re-encoding
     cmd = [
-        'ffmpeg',
+        get_ffmpeg_path(),
         '-i', video_path,
         '-metadata', f'comment={params_json}',
         '-codec', 'copy',
@@ -1925,56 +1812,40 @@ def add_metadata_to_video(video_path: str, parameters: dict) -> None:
         print(f"Error: {str(e)}")
 
 def get_video_info(video_path: str) -> dict:
-    """Get video information using ffprobe via subprocess (no python-ffmpeg dependency)."""
+    """Get video information using PyAV."""
     try:
-        # Select first video stream and get specific entries
-        cmd = [
-            'ffprobe',
-            '-v', 'error',
-            '-select_streams', 'v:0',
-            '-show_entries', 'stream=width,height,r_frame_rate,duration',
-            '-of', 'json',
-            video_path
-        ]
-        
-        # Run ffprobe
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        data = json.loads(result.stdout)
-        
-        if not data.get('streams'):
-            return {}
-            
-        video_stream = data['streams'][0]
-        width = int(video_stream['width'])
-        height = int(video_stream['height'])
-        
-        # Calculate FPS (handle fraction like 30/1)
-        r_frame_rate = video_stream.get('r_frame_rate', '30/1')
-        if '/' in r_frame_rate:
-            num, den = map(int, r_frame_rate.split('/'))
-            fps = num / den if den != 0 else 0
-        else:
-            fps = float(r_frame_rate)
+        with av.open(video_path) as container:
+            # Get first video stream
+            video_stream = container.streams.video[0]
 
-        # Calculate Duration
-        # Try stream duration first, then format duration
-        duration = float(video_stream.get('duration', 0))
-        if duration == 0:
-            # Fallback to format duration if stream duration is missing
-            cmd_fmt = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'json', video_path]
-            res_fmt = subprocess.run(cmd_fmt, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            data_fmt = json.loads(res_fmt.stdout)
-            duration = float(data_fmt.get('format', {}).get('duration', 0))
+            width = video_stream.width
+            height = video_stream.height
 
-        total_frames = int(duration * fps)
+            # Calculate FPS from average_rate or guessed_rate
+            if video_stream.average_rate:
+                fps = float(video_stream.average_rate)
+            elif video_stream.guessed_rate:
+                fps = float(video_stream.guessed_rate)
+            else:
+                fps = 30.0  # fallback
 
-        return {
-            'width': width,
-            'height': height,
-            'fps': fps,
-            'total_frames': total_frames,
-            'duration': duration
-        }
+            # Calculate duration
+            if video_stream.duration and video_stream.time_base:
+                duration = float(video_stream.duration * video_stream.time_base)
+            elif container.duration:
+                duration = container.duration / av.time_base
+            else:
+                duration = 0
+
+            total_frames = int(video_stream.frames) if video_stream.frames else int(duration * fps)
+
+            return {
+                'width': width,
+                'height': height,
+                'fps': fps,
+                'total_frames': total_frames,
+                'duration': duration
+            }
     except Exception as e:
         print(f"Error extracting video info: {e}")
         return {}
@@ -2322,6 +2193,53 @@ def create_interface():
                         }
                     });
                 }, 1000);
+
+                // Auto-reconnect check on page load
+                setTimeout(async () => {
+                    try {
+                        console.log('[Auto-Reconnect] Checking for active generation...');
+                        const response = await fetch('/gradio_api/reconnect_state');
+                        const data = await response.json();
+
+                        if (data.active || data.videos.length > 0) {
+                            console.log('[Auto-Reconnect] Found state:', data);
+
+                            // Update status text
+                            const statusEl = document.querySelector('#k1_batch_progress textarea');
+                            if (statusEl) {
+                                statusEl.value = data.status;
+                                statusEl.dispatchEvent(new Event('input', { bubbles: true }));
+                            }
+
+                            // Update progress text
+                            const progressEl = document.querySelector('#k1_progress_text textarea');
+                            if (progressEl) {
+                                progressEl.value = data.progress;
+                                progressEl.dispatchEvent(new Event('input', { bubbles: true }));
+                            }
+
+                            // Update preview video if active
+                            if (data.preview && data.active) {
+                                const fileUrl = '/gradio_api/file=' + data.preview.replace(/\\/g, '/');
+                                const previewContainer = document.querySelector('#k1_preview_video');
+                                if (previewContainer) {
+                                    const videoEl = previewContainer.querySelector('video');
+                                    if (videoEl) {
+                                        videoEl.src = fileUrl;
+                                        videoEl.load();
+                                        console.log('[Auto-Reconnect] Updated preview video');
+                                    }
+                                }
+                            }
+
+                            console.log('[Auto-Reconnect] UI updated');
+                        } else {
+                            console.log('[Auto-Reconnect] No active generation found');
+                        }
+                    } catch (e) {
+                        console.log('[Auto-Reconnect] Check failed (server might be starting):', e.message);
+                    }
+                }, 2000);
             }
             """)
 
@@ -2365,13 +2283,15 @@ def create_interface():
                             interactive=False
                         )                        
                     with gr.Column(scale=2):
-                        batch_progress = gr.Textbox(label="Status", interactive=False, value="")
-                        progress_text = gr.Textbox(label="Progress", interactive=False, value="")
+                        batch_progress = gr.Textbox(label="Status", interactive=False, value="", elem_id="k1_batch_progress")
+                        progress_text = gr.Textbox(label="Progress", interactive=False, value="", elem_id="k1_progress_text")
                         save_latents_checkbox = gr.Checkbox(label="Save Latents Before VAE Decode", value=False)
 
                 with gr.Row():
                     generate_btn = gr.Button("Generate Video", elem_classes="green-btn")
                     stop_btn = gr.Button("Stop Generation", variant="stop")
+                    reconnect_btn = gr.Button("🔄 Reconnect", variant="secondary", scale=1,
+                                              elem_classes="light-blue-btn")
 
                 with gr.Row():
                     with gr.Column():
@@ -2380,40 +2300,15 @@ def create_interface():
                         with gr.Accordion("End Frame Settings", open=False):
                             end_image = gr.Image(label="End Image (optional - for start-to-end video)", type="filepath")
                             gr.Markdown("""
-                            **Noise Scheduling:** Control how the end/target image is revealed during generation.
-                            - **Progressive** (default): End frame starts hidden (noisy) and gradually emerges, reducing glitches.
-                            - **Fixed**: Constant noise level throughout (use 0.0 for original behavior).
-                            - **Symmetric**: End frame follows same noise schedule as middle frames.
+                            **End Blend Weight:** Control how the final end frames are blended.
+                            - **0.0** (default): Use denoised result for smooth transitions.
+                            - **1.0**: Use target end frame exactly (may cause visible jumps).
                             """)
-                            end_noise_schedule = gr.Dropdown(
-                                label="End Noise Schedule",
-                                choices=["progressive", "fixed", "symmetric"],
-                                value="progressive",
-                                info="How noise decreases for end frames during denoising"
+                            end_blend_weight = gr.Slider(
+                                minimum=0.0, maximum=1.0, value=0.0, step=0.05,
+                                label="End Blend Weight",
+                                info="0.0 = smooth denoised result, 1.0 = exact target (may jump)"
                             )
-                            with gr.Row():
-                                end_noise_start = gr.Slider(
-                                    minimum=0.0, maximum=1.0, value=1.0, step=0.05,
-                                    label="End Noise Start",
-                                    info="Initial noise level (1.0 = fully hidden, 0.0 = clean)"
-                                )
-                                end_noise_end = gr.Slider(
-                                    minimum=0.0, maximum=1.0, value=0.0, step=0.05,
-                                    label="End Noise End",
-                                    info="Final noise level (0.0 = fully revealed)"
-                                )
-                            with gr.Row():
-                                start_noise_schedule = gr.Dropdown(
-                                    label="Start Noise Schedule",
-                                    choices=["fixed", "progressive"],
-                                    value="fixed",
-                                    info="Usually keep 'fixed' with level 0.0 for clean anchoring"
-                                )
-                                start_noise_level = gr.Slider(
-                                    minimum=0.0, maximum=1.0, value=0.0, step=0.05,
-                                    label="Start Noise Level",
-                                    info="Noise level for start frames (0.0 = clean anchor)"
-                                )
 
                         gr.Markdown("### Generation Parameters")
                         mode = gr.Dropdown(
@@ -2546,19 +2441,19 @@ def create_interface():
 
                 with gr.Accordion("Model Settings & Performance", open=True):
                     with gr.Row():
-                        use_mixed_weights = gr.Checkbox(label="Use Mixed Weights", value=False, info="Preserve fp32 for critical layers (norms, embeddings)")
+                        use_mixed_weights = gr.Checkbox(label="Use Mixed Weights", value=True, info="Preserve fp32 for critical layers (norms, embeddings)")
                         use_int8 = gr.Checkbox(label="Use int8 matmul (legacy)", value=False, info="Legacy INT8 quantization")
-                        use_torch_compile = gr.Checkbox(label="Use torch.compile", value=False, info="Slower startup (2-5 min) but faster inference")
+                        use_torch_compile = gr.Checkbox(label="Use torch.compile", value=True, info="Slower startup (2-5 min) but faster inference")
                         use_magcache = gr.Checkbox(label="Use MagCache", value=False, info="Skip redundant computations (50-step models only)")
                     with gr.Row():
                         use_sdnq = gr.Checkbox(label="Use SDNQ (recommended)", value=False, info="20-40% faster than legacy INT8 with auto-tuned Triton kernels")
                         sdnq_weights_dtype = gr.Radio(choices=["int8", "fp8", "int4"], label="SDNQ Weights", value="int8", info="int8=best balance, fp8=H100+, int4=experimental")
-                        sdnq_triton_mm = gr.Checkbox(label="Triton MM", value=True, info="Use Triton int8 kernel (faster on 4090/5090)")
-                        sdnq_compile = gr.Checkbox(label="torch.compile SDNQ", value=True, info="Compile SDNQ kernels (better throughput after warmup)")
+                        sdnq_triton_mm = gr.Checkbox(label="Triton MM", value=False, info="Use Triton int8 kernel (faster on 4090/5090)")
+                        sdnq_compile = gr.Checkbox(label="torch.compile SDNQ", value=False, info="Compile SDNQ kernels (better throughput after warmup)")
                     with gr.Row():
                         enable_block_swap = gr.Checkbox(label="Enable Block Swap", value=True, info="Required for 24GB GPUs")
                         offload_inactive = gr.Checkbox(label="Offload Inactive Models", value=False, info="Offload text encoder & VAE to CPU when not in use (auto-enabled with block swap)")
-                        blocks_in_memory = gr.Slider(minimum=1, maximum=60, step=1, label="Blocks in Memory", value=2, info="Number of transformer blocks to keep in GPU memory")
+                        blocks_in_memory = gr.Slider(minimum=1, maximum=60, step=1, label="Blocks in Memory", value=6, info="Number of transformer blocks to keep in GPU memory")
                     with gr.Row():
                         dtype_select = gr.Radio(choices=["bfloat16", "float16", "float32", "fp8_scaled"], label="Default Data Type", value="bfloat16", info="Used for all components if specific dtypes not set. fp8_scaled provides ~50% memory savings.")
                     with gr.Accordion("Advanced: Component-Specific Data Types", open=False):
@@ -2706,8 +2601,7 @@ def create_interface():
                         save_latents_checkbox,
                         enable_ultravico, ultravico_alpha, ultravico_suppress_harmonics, ultravico_beta,
                         use_sdnq, sdnq_weights_dtype, sdnq_triton_mm, sdnq_compile,
-                        # End frame noise scheduling
-                        end_noise_schedule, end_noise_start, end_noise_end, start_noise_schedule, start_noise_level
+                        end_blend_weight
                     ],
                     outputs=[output, preview_output, batch_progress, progress_text]
                 )
@@ -2716,6 +2610,104 @@ def create_interface():
                 stop_btn.click(
                     fn=stop_generation,
                     outputs=[batch_progress]
+                )
+
+                # Manual reconnect button - uses JS to fetch API and update UI directly
+                # This bypasses Gradio's queue/SSE mechanism which can block
+                reconnect_btn.click(
+                    fn=None,
+                    inputs=None,
+                    outputs=[batch_progress],
+                    js=r"""
+                        async () => {
+                            try {
+                                console.log('[Reconnect] Fetching state from API...');
+                                const response = await fetch('/gradio_api/reconnect_state');
+                                const data = await response.json();
+                                console.log('[Reconnect] Got state:', data);
+
+                                // Update status text
+                                const statusEl = document.querySelector('#k1_batch_progress textarea');
+                                if (statusEl) {
+                                    statusEl.value = data.status;
+                                    statusEl.dispatchEvent(new Event('input', { bubbles: true }));
+                                    console.log('[Reconnect] Updated status:', data.status);
+                                } else {
+                                    console.log('[Reconnect] Status element not found');
+                                }
+
+                                // Update progress text
+                                const progressEl = document.querySelector('#k1_progress_text textarea');
+                                if (progressEl) {
+                                    progressEl.value = data.progress;
+                                    progressEl.dispatchEvent(new Event('input', { bubbles: true }));
+                                    console.log('[Reconnect] Updated progress:', data.progress);
+                                } else {
+                                    console.log('[Reconnect] Progress element not found');
+                                }
+
+                                // Update preview video if active
+                                if (data.preview && data.active) {
+                                    console.log('[Reconnect] Attempting to update preview video...');
+                                    // Convert file path to Gradio file URL
+                                    const fileUrl = '/gradio_api/file=' + data.preview.replace(/\\/g, '/');
+                                    console.log('[Reconnect] Preview URL:', fileUrl);
+
+                                    // Try multiple selectors for Gradio video component
+                                    const previewContainer = document.querySelector('#k1_preview_video');
+                                    console.log('[Reconnect] Preview container:', previewContainer);
+
+                                    if (previewContainer) {
+                                        // Find video element within the container
+                                        let videoEl = previewContainer.querySelector('video');
+                                        console.log('[Reconnect] Video element:', videoEl);
+
+                                        if (videoEl) {
+                                            // Update video source
+                                            videoEl.src = fileUrl;
+                                            videoEl.load();
+                                            videoEl.play().catch(e => console.log('[Reconnect] Autoplay blocked:', e));
+                                            console.log('[Reconnect] Updated video src');
+                                        } else {
+                                            // Video element might not exist yet - try to create it
+                                            console.log('[Reconnect] No video element found, trying source element');
+                                            const sourceEl = previewContainer.querySelector('source');
+                                            if (sourceEl) {
+                                                sourceEl.src = fileUrl;
+                                                const video = sourceEl.parentElement;
+                                                if (video && video.tagName === 'VIDEO') {
+                                                    video.load();
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        console.log('[Reconnect] Preview container #k1_preview_video not found');
+                                        // Try alternative selector
+                                        const altVideo = document.querySelector('[data-testid="video"] video');
+                                        if (altVideo) {
+                                            altVideo.src = fileUrl;
+                                            altVideo.load();
+                                            console.log('[Reconnect] Updated via alternative selector');
+                                        }
+                                    }
+                                }
+
+                                // Log gallery info for debugging
+                                if (data.videos && data.videos.length > 0) {
+                                    console.log('[Reconnect] Videos available:', data.videos.length);
+                                    data.videos.forEach((v, i) => {
+                                        const url = '/gradio_api/file=' + v.path.replace(/\\/g, '/');
+                                        console.log(`  [${i}] ${v.label}: ${url}`);
+                                    });
+                                }
+
+                                return data.status;
+                            } catch (e) {
+                                console.error('[Reconnect] Error:', e);
+                                return 'Reconnect failed: ' + e.message;
+                            }
+                        }
+                    """
                 )
 
                 stop_decode_btn.click(
@@ -2819,44 +2811,19 @@ def create_interface():
                             info="Number of frames to blend at join points (0=off). Smoothly transitions color/brightness to reduce flash."
                         )
 
-                        with gr.Accordion("End Frame Noise Scheduling (for Video Joining)", open=False):
+                        with gr.Accordion("End Frame Blending (for Video Joining)", open=False):
                             gr.Markdown("""
-                            **Noise Scheduling for Video Joining:** Control how the end/target video frames are revealed during generation.
-                            - **Fixed** (default): Clean end frames throughout - preserves original behavior, smooth transitions.
-                            - **Progressive**: End frames start hidden (noisy) and gradually emerge - can help with difficult transitions.
-                            - **Symmetric**: End frames follow same noise schedule as middle frames.
+                            **End Blend Weight:** Control how the final end frames are blended in video join mode.
+                            - **0.0** (default): Use denoised result for smooth transitions.
+                            - **1.0**: Use target end frame exactly (may cause visible jumps).
 
-                            **Tip:** Use "fixed" with 0.0 noise (default) for most cases. Try "progressive" if you see glitches at join points.
+                            **Tip:** Keep at 0.0 for smooth transitions. Increase only if you need exact frame matching.
                             """)
-                            v2v_end_noise_schedule = gr.Dropdown(
-                                label="End Noise Schedule",
-                                choices=["fixed", "progressive", "symmetric"],
-                                value="fixed",
-                                info="How end frames are treated during denoising"
+                            v2v_end_blend_weight = gr.Slider(
+                                minimum=0.0, maximum=1.0, value=0.0, step=0.05,
+                                label="End Blend Weight",
+                                info="0.0 = smooth denoised result, 1.0 = exact target (may jump)"
                             )
-                            with gr.Row():
-                                v2v_end_noise_start = gr.Slider(
-                                    minimum=0.0, maximum=1.0, value=0.0, step=0.05,
-                                    label="End Noise Start",
-                                    info="Initial noise level (0.0 = clean, 1.0 = fully hidden)"
-                                )
-                                v2v_end_noise_end = gr.Slider(
-                                    minimum=0.0, maximum=1.0, value=0.0, step=0.05,
-                                    label="End Noise End",
-                                    info="Final noise level (0.0 = fully revealed)"
-                                )
-                            with gr.Row():
-                                v2v_start_noise_schedule = gr.Dropdown(
-                                    label="Start Noise Schedule",
-                                    choices=["fixed", "progressive"],
-                                    value="fixed",
-                                    info="Usually keep 'fixed' with level 0.0 for clean anchoring"
-                                )
-                                v2v_start_noise_level = gr.Slider(
-                                    minimum=0.0, maximum=1.0, value=0.0, step=0.05,
-                                    label="Start Noise Level",
-                                    info="Noise level for start frames (0.0 = clean anchor)"
-                                )
 
                         v2v_mode = gr.Dropdown(
                             label="Mode",
@@ -2927,9 +2894,9 @@ def create_interface():
                                 info="Process input video with light denoising instead of continuation/joining"
                             )
                             v2v_denoise_strength = gr.Slider(
-                                minimum=0.05, maximum=0.5, value=0.2, step=0.05,
+                                minimum=0.05, maximum=1.0, value=0.2, step=0.05,
                                 label="Denoise Strength",
-                                info="Amount of denoising (0.1-0.3 recommended). Higher = more change."
+                                info="Low (0.1-0.3) = subtle refinement, Medium (0.4-0.6) = noticeable changes, High (0.7-1.0) = major regeneration"
                             )
 
                         with gr.Accordion("NABLA Sparse Attention Settings", open=False):
@@ -3031,15 +2998,15 @@ def create_interface():
 
                 with gr.Accordion("Model Settings & Performance", open=True):
                     with gr.Row():
-                        v2v_use_mixed_weights = gr.Checkbox(label="Use Mixed Weights", value=False, info="Preserve fp32 for critical layers (norms, embeddings)")
+                        v2v_use_mixed_weights = gr.Checkbox(label="Use Mixed Weights", value=True, info="Preserve fp32 for critical layers (norms, embeddings)")
                         v2v_use_int8 = gr.Checkbox(label="Use int8 matmul (legacy)", value=False, info="Legacy INT8 quantization")
-                        v2v_use_torch_compile = gr.Checkbox(label="Use torch.compile", value=False, info="Slower startup (2-5 min) but faster inference")
+                        v2v_use_torch_compile = gr.Checkbox(label="Use torch.compile", value=True, info="Slower startup (2-5 min) but faster inference")
                         v2v_use_magcache = gr.Checkbox(label="Use MagCache", value=False, info="Skip redundant computations (50-step models only)")
                     with gr.Row():
                         v2v_use_sdnq = gr.Checkbox(label="Use SDNQ (recommended)", value=False, info="20-40% faster than legacy INT8 with auto-tuned Triton kernels")
                         v2v_sdnq_weights_dtype = gr.Radio(choices=["int8", "fp8", "int4"], label="SDNQ Weights", value="int8", info="int8=best balance, fp8=H100+, int4=experimental")
-                        v2v_sdnq_triton_mm = gr.Checkbox(label="Triton MM", value=True, info="Use Triton int8 kernel (faster on 4090/5090)")
-                        v2v_sdnq_compile = gr.Checkbox(label="torch.compile SDNQ", value=True, info="Compile SDNQ kernels (better throughput after warmup)")
+                        v2v_sdnq_triton_mm = gr.Checkbox(label="Triton MM", value=False, info="Use Triton int8 kernel (faster on 4090/5090)")
+                        v2v_sdnq_compile = gr.Checkbox(label="torch.compile SDNQ", value=False, info="Compile SDNQ kernels (better throughput after warmup)")
                     with gr.Row():
                         v2v_enable_block_swap = gr.Checkbox(label="Enable Block Swap", value=True, info="Required for 24GB GPUs")
                         v2v_offload_inactive = gr.Checkbox(label="Offload Inactive Models", value=False, info="Offload text encoder & VAE to CPU when not in use (auto-enabled with block swap)")
@@ -3201,8 +3168,7 @@ def create_interface():
                         v2v_enable_denoise, v2v_denoise_strength,
                         v2v_enable_ultravico, v2v_ultravico_alpha, v2v_ultravico_suppress_harmonics, v2v_ultravico_beta,
                         v2v_use_sdnq, v2v_sdnq_weights_dtype, v2v_sdnq_triton_mm, v2v_sdnq_compile,
-                        v2v_end_noise_schedule, v2v_end_noise_start, v2v_end_noise_end,
-                        v2v_start_noise_schedule, v2v_start_noise_level
+                        v2v_end_blend_weight
                     ],
                     outputs=[v2v_output, v2v_preview_output, v2v_batch_progress, v2v_progress_text]
                 )
@@ -3385,94 +3351,6 @@ def create_interface():
                     fn=refresh_recent_outputs,
                     inputs=[recent_output_folder, recent_max_files],
                     outputs=[recent_gallery, recent_status]
-                )
-
-            # =====================================================================
-            # JOB QUEUE TAB - Browser-Independent Generation
-            # =====================================================================
-            with gr.Tab("Job Queue", id="queue"):
-                gr.Markdown("""
-                ## Browser-Independent Generation
-
-                **Video generation continues even if you close your browser!**
-
-                Using Gradio's built-in queue system, jobs continue processing server-side.
-
-                ### How It Works:
-                1. Click "Generate Video" - job runs on the server
-                2. If browser disconnects, generation continues in the background
-                3. Videos are saved to the `outputs/` folder automatically
-                4. Use the **Recent Outputs** tab to find completed videos after reconnecting
-
-                ### Notes:
-                - One job runs at a time (queue processes sequentially)
-                - Check the Recent Outputs tab to see all completed videos
-                """)
-
-                with gr.Row():
-                    queue_status_display = gr.Textbox(
-                        label="Queue Status",
-                        interactive=False,
-                        value="Click 'Refresh Queue' to see status"
-                    )
-                    refresh_queue_btn = gr.Button("Refresh Queue", variant="secondary")
-
-                with gr.Row():
-                    job_list_display = gr.Textbox(
-                        label="Jobs (Recent 20)",
-                        interactive=False,
-                        lines=15,
-                        value="Click 'Refresh Queue' to see jobs"
-                    )
-
-                with gr.Row():
-                    job_id_input = gr.Textbox(
-                        label="Job ID",
-                        placeholder="Enter job ID to cancel or view",
-                        scale=2
-                    )
-                    cancel_job_btn = gr.Button("Cancel Job", variant="stop")
-                    clear_completed_btn = gr.Button("Clear Completed Jobs", variant="secondary")
-
-                with gr.Row():
-                    queue_action_status = gr.Textbox(
-                        label="Action Result",
-                        interactive=False
-                    )
-
-                with gr.Row():
-                    with gr.Column():
-                        job_video_output = gr.Video(label="Job Video Output")
-                    with gr.Column():
-                        job_preview_output = gr.Video(label="Job Preview")
-
-                with gr.Row():
-                    job_status_display = gr.Textbox(label="Job Status", interactive=False)
-                    job_progress_display = gr.Textbox(label="Job Progress", interactive=False)
-
-                poll_job_btn = gr.Button("Check Job Status", variant="primary")
-
-                # Event handlers
-                refresh_queue_btn.click(
-                    fn=get_queue_display,
-                    outputs=[queue_status_display, job_list_display]
-                )
-
-                cancel_job_btn.click(
-                    fn=cancel_queued_job,
-                    inputs=[job_id_input],
-                    outputs=[queue_action_status]
-                )
-
-                clear_completed_btn.click(
-                    fn=clear_completed_jobs,
-                    outputs=[queue_action_status]
-                )
-
-                poll_job_btn.click(
-                    fn=poll_job_status,
-                    inputs=[job_id_input],
-                    outputs=[job_video_output, job_preview_output, job_status_display, job_progress_display]
                 )
 
     return demo

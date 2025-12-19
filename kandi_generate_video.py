@@ -570,38 +570,12 @@ def parse_args():
         help="Norm threshold for APG guidance clipping (default: 55.0)"
     )
 
-    # Noise scheduling for image-to-image-video and video join modes
+    # End frame blending for video join modes
     parser.add_argument(
-        "--end_noise_schedule",
-        type=str,
-        default="progressive",
-        choices=["progressive", "fixed", "symmetric"],
-        help="Noise schedule for end/target frames. 'progressive': noise decreases from end_noise_start to end_noise_end. 'fixed': constant noise level. 'symmetric': match timestep like middle region."
-    )
-    parser.add_argument(
-        "--end_noise_start",
-        type=float,
-        default=1.0,
-        help="Initial noise level for end frames (1.0 = full noise, 0.0 = clean). Default: 1.0"
-    )
-    parser.add_argument(
-        "--end_noise_end",
+        "--end_blend_weight",
         type=float,
         default=0.0,
-        help="Final noise level for end frames (only for progressive schedule). Default: 0.0"
-    )
-    parser.add_argument(
-        "--start_noise_schedule",
-        type=str,
-        default="fixed",
-        choices=["fixed", "progressive"],
-        help="Noise schedule for start frames. Usually 'fixed' with level 0.0 for clean anchoring."
-    )
-    parser.add_argument(
-        "--start_noise_level",
-        type=float,
-        default=0.0,
-        help="Noise level for start frames (0.0 = clean anchoring). Default: 0.0"
+        help="Final blend weight for end frames in v2v join mode. 0.0 = use denoised result (smooth transition), 1.0 = use target latent (may cause jump). Default: 0.0"
     )
 
     # VAE temporal chunking configuration
@@ -1133,13 +1107,16 @@ if __name__ == "__main__":
         if pipe.offload or force_offload:
             pipe.vae = pipe.vae.to(pipe.device_map["vae"], non_blocking=True)
 
-        # Encode video to latents
+        # Encode video to latents (v2v_mode ensures edge-safe tiling)
         print(f">>> Encoding video to latent space...", flush=True)
         video_latents, scale_factor, num_frames = encode_video_to_latents(
             args.video,
             pipe.vae,
             pipe.device_map["vae"],
-            alignment=alignment
+            alignment=alignment,
+            v2v_mode=True,  # Use edge-safe tiling for v2v to prevent pixel loss
+            target_width=args.width,
+            target_height=args.height
         )
 
         # Offload VAE after encoding
@@ -1167,9 +1144,20 @@ if __name__ == "__main__":
         if LatentPreviewer is not None and args.preview is not None and args.preview > 0:
             print(f"\n>>> DENOISE: Initializing previewer with preview={args.preview}")
             try:
-                # Use the video latents shape for preview initialization
-                latent_frames = video_latents.shape[0]
-                initial_latent = video_latents.permute(3, 0, 1, 2).to(device=pipe.device_map["dit"], dtype=torch.bfloat16)
+                # For DENOISE mode, the previewer needs the NOISE (not clean latents)
+                # to correctly subtract noise during preview generation.
+                # Generate the same noise that will be used in generate_denoise using the same seed.
+                # Must match: device, dtype, shape, and seed exactly for identical noise.
+                g_preview = torch.Generator(device=pipe.device_map["dit"])
+                g_preview.manual_seed(args.seed)
+                initial_noise = torch.randn(
+                    video_latents.shape,
+                    device=pipe.device_map["dit"],
+                    dtype=video_latents.dtype,  # Match the actual latents dtype
+                    generator=g_preview
+                )
+                # Permute to match previewer expected format: [C, F, H, W]
+                initial_latent = initial_noise.permute(3, 0, 1, 2).to(dtype=torch.bfloat16)
 
                 timesteps = torch.linspace(args.denoise_strength, 0, num_steps + 1, device=pipe.device_map["dit"])
                 timesteps = args.scheduler_scale * timesteps / (1 + (args.scheduler_scale - 1) * timesteps)
@@ -1361,12 +1349,7 @@ if __name__ == "__main__":
                 use_apg=args.use_apg,
                 apg_momentum=args.apg_momentum,
                 apg_norm_threshold=args.apg_norm_threshold,
-                # Noise scheduling for end frames
-                end_noise_schedule=args.end_noise_schedule,
-                end_noise_start=args.end_noise_start,
-                end_noise_end=args.end_noise_end,
-                start_noise_schedule=args.start_noise_schedule,
-                start_noise_level=args.start_noise_level,
+                end_blend_weight=args.end_blend_weight,
             )
 
             # Save output video directly (no concatenation needed unlike video join mode)
@@ -1493,12 +1476,7 @@ if __name__ == "__main__":
                 use_apg=args.use_apg,
                 apg_momentum=args.apg_momentum,
                 apg_norm_threshold=args.apg_norm_threshold,
-                # Noise scheduling for end frames
-                end_noise_schedule=args.end_noise_schedule,
-                end_noise_start=args.end_noise_start,
-                end_noise_end=args.end_noise_end,
-                start_noise_schedule=args.start_noise_schedule,
-                start_noise_level=args.start_noise_level,
+                end_blend_weight=args.end_blend_weight,
             )
 
             # Concatenate: video1 + generated middle + video2
@@ -1715,12 +1693,7 @@ if __name__ == "__main__":
                 use_apg=args.use_apg,
                 apg_momentum=args.apg_momentum,
                 apg_norm_threshold=args.apg_norm_threshold,
-                # Noise scheduling for end frames
-                end_noise_schedule=args.end_noise_schedule,
-                end_noise_start=args.end_noise_start,
-                end_noise_end=args.end_noise_end,
-                start_noise_schedule=args.start_noise_schedule,
-                start_noise_level=args.start_noise_level,
+                end_blend_weight=args.end_blend_weight,
             )
 
             # Concatenate input video with generated frames

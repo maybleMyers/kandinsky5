@@ -720,9 +720,6 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
         self._manual_tile_sample_min_num_frames = None
         self._manual_tile_sample_stride_num_frames = None
 
-        # Flag to skip tile setup in encode() - used by v2v_safe_tiling context
-        self._skip_tile_setup = False
-
     def _encode(self, x: torch.Tensor) -> torch.Tensor:
         _, _, num_frames, height, width = x.shape
 
@@ -758,17 +755,14 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
                 [`~models.autoencoder_kl.AutoencoderKLOutput`] is returned,
                 otherwise a plain `tuple` is returned.
         """
-        # Skip tile setup if flag is set (used by v2v_safe_tiling context to preserve
-        # conservative tile sizes that were set externally)
-        if not self._skip_tile_setup:
-            if opt_tiling:
-                tile_size, tile_stride = self.get_enc_optimal_tiling(x.shape)
-            else:
-                b, _, f, h, w = x.shape
-                tile_size, tile_stride = (b, f, h, w), (f, h, w)
-            if tile_size != self.tile_size:
-                self.tile_size = tile_size
-                self.apply_tiling(tile_size, tile_stride)
+        if opt_tiling:
+            tile_size, tile_stride = self.get_enc_optimal_tiling(x.shape)
+        else:
+            b, _, f, h, w = x.shape
+            tile_size, tile_stride = (b, f, h, w), (f, h, w)
+        if tile_size != self.tile_size:
+            self.tile_size = tile_size
+            self.apply_tiling(tile_size, tile_stride)
 
         h = self._encode(x)
 
@@ -867,75 +861,39 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
         self, z: torch.Tensor, return_dict: bool = True
     ) -> Union[DecoderOutput, torch.Tensor]:
         """
-        Conservative decoding: uses small fixed tile sizes guaranteed to fit in memory.
-        Falls back from aggressive decode on OOM.
+        Conservative decoding: resolution-based safe tiling.
+        Uses smaller tiles to guarantee memory safety at the cost of speed.
         """
         _, _, num_frames, height, width = z.shape
-        h_pix = height * self.spatial_compression_ratio  # latent to pixel
-        w_pix = width * self.spatial_compression_ratio
+        tile_latent_min_height = (
+            self.tile_sample_min_height // self.spatial_compression_ratio
+        )
+        tile_latent_min_width = (
+            self.tile_sample_stride_width // self.spatial_compression_ratio
+        )
+        tile_latent_min_num_frames = (
+            self.tile_sample_min_num_frames // self.temporal_compression_ratio
+        )
 
-        # Save original settings
-        old_h = self.tile_sample_min_height
-        old_w = self.tile_sample_min_width
-        old_sh = self.tile_sample_stride_height
-        old_sw = self.tile_sample_stride_width
-        old_f = self.tile_sample_min_num_frames
-        old_sf = self.tile_sample_stride_num_frames
+        print(f"\nVAE Conservative Mode: Using {self.tile_sample_min_height}x{self.tile_sample_min_width} tiles")
 
-        # Clear cache to maximize available memory
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        if self.use_framewise_decoding and num_frames > (
+            tile_latent_min_num_frames + 1
+        ):
+            return self._temporal_tiled_decode(z, return_dict=return_dict)
 
-        # CONSERVATIVE MODE: Force small tiles that are guaranteed to fit
-        # Using 192x192 tiles with 64px overlap (128px stride)
-        tile_h = min(192, h_pix)
-        tile_w = min(192, w_pix)
-        stride_h = tile_h - 64 if tile_h > 64 else tile_h
-        stride_w = tile_w - 64 if tile_w > 64 else tile_w
+        if self.use_tiling and (
+            width > tile_latent_min_width or height > tile_latent_min_height
+        ):
+            return self.tiled_decode(z, return_dict=return_dict)
 
-        # Apply tile settings
-        self.tile_sample_min_height = int(tile_h)
-        self.tile_sample_min_width = int(tile_w)
-        self.tile_sample_stride_height = int(stride_h)
-        self.tile_sample_stride_width = int(stride_w)
-        # Small temporal chunks for memory safety
-        self.tile_sample_min_num_frames = 8
-        self.tile_sample_stride_num_frames = 4
+        z = self.post_quant_conv(z)
+        dec = self.decoder(z)
 
-        tile_latent_min_height = self.tile_sample_min_height // self.spatial_compression_ratio
-        tile_latent_min_width = self.tile_sample_min_width // self.spatial_compression_ratio
-        tile_latent_min_num_frames = self.tile_sample_min_num_frames // self.temporal_compression_ratio
+        if not return_dict:
+            return (dec,)
 
-        print(f"\nVAE Conservative Mode: Using {self.tile_sample_min_height}x{self.tile_sample_min_width} tiles "
-              f"(stride: {self.tile_sample_stride_height}x{self.tile_sample_stride_width}), "
-              f"{self.tile_sample_min_num_frames} temporal frames")
-
-        try:
-            if self.use_framewise_decoding and num_frames > (
-                tile_latent_min_num_frames + 1
-            ):
-                return self._temporal_tiled_decode(z, return_dict=return_dict)
-
-            if self.use_tiling and (
-                width > tile_latent_min_width or height > tile_latent_min_height
-            ):
-                return self.tiled_decode(z, return_dict=return_dict)
-
-            z = self.post_quant_conv(z)
-            dec = self.decoder(z)
-
-            if not return_dict:
-                return (dec,)
-
-            return DecoderOutput(sample=dec)
-        finally:
-            # Restore original settings
-            self.tile_sample_min_height = old_h
-            self.tile_sample_min_width = old_w
-            self.tile_sample_stride_height = old_sh
-            self.tile_sample_stride_width = old_sw
-            self.tile_sample_min_num_frames = old_f
-            self.tile_sample_stride_num_frames = old_sf
+        return DecoderOutput(sample=dec)
 
     @apply_forward_hook
     def decode(
@@ -1093,7 +1051,6 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
                     height_lim = tile_latent_min_height
                 else:
                     # Calculate actual distance to next tile position (in latent space)
-                    # i_positions are in pixel space, divide by compression ratio for latent
                     actual_stride_h = (i_positions[i_idx + 1] - i_positions[i_idx]) // self.spatial_compression_ratio
                     height_lim = actual_stride_h
 

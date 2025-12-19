@@ -1,5 +1,6 @@
 from math import floor, sqrt
 from typing import Union, Tuple, Optional
+from contextlib import contextmanager, nullcontext
 
 import transformers
 import torch
@@ -9,6 +10,7 @@ from torchvision.transforms import ToPILImage
 from PIL import Image
 
 from .generation_utils import generate_sample_i2v, generate_sample_v2v, generate_sample_denoise
+from .models import vae_v2v
 
 torch._dynamo.config.suppress_errors = True
 torch._dynamo.config.verbose = True
@@ -19,6 +21,70 @@ MAX_DIMENSION = 2048  # Maximum pixels per dimension to fit within RoPE max_pos=
 # Memory limit for chunked operations (from musubi-tuner)
 # Reduce if you see OOM during encoding
 MEMORY_LIMIT_MB = 512
+
+
+# =============================================================================
+# V2V-safe tiling context manager
+# =============================================================================
+
+@contextmanager
+def v2v_safe_tiling(vae):
+    """
+    Context manager that temporarily replaces VAE's tiled_encode/decode methods
+    with v2v-safe versions that ensure full edge coverage, and forces spatial
+    tiling to avoid OOM during v2v encoding.
+
+    The v2v versions add extra edge tiles when the image dimensions don't align
+    perfectly with the tile stride, preventing loss of edge pixels.
+
+    Usage:
+        with v2v_safe_tiling(vae):
+            latents = vae.encode(video_tensor, opt_tiling=True).latent_dist.mode()
+    """
+    # Get the v2v-safe methods from the AutoencoderKLHunyuanVideo class in vae_v2v
+    v2v_vae_class = vae_v2v.AutoencoderKLHunyuanVideo
+
+    # Save original methods
+    original_tiled_encode = vae.tiled_encode
+    original_tiled_decode = vae.tiled_decode
+
+    # Save original tile sizes (get_enc_optimal_tiling can set these to full resolution,
+    # which bypasses spatial tiling and causes OOM during v2v)
+    original_tile_min_height = vae.tile_sample_min_height
+    original_tile_min_width = vae.tile_sample_min_width
+    original_tile_stride_height = vae.tile_sample_stride_height
+    original_tile_stride_width = vae.tile_sample_stride_width
+
+    try:
+        # Replace with v2v-safe methods (bound to this vae instance)
+        import types
+        vae.tiled_encode = types.MethodType(v2v_vae_class.tiled_encode, vae)
+        vae.tiled_decode = types.MethodType(v2v_vae_class.tiled_decode, vae)
+
+        # Force conservative tile sizes to ensure spatial tiling is always used
+        # This prevents OOM when get_enc_optimal_tiling sets tiles to full resolution
+        vae.tile_sample_min_height = 256
+        vae.tile_sample_min_width = 256
+        vae.tile_sample_stride_height = 192
+        vae.tile_sample_stride_width = 192
+
+        # Set flag to skip tile setup in encode() so our settings aren't overwritten
+        vae._skip_tile_setup = True
+
+        yield vae
+    finally:
+        # Restore original methods
+        vae.tiled_encode = original_tiled_encode
+        vae.tiled_decode = original_tiled_decode
+
+        # Restore original tile sizes
+        vae.tile_sample_min_height = original_tile_min_height
+        vae.tile_sample_min_width = original_tile_min_width
+        vae.tile_sample_stride_height = original_tile_stride_height
+        vae.tile_sample_stride_width = original_tile_stride_width
+
+        # Reset the skip flag
+        vae._skip_tile_setup = False
 
 
 # =============================================================================
@@ -549,7 +615,7 @@ def get_conditioning_video_and_image(video_path, end_image, num_frames, vae, dev
     return start_latents, end_latents, scale_factor
 
 
-def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24, max_frames=None, use_deterministic=True):
+def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24, max_frames=None, use_deterministic=None, v2v_mode=False, target_width=None, target_height=None):
     """
     Load a video file and encode to latent space with proper temporal compression.
 
@@ -557,9 +623,10 @@ def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24
     Videos are processed in small chunks to avoid OOM.
 
     Uses musubi-tuner style encoding with:
-    - Deterministic .mode() sampling for consistent results
     - Memory-efficient chunked processing for high-res/long videos
     - Proper temporal blending at chunk boundaries
+    - For V2V: .sample() encoding to preserve detail and color variance
+    - For I2V: .mode() encoding for consistency
 
     Args:
         video_path: Path to the video file
@@ -568,13 +635,25 @@ def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24
         alignment: Pixel alignment for resizing
         target_fps: Target FPS for frame extraction
         max_frames: Maximum number of video frames to process (None = all frames)
-        use_deterministic: If True, use .mode() for deterministic encoding (musubi-tuner style).
-                          If False, use .sample() for stochastic encoding.
+        use_deterministic: If True, use .mode() for deterministic encoding.
+                          If False, use .sample() for stochastic encoding (preserves detail).
+                          If None (default), auto-selects based on v2v_mode:
+                          - V2V mode: .sample() (preserves variance/detail)
+                          - I2V mode: .mode() (deterministic for conditioning)
+        v2v_mode: If True, use v2v-safe tiling that ensures full edge coverage.
+                  This prevents loss of edge pixels when dimensions don't align with tile stride.
+        target_width: Optional target width for resizing (enables upscaling). GUI ensures valid multiples.
+        target_height: Optional target height for resizing (enables upscaling). GUI ensures valid multiples.
 
     Returns:
         Tuple of (latents, scale_factor, num_video_frames)
         latents: Tensor of shape [num_latent_frames, H, W, C]
     """
+    # Auto-select encoding mode based on v2v_mode if not explicitly specified
+    # V2V benefits from .sample() to preserve variance (detail/color)
+    # I2V conditioning frames use .mode() for consistency
+    if use_deterministic is None:
+        use_deterministic = not v2v_mode  # V2V uses sample, I2V uses mode
     import av
     import numpy as np
     import torch.nn.functional as F_torch
@@ -610,10 +689,24 @@ def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24
     num_video_frames = len(pil_frames)
     print(f">>> Extracted {num_video_frames} video frames", flush=True)
 
-    # Determine target size from first frame
-    first_image = F.pil_to_tensor(pil_frames[0]).unsqueeze(0)
-    first_image, scale_factor = resize_image(first_image, max_area=MAX_AREA, alignment=alignment)
-    target_h, target_w = first_image.shape[2], first_image.shape[3]
+    # Determine target size
+    if target_width is not None and target_height is not None:
+        # Use provided target dimensions (GUI ensures they're valid multiples of 64)
+        target_w = target_width
+        target_h = target_height
+        scale_factor = 1.0  # User explicitly chose the resolution
+    else:
+        # Detect from first frame (existing behavior)
+        first_image = F.pil_to_tensor(pil_frames[0]).unsqueeze(0)
+        first_image, scale_factor = resize_image(first_image, max_area=MAX_AREA, alignment=alignment)
+        target_h, target_w = first_image.shape[2], first_image.shape[3]
+
+    # Resize frames if needed
+    orig_w, orig_h = pil_frames[0].size
+    if orig_w != target_w or orig_h != target_h:
+        from PIL import Image
+        print(f">>> Resizing frames from {orig_w}x{orig_h} to {target_w}x{target_h}")
+        pil_frames = [frame.resize((target_w, target_h), Image.LANCZOS) for frame in pil_frames]
 
     vae_dtype = next(vae.parameters()).dtype
 
@@ -636,15 +729,23 @@ def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24
                   (pixels_per_frame > 1024 * 768) or \
                   (total_pixels * 4 > free_mem * 0.3)  # Video tensor would use >30% of free mem
 
-    if use_chunked:
-        print(f">>> High-res/long video detected, using chunked encoding directly...", flush=True)
-        latents = _encode_video_chunked(pil_frames, num_video_frames, target_h, target_w,
-                                         vae, device, vae_dtype, expected_latent_frames,
-                                         use_deterministic=use_deterministic)
-    else:
-        # Try VAE's built-in encoding for smaller videos
-        latents = _encode_video_full(pil_frames, num_video_frames, target_h, target_w,
-                                      vae, device, vae_dtype, use_deterministic=use_deterministic)
+    # Use v2v-safe tiling context when in v2v mode to prevent edge pixel loss
+    tiling_context = v2v_safe_tiling(vae) if v2v_mode else nullcontext()
+
+    with tiling_context:
+        if v2v_mode:
+            print(f">>> V2V mode: using edge-safe tiling", flush=True)
+
+        if use_chunked:
+            print(f">>> High-res/long video detected, using chunked encoding directly...", flush=True)
+            latents = _encode_video_chunked(pil_frames, num_video_frames, target_h, target_w,
+                                             vae, device, vae_dtype, expected_latent_frames,
+                                             use_deterministic=use_deterministic)
+        else:
+            # Try VAE's built-in encoding for smaller videos
+            latents = _encode_video_full(pil_frames, num_video_frames, target_h, target_w,
+                                          vae, device, vae_dtype, use_deterministic=use_deterministic,
+                                          v2v_mode=v2v_mode)
 
     num_latent_frames = latents.shape[0]
 
@@ -654,12 +755,19 @@ def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24
     return latents, scale_factor, num_video_frames
 
 
-def _encode_video_full(pil_frames, num_video_frames, target_h, target_w, vae, device, vae_dtype, use_deterministic=True):
+def _encode_video_full(pil_frames, num_video_frames, target_h, target_w, vae, device, vae_dtype, use_deterministic=True, v2v_mode=False):
     """
     Encode video using VAE's built-in temporal tiled encoding.
     Works well for lower resolutions or shorter videos.
 
-    Uses musubi-tuner style deterministic encoding with .mode() when use_deterministic=True.
+    Encoding mode:
+    - use_deterministic=True: .mode() returns mean of Gaussian (consistent but loses variance)
+    - use_deterministic=False: .sample() draws from distribution (preserves detail/color)
+
+    For V2V, .sample() is recommended to preserve original video detail and color variance.
+
+    When v2v_mode=True, uses opt_tiling=False to preserve the conservative tile sizes
+    set by the v2v_safe_tiling context manager (prevents OOM from dynamic tile sizing).
     """
     import torch.nn.functional as F_torch
 
@@ -680,6 +788,8 @@ def _encode_video_full(pil_frames, num_video_frames, target_h, target_w, vae, de
         del frame_tensors
 
         # Use VAE's built-in tiled encoding (handles temporal chunking with proper blending)
+        # In v2v mode, the v2v_safe_tiling context sets _skip_tile_setup flag to preserve
+        # conservative tile sizes (so opt_tiling value doesn't matter in that case)
         print(f">>> Using VAE's built-in temporal tiled encoding with blending...", flush=True)
         latent_dist = vae.encode(video_tensor, opt_tiling=True).latent_dist
         # Use .mode() for deterministic or .sample() for stochastic (musubi-tuner uses mode)
@@ -699,8 +809,13 @@ def _encode_video_chunked(pil_frames, num_video_frames, target_h, target_w, vae,
     Encode video in smaller chunks for high-resolution or long videos.
     Mirrors the VAE's _temporal_tiled_encode but loads frames on-demand to save memory.
 
-    Uses musubi-tuner style techniques:
-    - Deterministic .mode() sampling for consistent results
+    Encoding mode:
+    - use_deterministic=True: .mode() returns mean of Gaussian (consistent but loses variance)
+    - use_deterministic=False: .sample() draws from distribution (preserves detail/color)
+
+    For V2V, .sample() is recommended to preserve original video detail and color variance.
+
+    Also uses:
     - Memory-efficient on-demand frame loading
     - Proper temporal blending at chunk boundaries
     """
@@ -786,7 +901,7 @@ def _encode_video_chunked(pil_frames, num_video_frames, target_h, target_w, vae,
                 del chunk_tensors
 
                 # Encode this chunk - VAE will apply spatial tiling based on our settings
-                # Using opt_tiling=False to use our manually set tile dimensions
+                # Using opt_tiling=True so VAE computes optimal tiling based on our manually set tile dimensions
                 latent_dist = vae.encode(chunk, opt_tiling=False).latent_dist
                 # Use .mode() for deterministic or .sample() for stochastic (musubi-tuner uses mode)
                 latent_chunk = latent_dist.mode() if use_deterministic else latent_dist.sample()
@@ -1461,9 +1576,9 @@ class Kandinsky5DenoisePipeline:
         frames_per_chunk = int(chunk_seconds * 24 / 4 + 1)  # Match Kandinsky frame rate
         print(f">>> Processing video in chunks of ~{chunk_seconds}s ({frames_per_chunk} frames per chunk)", flush=True)
 
-        # Encode full video to latents
+        # Encode full video to latents (v2v_mode ensures edge-safe tiling)
         video_latents, scale_factor, total_frames = encode_video_to_latents(
-            video_path, self.vae, self.device_map["vae"], alignment=alignment
+            video_path, self.vae, self.device_map["vae"], alignment=alignment, v2v_mode=True
         )
 
         # Offload VAE after encoding
