@@ -2026,16 +2026,15 @@ def generate_denoise(
     # Save the clean first frame if we need to preserve it
     first_frame_clean = latents[0:1].clone() if preserve_first_frame else None
 
-    # Store clean latents and noise for flow-matching trajectory (like V2V continuation)
-    # This ensures frames stay on the correct trajectory throughout denoising
-    clean_latents = latents.clone()
-
     # Generate noise and create noisy latents at start_timestep
     # Flow matching: x_t = (1-t)*x_0 + t*noise
+    # Higher start_timestep = more noise = more different from original
     noise = torch.randn_like(latents)
-    stored_noise = noise.clone()  # Store for reapplying flow-matching at each step
     t = start_timestep
     img = (1 - t) * latents + t * noise
+
+    # Debug: verify noise mixing ratio
+    print(f">>> V2V Denoise: strength={start_timestep:.2f} -> {(1-t)*100:.0f}% original + {t*100:.0f}% noise", flush=True)
 
     # Restore the first frame to clean (no noise) if preserving
     if preserve_first_frame:
@@ -2047,11 +2046,6 @@ def generate_denoise(
     for i, (timestep, timestep_diff) in enumerate(tqdm(list(zip(timesteps[:-1], torch.diff(timesteps))))):
         time = timestep.unsqueeze(0)
         t = timestep.item()
-
-        # Reapply flow-matching to keep frames on correct trajectory (like V2V continuation)
-        # x_t = (1-t)*x_clean + t*noise - keeps latents on the expected trajectory at each step
-        flow_matched = (1 - t) * clean_latents + t * stored_noise
-        img[1:] = flow_matched[1:]  # All frames except first stay on trajectory
 
         if model.visual_cond:
             visual_cond = torch.zeros_like(img)

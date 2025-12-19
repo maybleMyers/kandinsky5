@@ -2914,9 +2914,9 @@ def create_interface():
                                 info="Process input video with light denoising instead of continuation/joining"
                             )
                             v2v_denoise_strength = gr.Slider(
-                                minimum=0.05, maximum=0.5, value=0.2, step=0.05,
+                                minimum=0.05, maximum=1.0, value=0.2, step=0.05,
                                 label="Denoise Strength",
-                                info="Amount of denoising (0.1-0.3 recommended). Higher = more change."
+                                info="Low (0.1-0.3) = subtle refinement, Medium (0.4-0.6) = noticeable changes, High (0.7-1.0) = major regeneration"
                             )
 
                         with gr.Accordion("NABLA Sparse Attention Settings", open=False):
