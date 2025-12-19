@@ -18,18 +18,11 @@ import io
 from PIL import Image
 import tiktoken
 import imageio_ffmpeg
+import av
 
 def get_ffmpeg_path():
     """Get ffmpeg executable path from imageio_ffmpeg."""
     return imageio_ffmpeg.get_ffmpeg_exe()
-
-def get_ffprobe_path():
-    """Get ffprobe executable path from imageio_ffmpeg."""
-    ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
-    # ffprobe is in the same directory as ffmpeg
-    if sys.platform == 'win32':
-        return ffmpeg_path.replace('ffmpeg.exe', 'ffprobe.exe')
-    return ffmpeg_path.replace('ffmpeg', 'ffprobe')
 
 # Job queue system for browser-independent generation
 from job_queue import get_queue, JobStatus
@@ -1779,22 +1772,12 @@ def decode_from_latents(
 
 
 def extract_video_metadata(video_path: str) -> Dict:
-    """Extract metadata from video file using ffprobe."""
-    cmd = [
-        get_ffprobe_path(),
-        '-v', 'quiet',
-        '-print_format', 'json',
-        '-show_format',
-        video_path
-    ]
-
+    """Extract metadata from video file using PyAV."""
     try:
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-        metadata = json.loads(result.stdout.decode('utf-8'))
-        if 'format' in metadata and 'tags' in metadata['format']:
-            comment = metadata['format']['tags'].get('comment', '{}')
+        with av.open(video_path) as container:
+            # Get comment metadata from container
+            comment = container.metadata.get('comment', '{}')
             return json.loads(comment)
-        return {}
     except Exception as e:
         print(f"Metadata extraction failed: {str(e)}")
         return {}
@@ -1829,56 +1812,40 @@ def add_metadata_to_video(video_path: str, parameters: dict) -> None:
         print(f"Error: {str(e)}")
 
 def get_video_info(video_path: str) -> dict:
-    """Get video information using ffprobe via subprocess (no python-ffmpeg dependency)."""
+    """Get video information using PyAV."""
     try:
-        # Select first video stream and get specific entries
-        cmd = [
-            get_ffprobe_path(),
-            '-v', 'error',
-            '-select_streams', 'v:0',
-            '-show_entries', 'stream=width,height,r_frame_rate,duration',
-            '-of', 'json',
-            video_path
-        ]
-        
-        # Run ffprobe
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        data = json.loads(result.stdout)
-        
-        if not data.get('streams'):
-            return {}
-            
-        video_stream = data['streams'][0]
-        width = int(video_stream['width'])
-        height = int(video_stream['height'])
-        
-        # Calculate FPS (handle fraction like 30/1)
-        r_frame_rate = video_stream.get('r_frame_rate', '30/1')
-        if '/' in r_frame_rate:
-            num, den = map(int, r_frame_rate.split('/'))
-            fps = num / den if den != 0 else 0
-        else:
-            fps = float(r_frame_rate)
+        with av.open(video_path) as container:
+            # Get first video stream
+            video_stream = container.streams.video[0]
 
-        # Calculate Duration
-        # Try stream duration first, then format duration
-        duration = float(video_stream.get('duration', 0))
-        if duration == 0:
-            # Fallback to format duration if stream duration is missing
-            cmd_fmt = [get_ffprobe_path(), '-v', 'error', '-show_entries', 'format=duration', '-of', 'json', video_path]
-            res_fmt = subprocess.run(cmd_fmt, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            data_fmt = json.loads(res_fmt.stdout)
-            duration = float(data_fmt.get('format', {}).get('duration', 0))
+            width = video_stream.width
+            height = video_stream.height
 
-        total_frames = int(duration * fps)
+            # Calculate FPS from average_rate or guessed_rate
+            if video_stream.average_rate:
+                fps = float(video_stream.average_rate)
+            elif video_stream.guessed_rate:
+                fps = float(video_stream.guessed_rate)
+            else:
+                fps = 30.0  # fallback
 
-        return {
-            'width': width,
-            'height': height,
-            'fps': fps,
-            'total_frames': total_frames,
-            'duration': duration
-        }
+            # Calculate duration
+            if video_stream.duration and video_stream.time_base:
+                duration = float(video_stream.duration * video_stream.time_base)
+            elif container.duration:
+                duration = container.duration / av.time_base
+            else:
+                duration = 0
+
+            total_frames = int(video_stream.frames) if video_stream.frames else int(duration * fps)
+
+            return {
+                'width': width,
+                'height': height,
+                'fps': fps,
+                'total_frames': total_frames,
+                'duration': duration
+            }
     except Exception as e:
         print(f"Error extracting video info: {e}")
         return {}
