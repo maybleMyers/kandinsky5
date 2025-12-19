@@ -615,7 +615,7 @@ def get_conditioning_video_and_image(video_path, end_image, num_frames, vae, dev
     return start_latents, end_latents, scale_factor
 
 
-def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24, max_frames=None, use_deterministic=True, v2v_mode=False):
+def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24, max_frames=None, use_deterministic=None, v2v_mode=False):
     """
     Load a video file and encode to latent space with proper temporal compression.
 
@@ -623,9 +623,10 @@ def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24
     Videos are processed in small chunks to avoid OOM.
 
     Uses musubi-tuner style encoding with:
-    - Deterministic .mode() sampling for consistent results
     - Memory-efficient chunked processing for high-res/long videos
     - Proper temporal blending at chunk boundaries
+    - For V2V: .sample() encoding to preserve detail and color variance
+    - For I2V: .mode() encoding for consistency
 
     Args:
         video_path: Path to the video file
@@ -634,8 +635,11 @@ def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24
         alignment: Pixel alignment for resizing
         target_fps: Target FPS for frame extraction
         max_frames: Maximum number of video frames to process (None = all frames)
-        use_deterministic: If True, use .mode() for deterministic encoding (musubi-tuner style).
-                          If False, use .sample() for stochastic encoding.
+        use_deterministic: If True, use .mode() for deterministic encoding.
+                          If False, use .sample() for stochastic encoding (preserves detail).
+                          If None (default), auto-selects based on v2v_mode:
+                          - V2V mode: .sample() (preserves variance/detail)
+                          - I2V mode: .mode() (deterministic for conditioning)
         v2v_mode: If True, use v2v-safe tiling that ensures full edge coverage.
                   This prevents loss of edge pixels when dimensions don't align with tile stride.
 
@@ -643,6 +647,11 @@ def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24
         Tuple of (latents, scale_factor, num_video_frames)
         latents: Tensor of shape [num_latent_frames, H, W, C]
     """
+    # Auto-select encoding mode based on v2v_mode if not explicitly specified
+    # V2V benefits from .sample() to preserve variance (detail/color)
+    # I2V conditioning frames use .mode() for consistency
+    if use_deterministic is None:
+        use_deterministic = not v2v_mode  # V2V uses sample, I2V uses mode
     import av
     import numpy as np
     import torch.nn.functional as F_torch
@@ -735,7 +744,11 @@ def _encode_video_full(pil_frames, num_video_frames, target_h, target_w, vae, de
     Encode video using VAE's built-in temporal tiled encoding.
     Works well for lower resolutions or shorter videos.
 
-    Uses musubi-tuner style deterministic encoding with .mode() when use_deterministic=True.
+    Encoding mode:
+    - use_deterministic=True: .mode() returns mean of Gaussian (consistent but loses variance)
+    - use_deterministic=False: .sample() draws from distribution (preserves detail/color)
+
+    For V2V, .sample() is recommended to preserve original video detail and color variance.
 
     When v2v_mode=True, uses opt_tiling=False to preserve the conservative tile sizes
     set by the v2v_safe_tiling context manager (prevents OOM from dynamic tile sizing).
@@ -780,8 +793,13 @@ def _encode_video_chunked(pil_frames, num_video_frames, target_h, target_w, vae,
     Encode video in smaller chunks for high-resolution or long videos.
     Mirrors the VAE's _temporal_tiled_encode but loads frames on-demand to save memory.
 
-    Uses musubi-tuner style techniques:
-    - Deterministic .mode() sampling for consistent results
+    Encoding mode:
+    - use_deterministic=True: .mode() returns mean of Gaussian (consistent but loses variance)
+    - use_deterministic=False: .sample() draws from distribution (preserves detail/color)
+
+    For V2V, .sample() is recommended to preserve original video detail and color variance.
+
+    Also uses:
     - Memory-efficient on-demand frame loading
     - Proper temporal blending at chunk boundaries
     """
