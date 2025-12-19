@@ -1243,12 +1243,26 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
         blend_num_frames = tile_latent_min_num_frames - tile_latent_stride_num_frames
 
         row = []
+        tile_positions = []
         # for i in range(0, num_frames, self.tile_sample_stride_num_frames):
         for i in range(
             0,
             num_frames - self.tile_sample_min_num_frames + 1,
             self.tile_sample_stride_num_frames,
         ):
+            tile_positions.append(i)
+
+        # Check if there are remaining frames not covered by the last tile
+        # This fixes frame loss when video length doesn't align with tile stride
+        if tile_positions:
+            last_tile_end = tile_positions[-1] + self.tile_sample_min_num_frames
+            if last_tile_end < num_frames - 1:
+                # Add a final tile starting from the end to capture remaining frames
+                final_start = num_frames - self.tile_sample_min_num_frames - 1
+                if final_start > tile_positions[-1]:
+                    tile_positions.append(final_start)
+
+        for i in tile_positions:
             tile = x[:, :, i : i + self.tile_sample_min_num_frames + 1, :, :]
             if self.use_tiling and (
                 height > self.tile_sample_min_height
@@ -1309,6 +1323,16 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
             num_frames - tile_latent_min_num_frames + 1,
             tile_latent_stride_num_frames,
         ))
+
+        # Check if there are remaining frames not covered by the last chunk
+        # This fixes frame loss when latent length doesn't align with chunk stride
+        if temporal_chunks:
+            last_chunk_end = temporal_chunks[-1] + tile_latent_min_num_frames
+            if last_chunk_end < num_frames - 1:
+                # Add a final chunk starting from the end to capture remaining frames
+                final_start = num_frames - tile_latent_min_num_frames - 1
+                if final_start > temporal_chunks[-1]:
+                    temporal_chunks.append(final_start)
 
         for i in tqdm(temporal_chunks, desc="VAE temporal decoding", unit="chunk"):
             tile = z[:, :, i : i + tile_latent_min_num_frames + 1, :, :]

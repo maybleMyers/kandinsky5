@@ -2310,7 +2310,7 @@ def create_interface():
                 with gr.Row():
                     generate_btn = gr.Button("Generate Video", elem_classes="green-btn")
                     stop_btn = gr.Button("Stop Generation", variant="stop")
-                    reconnect_btn = gr.Button("🔄 Reconnect", variant="secondary", scale=0.5,
+                    reconnect_btn = gr.Button("🔄 Reconnect", variant="secondary", scale=1,
                                               elem_classes="light-blue-btn")
 
                 with gr.Row():
