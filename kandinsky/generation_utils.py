@@ -2016,13 +2016,39 @@ def generate_denoise(
     """
     sparse_params = get_sparse_params(conf, {"visual": latents}, device)
 
-    # Create a schedule from start_timestep to 0 with num_steps steps
-    # This gives us full control over how many steps to use
-    raw_timesteps = torch.linspace(start_timestep, 0, num_steps + 1, device=device)
+    # CRITICAL: Use the SAME timestep schedule as i2v, then start from the right point
+    # This ensures step sizes match what the model was trained with
+    #
+    # WRONG approach (caused blurry output):
+    #   linspace(start_timestep, 0, num_steps) -> step sizes too small!
+    #   e.g., 50 steps from 0.3 to 0 = step size 0.006 (model expects ~0.02)
+    #
+    # CORRECT approach (matches i2v):
+    #   linspace(1, 0, num_steps) -> find where start_timestep falls -> start there
+    #   e.g., strength=0.3 with 50 steps -> start at step ~35, use 15 steps
 
-    # Apply scheduler scaling to warp the timesteps
-    # The formula: scaled_t = scheduler_scale * t / (1 + (scheduler_scale - 1) * t)
-    timesteps = scheduler_scale * raw_timesteps / (1 + (scheduler_scale - 1) * raw_timesteps)
+    # Create full schedule from 1 to 0 (same as i2v)
+    full_raw_timesteps = torch.linspace(1, 0, num_steps + 1, device=device)
+    # Apply scheduler scaling (same as i2v)
+    full_timesteps = scheduler_scale * full_raw_timesteps / (1 + (scheduler_scale - 1) * full_raw_timesteps)
+
+    # Find the starting index where RAW timestep <= start_timestep
+    # We search in raw space because strength=0.3 means "30% noise" (raw t=0.3)
+    # NOT "30% into scaled schedule"
+    start_idx = 0
+    for idx, raw_ts in enumerate(full_raw_timesteps):
+        if raw_ts <= start_timestep:
+            start_idx = idx
+            break
+
+    # Use only the relevant portion of the schedule
+    timesteps = full_timesteps[start_idx:]
+    actual_start_timestep = timesteps[0].item()
+    actual_num_steps = len(timesteps) - 1
+
+    raw_start_t = full_raw_timesteps[start_idx].item()
+    print(f">>> V2V Schedule: strength={start_timestep:.2f} -> start at step {start_idx}/{num_steps}, using {actual_num_steps} steps", flush=True)
+    print(f">>> Raw timestep: {raw_start_t:.4f}, Scaled timestep: {actual_start_timestep:.4f}", flush=True)
 
     # Save the clean first frame if we need to preserve it
     first_frame_clean = latents[0:1].clone() if preserve_first_frame else None
@@ -2033,20 +2059,20 @@ def generate_denoise(
 
     # Generate noise with same shape as latents, using seeded generator
     # Flow matching: x_t = (1-t)*x_0 + t*noise
-    # Higher start_timestep = more noise = more different from original
+    # Use actual_start_timestep (from schedule) for correct noise level
     noise = torch.randn(latents.shape, device=device, dtype=latents.dtype, generator=g)
-    t = start_timestep
+    t = actual_start_timestep  # Use actual timestep from schedule, not raw strength
     img = (1 - t) * latents + t * noise
 
     # Debug: verify noise mixing ratio
-    print(f">>> V2V Denoise: seed={seed}, strength={start_timestep:.2f} -> {(1-t)*100:.0f}% original + {t*100:.0f}% noise", flush=True)
+    print(f">>> V2V Denoise: seed={seed}, actual_t={actual_start_timestep:.4f} -> {(1-t)*100:.1f}% original + {t*100:.1f}% noise", flush=True)
 
     # Restore the first frame to clean (no noise) if preserving
     if preserve_first_frame:
         img[0:1] = first_frame_clean
-        print(f">>> Denoising from timestep {start_timestep:.3f} with {num_steps} steps (first frame preserved)", flush=True)
+        print(f">>> Denoising from timestep {actual_start_timestep:.4f} with {actual_num_steps} steps (first frame preserved)", flush=True)
     else:
-        print(f">>> Denoising from timestep {start_timestep:.3f} with {num_steps} steps", flush=True)
+        print(f">>> Denoising from timestep {actual_start_timestep:.4f} with {actual_num_steps} steps", flush=True)
 
     for i, (timestep, timestep_diff) in enumerate(tqdm(list(zip(timesteps[:-1], torch.diff(timesteps))))):
         time = timestep.unsqueeze(0)
@@ -2098,9 +2124,9 @@ def generate_denoise(
         img = img + timestep_diff * pred_velocity
 
         # Generate preview if enabled
-        if previewer is not None and preview_interval and (i + 1) % preview_interval == 0 and (i + 1) < num_steps:
+        if previewer is not None and preview_interval and (i + 1) % preview_interval == 0 and (i + 1) < actual_num_steps:
             import sys
-            print(f"\n>>> PREVIEW TRIGGER at step {i + 1}/{num_steps} (interval={preview_interval})", flush=True)
+            print(f"\n>>> PREVIEW TRIGGER at step {i + 1}/{actual_num_steps} (interval={preview_interval})", flush=True)
             sys.stdout.flush()
             print(f">>> img shape before permute: {img.shape}", flush=True)
             try:
