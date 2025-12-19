@@ -2124,15 +2124,19 @@ def generate_denoise(
         img = img + timestep_diff * pred_velocity
 
         # Generate preview if enabled
-        if previewer is not None and preview_interval and (i + 1) % preview_interval == 0 and (i + 1) < actual_num_steps:
+        # For v2v denoise, only show previews after 60% completion since early steps are very noisy
+        min_preview_progress = 0.6  # Don't show previews until 60% done
+        progress = (i + 1) / actual_num_steps
+        if previewer is not None and preview_interval and (i + 1) % preview_interval == 0 and (i + 1) < actual_num_steps and progress >= min_preview_progress:
             import sys
-            print(f"\n>>> PREVIEW TRIGGER at step {i + 1}/{actual_num_steps} (interval={preview_interval})", flush=True)
+            print(f"\n>>> PREVIEW TRIGGER at step {i + 1}/{actual_num_steps} (interval={preview_interval}, progress={progress*100:.0f}%)", flush=True)
             sys.stdout.flush()
             print(f">>> img shape before permute: {img.shape}", flush=True)
             try:
                 preview_latent = img.permute(3, 0, 1, 2).unsqueeze(0)
                 print(f">>> preview_latent shape after permute+unsqueeze: {preview_latent.shape}", flush=True)
-                previewer.preview(preview_latent.squeeze(0), i, preview_suffix=preview_suffix)
+                # Pass actual timestep value (t) instead of step index for correct noise subtraction
+                previewer.preview(preview_latent.squeeze(0), t, preview_suffix=preview_suffix)
                 print(f">>> Preview completed successfully", flush=True)
                 sys.stdout.flush()
             except Exception as e:

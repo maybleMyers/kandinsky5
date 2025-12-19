@@ -129,11 +129,22 @@ class LatentPreviewer():
 
     @torch.inference_mode()
     def subtract_original_and_normalize(self, noisy_latents, current_step):
-        if not hasattr(self, 'original_latents') or not hasattr(self, 'timesteps_percent'):
+        if not hasattr(self, 'original_latents'):
              return noisy_latents
 
-        # Compute what percent of original noise is remaining
-        noise_remaining = self.timesteps_percent[current_step].to(device=noisy_latents.device)
+        # current_step can be either:
+        # - An integer index (old behavior, for i2v/t2v)
+        # - A float timestep value (new behavior, for v2v denoise)
+        if isinstance(current_step, float):
+            # Direct timestep value (0.0 to 1.0) - use directly
+            noise_remaining = current_step
+        elif hasattr(self, 'timesteps_percent') and current_step < len(self.timesteps_percent):
+            # Integer index into timesteps array
+            noise_remaining = self.timesteps_percent[current_step].item()
+        else:
+            # Fallback - no subtraction
+            return noisy_latents
+
         # Subtract the portion of original latents
         denoisy_latents = noisy_latents - (self.original_latents.to(device=noisy_latents.device) * noise_remaining)
 
