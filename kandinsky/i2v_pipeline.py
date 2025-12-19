@@ -615,7 +615,7 @@ def get_conditioning_video_and_image(video_path, end_image, num_frames, vae, dev
     return start_latents, end_latents, scale_factor
 
 
-def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24, max_frames=None, use_deterministic=None, v2v_mode=False):
+def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24, max_frames=None, use_deterministic=None, v2v_mode=False, target_width=None, target_height=None):
     """
     Load a video file and encode to latent space with proper temporal compression.
 
@@ -642,6 +642,8 @@ def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24
                           - I2V mode: .mode() (deterministic for conditioning)
         v2v_mode: If True, use v2v-safe tiling that ensures full edge coverage.
                   This prevents loss of edge pixels when dimensions don't align with tile stride.
+        target_width: Optional target width for resizing (enables upscaling). GUI ensures valid multiples.
+        target_height: Optional target height for resizing (enables upscaling). GUI ensures valid multiples.
 
     Returns:
         Tuple of (latents, scale_factor, num_video_frames)
@@ -687,10 +689,24 @@ def encode_video_to_latents(video_path, vae, device, alignment=16, target_fps=24
     num_video_frames = len(pil_frames)
     print(f">>> Extracted {num_video_frames} video frames", flush=True)
 
-    # Determine target size from first frame
-    first_image = F.pil_to_tensor(pil_frames[0]).unsqueeze(0)
-    first_image, scale_factor = resize_image(first_image, max_area=MAX_AREA, alignment=alignment)
-    target_h, target_w = first_image.shape[2], first_image.shape[3]
+    # Determine target size
+    if target_width is not None and target_height is not None:
+        # Use provided target dimensions (GUI ensures they're valid multiples of 64)
+        target_w = target_width
+        target_h = target_height
+        scale_factor = 1.0  # User explicitly chose the resolution
+    else:
+        # Detect from first frame (existing behavior)
+        first_image = F.pil_to_tensor(pil_frames[0]).unsqueeze(0)
+        first_image, scale_factor = resize_image(first_image, max_area=MAX_AREA, alignment=alignment)
+        target_h, target_w = first_image.shape[2], first_image.shape[3]
+
+    # Resize frames if needed
+    orig_w, orig_h = pil_frames[0].size
+    if orig_w != target_w or orig_h != target_h:
+        from PIL import Image
+        print(f">>> Resizing frames from {orig_w}x{orig_h} to {target_w}x{target_h}")
+        pil_frames = [frame.resize((target_w, target_h), Image.LANCZOS) for frame in pil_frames]
 
     vae_dtype = next(vae.parameters()).dtype
 

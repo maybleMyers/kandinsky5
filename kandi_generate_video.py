@@ -1114,7 +1114,9 @@ if __name__ == "__main__":
             pipe.vae,
             pipe.device_map["vae"],
             alignment=alignment,
-            v2v_mode=True  # Use edge-safe tiling for v2v to prevent pixel loss
+            v2v_mode=True,  # Use edge-safe tiling for v2v to prevent pixel loss
+            target_width=args.width,
+            target_height=args.height
         )
 
         # Offload VAE after encoding
