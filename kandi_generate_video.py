@@ -1144,9 +1144,20 @@ if __name__ == "__main__":
         if LatentPreviewer is not None and args.preview is not None and args.preview > 0:
             print(f"\n>>> DENOISE: Initializing previewer with preview={args.preview}")
             try:
-                # Use the video latents shape for preview initialization
-                latent_frames = video_latents.shape[0]
-                initial_latent = video_latents.permute(3, 0, 1, 2).to(device=pipe.device_map["dit"], dtype=torch.bfloat16)
+                # For DENOISE mode, the previewer needs the NOISE (not clean latents)
+                # to correctly subtract noise during preview generation.
+                # Generate the same noise that will be used in generate_denoise using the same seed.
+                # Must match: device, dtype, shape, and seed exactly for identical noise.
+                g_preview = torch.Generator(device=pipe.device_map["dit"])
+                g_preview.manual_seed(args.seed)
+                initial_noise = torch.randn(
+                    video_latents.shape,
+                    device=pipe.device_map["dit"],
+                    dtype=video_latents.dtype,  # Match the actual latents dtype
+                    generator=g_preview
+                )
+                # Permute to match previewer expected format: [C, F, H, W]
+                initial_latent = initial_noise.permute(3, 0, 1, 2).to(dtype=torch.bfloat16)
 
                 timesteps = torch.linspace(args.denoise_strength, 0, num_steps + 1, device=pipe.device_map["dit"])
                 timesteps = args.scheduler_scale * timesteps / (1 + (args.scheduler_scale - 1) * timesteps)
