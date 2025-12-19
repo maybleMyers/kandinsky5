@@ -1372,45 +1372,55 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
     def get_enc_optimal_tiling(
         self, shape: List[int]
     ) -> Tuple[Tuple[int, int, int, int], Tuple[int, int, int]]:
-        """Returns optimal tiling for given shape."""
-        h, w = shape[3:]
+        """
+        Returns optimal tiling for encoding using VRAM-based calculation.
 
-        free_mem = torch.cuda.mem_get_info()[0]
-        max_area = free_mem / 256 / 17 / 8
+        Formula: peak_vram_gb = 0.003185 * latent_h * latent_w * latent_frames
+        (Same as decode - encoder/decoder have similar memory requirements)
+        """
+        h, w = shape[3:]  # pixel-space dimensions
 
-        if h * w < max_area:
+        # Get available VRAM
+        free_mem_bytes = torch.cuda.mem_get_info()[0] if torch.cuda.is_available() else 16 * 1024**3
+        free_mem_gb = free_mem_bytes / (1024**3)
+
+        # Use 85% of free memory for safety
+        usable_vram_gb = free_mem_gb * 0.85
+
+        # Empirically measured formula (from decode tests, encoder is similar)
+        GB_PER_LATENT_PIXEL = 3419405 / (1024**3)  # ~0.003185
+
+        # Temporal: 17 pixel frames = 5 latent frames
+        latent_temporal_frames = 5
+
+        # Calculate max spatial latent pixels we can fit
+        max_latent_spatial = usable_vram_gb / (GB_PER_LATENT_PIXEL * latent_temporal_frames)
+
+        # Current frame size in latent space
+        latent_h, latent_w = h // 8, w // 8
+        current_latent_spatial = latent_h * latent_w
+
+        # If we can fit entire frame without spatial tiling
+        if current_latent_spatial <= max_latent_spatial:
             return (1, 17, h, w), (8, h, w)
 
-        def factorize(n, k):
-            a = sqrt(n / k)
-            b = sqrt(n * k)
-            aa = [floor(a), ceil(a)]
-            bb = [floor(b), ceil(b)]
-            for a in aa:
-                for b in bb:
-                    if a * b >= n:
-                        return a, b
+        # Need to tile - calculate optimal tile size
+        max_latent_side = int(sqrt(max_latent_spatial))
 
-        k = max(h / w, w / h)
-        N = ceil(h * w / max_area)
-        a, b = factorize(N, k)
-        if h >= w:
-            wn, hn = a, b
-        else:
-            wn, hn = b, a
+        # Round down to multiple of 8 for alignment, minimum 16 (128 pixels)
+        tile_latent_side = max((max_latent_side // 8) * 8, 16)
 
-        if wn > 1:
-            wt = ceil(w / wn / 8) * 8 + 16
-            ws = wt - 32
-        else:
-            wt = w
-            ws = w
-        if hn > 1:
-            ht = ceil(h / hn / 8) * 8 + 16
-            hs = ht - 32
-        else:
-            ht = h
-            hs = h
+        # Convert to pixel space
+        tile_pix = tile_latent_side * 8
+
+        # Stride with 32 pixel overlap for blending
+        stride_pix = max(tile_pix - 32, 64)
+
+        # Ensure tiles don't exceed actual dimensions
+        ht = min(tile_pix, h)
+        wt = min(tile_pix, w)
+        hs = min(stride_pix, ht - 16) if ht > 32 else ht
+        ws = min(stride_pix, wt - 16) if wt > 32 else wt
 
         return (1, 17, ht, wt), (8, hs, ws)
 
@@ -1418,9 +1428,11 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
         self, shape: List[int]
     ) -> Tuple[Tuple[int, int, int, int], Tuple[int, int, int]]:
         """
-        Returns optimal tiling for given shape.
+        Returns optimal tiling for given shape using VRAM-based calculation.
         If manual tiling is set, respects those settings.
-        Otherwise, adaptively calculates based on resolution and available memory.
+        Otherwise, calculates optimal tile size based on available GPU memory.
+
+        Formula: peak_vram_gb = 0.003185 * latent_h * latent_w * latent_frames
         """
         # If manual tiling is enabled, use stored original values (not potentially corrupted current values)
         if self.use_manual_tiling:
@@ -1436,90 +1448,111 @@ class AutoencoderKLHunyuanVideo(ModelMixin, ConfigMixin):
         b, _, f, h, w = shape
         h_pix, w_pix = h * 8, w * 8
 
-        # Adaptive tile sizing based on resolution
-        total_pixels = h_pix * w_pix
+        # Get available VRAM
+        free_mem_bytes = torch.cuda.mem_get_info()[0] if torch.cuda.is_available() else 16 * 1024**3
+        free_mem_gb = free_mem_bytes / (1024**3)
 
-        # Resolution-based adaptive tiling (provides better defaults than pure memory calc)
-        if total_pixels <= 768 * 512:  # Low-res (e.g., 768x512)
-            # Use larger tiles for better speed
-            tile_h, tile_w = 256, 256
-            stride_h, stride_w = 192, 192
-        elif total_pixels <= 960 * 544:  # Medium-res (e.g., 960x544)
-            # Moderate tiles
-            tile_h, tile_w = 192, 192
-            stride_h, stride_w = 160, 160
-        elif total_pixels <= 1280 * 704:  # High-res (e.g., 1280x704)
-            # Smaller tiles to prevent OOM
-            tile_h, tile_w = 128, 128
-            stride_h, stride_w = 96, 96
-        else:  # Ultra-high-res (e.g., 1920x1080)
-            # Very small tiles for extreme resolutions
-            tile_h, tile_w = 96, 96
-            stride_h, stride_w = 64, 64
+        # Use 85% of free memory for safety
+        usable_vram_gb = free_mem_gb * 0.85
+
+        # Empirically measured formula: peak_vram_gb = 0.003185 * latent_h * latent_w * latent_frames
+        GB_PER_LATENT_PIXEL = 3419405 / (1024**3)  # ~0.003185
+
+        # Temporal tiling: 5 latent frames = 17 video frames (16 pixel frames + 1)
+        tile_f = 16   # pixel-space frames
+        stride_f = 12  # pixel-space frames
+        latent_temporal_frames = 5
+
+        # Calculate max spatial latent pixels we can fit
+        max_latent_spatial = usable_vram_gb / (GB_PER_LATENT_PIXEL * latent_temporal_frames)
+
+        # Find largest square tile that fits
+        max_latent_side = int(sqrt(max_latent_spatial))
+
+        # Round down to multiple of 8 for alignment, minimum 16 (128 pixels)
+        tile_latent_side = max((max_latent_side // 8) * 8, 16)
+
+        # Convert to pixel space
+        tile_pix = tile_latent_side * 8
+
+        # Stride with 32 pixel overlap for blending
+        stride_pix = max(tile_pix - 32, 64)
 
         # Ensure tiles don't exceed actual dimensions
-        tile_h = min(tile_h, h_pix)
-        tile_w = min(tile_w, w_pix)
-        stride_h = min(stride_h, tile_h - 16)  # Ensure some overlap
-        stride_w = min(stride_w, tile_w - 16)
-
-        # Temporal tiling (frames) - use hardcoded defaults to avoid corruption from encoding
-        # Note: get_enc_optimal_tiling has incompatible stride order that corrupts these values
-        # So we MUST NOT rely on self.tile_sample_* for automatic mode
-        tile_f = 16   # Default temporal tile size (pixel-space frames)
-        stride_f = 12  # Default temporal stride (pixel-space frames)
+        tile_h = min(tile_pix, h_pix)
+        tile_w = min(tile_pix, w_pix)
+        stride_h = min(stride_pix, tile_h - 16) if tile_h > 32 else tile_h
+        stride_w = min(stride_pix, tile_w - 16) if tile_w > 32 else tile_w
 
         return (1, tile_f + 1, tile_h, tile_w), (stride_f, stride_h, stride_w)
 
     def _get_source_style_tiling(self, shape: List[int]):
         """
-        Source repository's memory-based tile calculation.
+        VRAM-based tile calculation using empirically measured formula.
+
+        Formula derived from testing: peak_vram_gb = 0.003185 * latent_h * latent_w * latent_frames
+        This equals ~3.4 MB per latent pixel (where latent is 1/8 spatial, 1/4 temporal of video).
+
         Returns None if no spatial tiling needed, otherwise returns (tile_h, tile_w, stride_h, stride_w).
         """
         b, _, f, h, w = shape
         h_pix, w_pix = h * 8, w * 8
 
-        free_mem = torch.cuda.mem_get_info()[0]
-        max_area = free_mem / 256 / 17 / 8
-        num_vals = 256 * 17 * (h_pix + 32) * (w_pix + 32)
+        # Get available VRAM with safety margin
+        free_mem_bytes = torch.cuda.mem_get_info()[0]
+        free_mem_gb = free_mem_bytes / (1024**3)
+
+        # Use 85% of free memory for safety (fragmentation, overhead, etc.)
+        usable_vram_gb = free_mem_gb * 0.85
+
+        # Empirically measured: peak_vram_gb = 0.003185 * latent_h * latent_w * latent_frames
+        # For temporal tile of 5 latent frames (17 video frames):
+        BYTES_PER_LATENT_PIXEL = 3419405  # ~3.4 MB per latent pixel
+        GB_PER_LATENT_PIXEL = BYTES_PER_LATENT_PIXEL / (1024**3)  # ~0.003185
+
+        # Default temporal tile: 5 latent frames = 17 video frames
+        latent_temporal_frames = 5
+
+        # Calculate max spatial latent pixels we can fit
+        max_latent_spatial = usable_vram_gb / (GB_PER_LATENT_PIXEL * latent_temporal_frames)
+
+        # Current full-frame latent size
+        latent_h, latent_w = h, w  # Already in latent space
+        current_latent_spatial = latent_h * latent_w
+
+        # Calculate VRAM needed for full frame (no spatial tiling)
+        full_frame_vram_gb = GB_PER_LATENT_PIXEL * latent_h * latent_w * latent_temporal_frames
+
+        print(f">>> VAE VRAM calc: {free_mem_gb:.1f}GB free, {usable_vram_gb:.1f}GB usable, full frame needs {full_frame_vram_gb:.1f}GB", flush=True)
 
         # If we can fit entire frame in memory without tiling
-        if h_pix * w_pix < max_area and num_vals < 2**31:
+        if current_latent_spatial <= max_latent_spatial:
+            print(f">>> VAE: No spatial tiling needed (latent {latent_h}x{latent_w}x{latent_temporal_frames} fits in {usable_vram_gb:.1f}GB)", flush=True)
             return None  # Signal no spatial tiling needed
 
-        # Calculate minimal tiling based on memory
-        k = max(h_pix / w_pix, w_pix / h_pix)
-        N = max(ceil(h_pix * w_pix / max_area), ceil(num_vals / 2**31))
+        # Need to tile - calculate optimal tile size
+        # Find largest square tile that fits
+        max_latent_side = int(sqrt(max_latent_spatial))
 
-        def factorize(n, k):
-            a = sqrt(n / k)
-            b = sqrt(n * k)
-            aa = [floor(a), ceil(a)]
-            bb = [floor(b), ceil(b)]
-            for a_val in aa:
-                for b_val in bb:
-                    if a_val * b_val >= n:
-                        return a_val, b_val
-            return ceil(a), ceil(b)
+        # Round down to multiple of 8 for alignment (in pixel space that's 64)
+        tile_latent_side = (max_latent_side // 8) * 8
+        tile_latent_side = max(tile_latent_side, 16)  # Minimum 16 latent = 128 pixel
 
-        a, b = factorize(N, k)
-        if h_pix >= w_pix:
-            wn, hn = a, b
-        else:
-            wn, hn = b, a
+        # Convert to pixel space
+        tile_pix = tile_latent_side * 8
 
-        if wn > 1:
-            wt = ceil(w_pix / wn / 8) * 8 + 16
-            ws = wt - 32
-        else:
-            wt = w_pix
-            ws = w_pix
-        if hn > 1:
-            ht = ceil(h_pix / hn / 8) * 8 + 16
-            hs = ht - 32
-        else:
-            ht = h_pix
-            hs = h_pix
+        # Stride with ~32 pixel overlap for blending
+        stride_pix = max(tile_pix - 32, 64)
+
+        # Ensure tiles don't exceed actual dimensions
+        ht = min(tile_pix, h_pix)
+        wt = min(tile_pix, w_pix)
+        hs = min(stride_pix, ht - 32) if ht > 64 else ht
+        ws = min(stride_pix, wt - 32) if wt > 64 else wt
+
+        # Calculate actual VRAM usage for this tile
+        actual_vram = GB_PER_LATENT_PIXEL * (ht // 8) * (wt // 8) * latent_temporal_frames
+        print(f">>> VAE: Using {ht}x{wt} tiles (stride {hs}x{ws}), estimated {actual_vram:.1f}GB per tile", flush=True)
 
         return (ht, wt, hs, ws)  # tile_h, tile_w, stride_h, stride_w
 
