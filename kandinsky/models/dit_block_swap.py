@@ -104,6 +104,39 @@ class DiffusionTransformer3DBlockSwap(DiffusionTransformer3D):
             self.visual_transformer_blocks[idx].to('cpu', non_blocking=True)
         self._blocks_on_gpu.clear()
 
+    def update_blocks_in_memory(self, new_blocks_in_memory: int):
+        """
+        Dynamically update the number of blocks kept in GPU memory.
+
+        This is used for OOM recovery - when we run out of memory, we can
+        reduce the number of blocks in memory and retry.
+
+        Args:
+            new_blocks_in_memory: New number of blocks to keep in GPU memory
+        """
+        old_value = self.blocks_in_memory
+        self.blocks_in_memory = max(1, min(new_blocks_in_memory, self.num_visual_blocks))
+
+        # If reducing blocks, offload excess blocks
+        if self.blocks_in_memory < old_value and self.enable_block_swap:
+            while len(self._blocks_on_gpu) > self.blocks_in_memory:
+                # Offload the lowest indexed block (oldest)
+                blocks_list = sorted(self._blocks_on_gpu)
+                if blocks_list:
+                    idx = blocks_list[0]
+                    self.visual_transformer_blocks[idx].to('cpu', non_blocking=True)
+                    self._blocks_on_gpu.remove(idx)
+
+        return self.blocks_in_memory
+
+    def get_blocks_in_memory(self) -> int:
+        """Get current blocks_in_memory value."""
+        return self.blocks_in_memory
+
+    def get_gpu_block_count(self) -> int:
+        """Get number of blocks currently on GPU."""
+        return len(self._blocks_on_gpu)
+
     def _apply(self, fn, recurse=True):
         if self.enable_block_swap and recurse:
             self.time_embeddings = self.time_embeddings._apply(fn)

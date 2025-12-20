@@ -165,6 +165,11 @@ def generate_video(
     sdnq_compile: bool = True,
     # End frame blending (0.0 = use denoised result, 1.0 = use target)
     end_blend_weight: float = 0.0,
+    # OOM auto-retry settings
+    auto_retry: bool = True,
+    max_retries: int = 5,
+    retry_reduce_factor: int = 2,
+    min_blocks: int = 1,
 ) -> Generator[Tuple[List[Tuple[str, str]], Optional[str], str, str], None, None]:
     global stop_event, current_process, current_output_filename
     stop_event.clear()
@@ -292,6 +297,15 @@ def generate_video(
         if enable_block_swap:
             command.append("--enable_block_swap")
             command.extend(["--blocks_in_memory", str(int(blocks_in_memory))])
+
+            # Add OOM auto-retry options (only useful with block swap)
+            if auto_retry:
+                command.append("--auto_retry")
+                command.extend(["--max_retries", str(int(max_retries))])
+                command.extend(["--retry_reduce_factor", str(int(retry_reduce_factor))])
+                command.extend(["--min_blocks", str(int(min_blocks))])
+            else:
+                command.append("--no_auto_retry")
 
         if offload_inactive or enable_block_swap:
             command.append("--offload")
@@ -570,6 +584,11 @@ def generate_v2v_video(
     sdnq_compile: bool = True,
     # End frame blending (0.0 = use denoised result, 1.0 = use target)
     end_blend_weight: float = 0.0,
+    # OOM auto-retry settings
+    auto_retry: bool = True,
+    max_retries: int = 5,
+    retry_reduce_factor: int = 2,
+    min_blocks: int = 1,
 ) -> Generator[Tuple[List[Tuple[str, str]], Optional[str], str, str], None, None]:
     """Generate video from video input (video continuation/v2v mode)."""
     global stop_event, current_process, current_output_filename
@@ -721,6 +740,15 @@ def generate_v2v_video(
         if enable_block_swap:
             command.append("--enable_block_swap")
             command.extend(["--blocks_in_memory", str(int(blocks_in_memory))])
+
+            # Add OOM auto-retry options (only useful with block swap)
+            if auto_retry:
+                command.append("--auto_retry")
+                command.extend(["--max_retries", str(int(max_retries))])
+                command.extend(["--retry_reduce_factor", str(int(retry_reduce_factor))])
+                command.extend(["--min_blocks", str(int(min_blocks))])
+            else:
+                command.append("--no_auto_retry")
 
         if offload_inactive or enable_block_swap:
             command.append("--offload")
@@ -2454,6 +2482,14 @@ def create_interface():
                         enable_block_swap = gr.Checkbox(label="Enable Block Swap", value=True, info="Required for 24GB GPUs")
                         offload_inactive = gr.Checkbox(label="Offload Inactive Models", value=False, info="Offload text encoder & VAE to CPU when not in use (auto-enabled with block swap)")
                         blocks_in_memory = gr.Slider(minimum=1, maximum=60, step=1, label="Blocks in Memory", value=6, info="Number of transformer blocks to keep in GPU memory")
+                    with gr.Accordion("OOM Auto-Retry", open=False):
+                        gr.Markdown("**Automatic OOM recovery**: If generation fails due to out-of-memory, automatically retry with fewer blocks in memory.")
+                        with gr.Row():
+                            auto_retry = gr.Checkbox(label="Enable Auto-Retry", value=True, info="Automatically retry with fewer blocks on OOM")
+                            max_retries = gr.Slider(minimum=1, maximum=10, step=1, label="Max Retries", value=5, info="Maximum retry attempts before giving up")
+                        with gr.Row():
+                            retry_reduce_factor = gr.Slider(minimum=2, maximum=4, step=1, label="Reduce Factor", value=2, info="Divide blocks by this on each retry (2=halve)")
+                            min_blocks = gr.Slider(minimum=1, maximum=10, step=1, label="Min Blocks", value=1, info="Minimum blocks to try before failing")
                     with gr.Row():
                         dtype_select = gr.Radio(choices=["bfloat16", "float16", "float32", "fp8_scaled"], label="Default Data Type", value="bfloat16", info="Used for all components if specific dtypes not set. fp8_scaled provides ~50% memory savings.")
                     with gr.Accordion("Advanced: Component-Specific Data Types", open=False):
@@ -2601,7 +2637,8 @@ def create_interface():
                         save_latents_checkbox,
                         enable_ultravico, ultravico_alpha, ultravico_suppress_harmonics, ultravico_beta,
                         use_sdnq, sdnq_weights_dtype, sdnq_triton_mm, sdnq_compile,
-                        end_blend_weight
+                        end_blend_weight,
+                        auto_retry, max_retries, retry_reduce_factor, min_blocks
                     ],
                     outputs=[output, preview_output, batch_progress, progress_text]
                 )
@@ -3011,6 +3048,14 @@ def create_interface():
                         v2v_enable_block_swap = gr.Checkbox(label="Enable Block Swap", value=True, info="Required for 24GB GPUs")
                         v2v_offload_inactive = gr.Checkbox(label="Offload Inactive Models", value=False, info="Offload text encoder & VAE to CPU when not in use (auto-enabled with block swap)")
                         v2v_blocks_in_memory = gr.Slider(minimum=1, maximum=60, step=1, label="Blocks in Memory", value=2, info="Number of transformer blocks to keep in GPU memory")
+                    with gr.Accordion("OOM Auto-Retry", open=False):
+                        gr.Markdown("**Automatic OOM recovery**: If generation fails due to out-of-memory, automatically retry with fewer blocks in memory.")
+                        with gr.Row():
+                            v2v_auto_retry = gr.Checkbox(label="Enable Auto-Retry", value=True, info="Automatically retry with fewer blocks on OOM")
+                            v2v_max_retries = gr.Slider(minimum=1, maximum=10, step=1, label="Max Retries", value=5, info="Maximum retry attempts before giving up")
+                        with gr.Row():
+                            v2v_retry_reduce_factor = gr.Slider(minimum=2, maximum=4, step=1, label="Reduce Factor", value=2, info="Divide blocks by this on each retry (2=halve)")
+                            v2v_min_blocks = gr.Slider(minimum=1, maximum=10, step=1, label="Min Blocks", value=1, info="Minimum blocks to try before failing")
                     with gr.Row():
                         v2v_dtype_select = gr.Radio(choices=["bfloat16", "float16", "float32", "fp8_scaled"], label="Default Data Type", value="bfloat16", info="Used for all components if specific dtypes not set. fp8_scaled provides ~50% memory savings.")
                     with gr.Accordion("Advanced: Component-Specific Data Types", open=False):
@@ -3168,7 +3213,8 @@ def create_interface():
                         v2v_enable_denoise, v2v_denoise_strength,
                         v2v_enable_ultravico, v2v_ultravico_alpha, v2v_ultravico_suppress_harmonics, v2v_ultravico_beta,
                         v2v_use_sdnq, v2v_sdnq_weights_dtype, v2v_sdnq_triton_mm, v2v_sdnq_compile,
-                        v2v_end_blend_weight
+                        v2v_end_blend_weight,
+                        v2v_auto_retry, v2v_max_retries, v2v_retry_reduce_factor, v2v_min_blocks
                     ],
                     outputs=[v2v_output, v2v_preview_output, v2v_batch_progress, v2v_progress_text]
                 )

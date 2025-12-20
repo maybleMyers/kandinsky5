@@ -59,6 +59,7 @@ if _no_compile:
     print("torch.compile() disabled for faster startup")
 
 from kandinsky import get_T2V_pipeline, get_I2V_pipeline, get_I2V_pipeline_with_block_swap, get_T2V_pipeline_with_block_swap, get_T2I_pipeline
+from kandinsky.oom_recovery import OOMRecoveryConfig, OOMRetryContext, is_oom_error, clear_cuda_memory
 from kandinsky.generation_utils import generate_sample_from_checkpoint, generate_sample_i2v_from_checkpoint, generate_sample_v2v, generate_sample_v2v_join
 from kandinsky.i2v_pipeline import (
     get_conditioning_frames_from_video,
@@ -224,6 +225,94 @@ def normalize_join_frames_triple(video1, middle, video2, num_frames):
     return video1, middle, video2
 
 
+def run_with_oom_retry(
+    generate_func,
+    args,
+    pipe,
+    mode_name="generation"
+):
+    """
+    Run a generation function with automatic OOM retry and block reduction.
+
+    This wraps any generation function and catches OOM errors, reducing
+    blocks_in_memory and retrying until success or max retries exceeded.
+
+    Args:
+        generate_func: Callable that performs the generation (takes no args)
+        args: Parsed command line arguments
+        pipe: The pipeline object (has pipe.dit for block management)
+        mode_name: Name of the mode for logging (e.g., "I2V", "T2V", "V2V")
+
+    Returns:
+        The result of generate_func()
+
+    Raises:
+        The last OOM error if all retries fail, or any non-OOM exception
+    """
+    # Check if auto retry is enabled
+    auto_retry_enabled = args.auto_retry and not args.no_auto_retry
+
+    # Only retry if block swap is enabled (otherwise we can't reduce blocks)
+    can_retry = (
+        auto_retry_enabled
+        and args.enable_block_swap
+        and hasattr(pipe, 'dit')
+        and hasattr(pipe.dit, 'enable_block_swap')
+        and pipe.dit.enable_block_swap
+    )
+
+    if not can_retry:
+        # No retry possible, just run the function
+        return generate_func()
+
+    # Set up OOM recovery config
+    oom_config = OOMRecoveryConfig(
+        enabled=True,
+        max_retries=args.max_retries,
+        reduce_factor=args.retry_reduce_factor,
+        min_blocks=args.min_blocks,
+        verbose=True,
+    )
+
+    # Create retry context
+    ctx = OOMRetryContext(
+        config=oom_config,
+        dit=pipe.dit,
+        initial_blocks=args.blocks_in_memory,
+    )
+
+    while ctx.should_retry():
+        try:
+            # Update blocks_in_memory on the DiT before this attempt
+            if hasattr(pipe.dit, 'update_blocks_in_memory'):
+                pipe.dit.update_blocks_in_memory(ctx.current_blocks)
+
+            print(f">>> {mode_name}: Attempting generation with {ctx.current_blocks} blocks in memory")
+
+            result = generate_func()
+            ctx.success()
+            return result
+
+        except Exception as e:
+            if is_oom_error(e):
+                print(f"\n>>> OOM ERROR during {mode_name}: {e}")
+
+                if not ctx.handle_oom(e):
+                    # Max retries exceeded
+                    print(f">>> {mode_name}: Max retries ({args.max_retries}) exceeded, re-raising OOM error")
+                    raise
+
+                # Prepare for retry
+                print(f">>> {mode_name}: Retrying with {ctx.current_blocks} blocks...")
+                clear_cuda_memory()
+            else:
+                # Non-OOM error, don't retry
+                raise
+
+    # Should not reach here
+    raise RuntimeError(f"OOM retry failed unexpectedly for {mode_name}")
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Generate a video using Kandinsky 5"
@@ -384,6 +473,36 @@ def parse_args():
         type=int,
         default=6,
         help="Number of transformer blocks to keep in GPU memory when using block swapping"
+    )
+    parser.add_argument(
+        "--auto_retry",
+        action='store_true',
+        default=True,
+        help="Enable automatic OOM retry with reduced blocks (default: True)"
+    )
+    parser.add_argument(
+        "--no_auto_retry",
+        action='store_true',
+        default=False,
+        help="Disable automatic OOM retry"
+    )
+    parser.add_argument(
+        "--max_retries",
+        type=int,
+        default=5,
+        help="Maximum number of OOM retry attempts (default: 5)"
+    )
+    parser.add_argument(
+        "--retry_reduce_factor",
+        type=int,
+        default=2,
+        help="Factor to reduce blocks_in_memory by on each retry (default: 2, meaning halve)"
+    )
+    parser.add_argument(
+        "--min_blocks",
+        type=int,
+        default=1,
+        help="Minimum blocks_in_memory when retrying (default: 1)"
     )
     parser.add_argument(
         "--dtype",
@@ -1024,34 +1143,38 @@ if __name__ == "__main__":
 
             if is_i2v_checkpoint:
                 print(">>> Resuming I2V generation", flush=True)
-                x = generate_sample_i2v_from_checkpoint(
-                    checkpoint_path=args.resume_from,
-                    dit=pipe.dit,
-                    vae=pipe.vae,
-                    conf=pipe.conf,
-                    device="cuda",
-                    vae_device="cuda",
-                    progress=True,
-                    offload=pipe.offload,
-                    force_offload=force_offload,
-                    stop_check=check_stop_signals,
-                    new_checkpoint_path=checkpoint_file,
-                )
+                def resume_i2v_generate():
+                    return generate_sample_i2v_from_checkpoint(
+                        checkpoint_path=args.resume_from,
+                        dit=pipe.dit,
+                        vae=pipe.vae,
+                        conf=pipe.conf,
+                        device="cuda",
+                        vae_device="cuda",
+                        progress=True,
+                        offload=pipe.offload,
+                        force_offload=force_offload,
+                        stop_check=check_stop_signals,
+                        new_checkpoint_path=checkpoint_file,
+                    )
+                x = run_with_oom_retry(resume_i2v_generate, args, pipe, mode_name="RESUME_I2V")
             else:
                 print(">>> Resuming T2V generation", flush=True)
-                x = generate_sample_from_checkpoint(
-                    checkpoint_path=args.resume_from,
-                    dit=pipe.dit,
-                    vae=pipe.vae,
-                    conf=pipe.conf,
-                    device="cuda",
-                    vae_device="cuda",
-                    progress=True,
-                    offload=pipe.offload,
-                    force_offload=force_offload,
-                    stop_check=check_stop_signals,
-                    new_checkpoint_path=checkpoint_file,
-                )
+                def resume_t2v_generate():
+                    return generate_sample_from_checkpoint(
+                        checkpoint_path=args.resume_from,
+                        dit=pipe.dit,
+                        vae=pipe.vae,
+                        conf=pipe.conf,
+                        device="cuda",
+                        vae_device="cuda",
+                        progress=True,
+                        offload=pipe.offload,
+                        force_offload=force_offload,
+                        stop_check=check_stop_signals,
+                        new_checkpoint_path=checkpoint_file,
+                    )
+                x = run_with_oom_retry(resume_t2v_generate, args, pipe, mode_name="RESUME_T2V")
 
             # Save the video if we got results
             if x is not None:
@@ -1190,30 +1313,33 @@ if __name__ == "__main__":
         else:
             print(f">>> DENOISE: Preview disabled (preview={args.preview})")
 
-        x = generate_sample_denoise(
-            video_latents=video_latents,
-            caption=args.prompt,
-            dit=pipe.dit,
-            vae=pipe.vae,
-            conf=pipe.conf,
-            text_embedder=pipe.text_embedder,
-            denoise_strength=args.denoise_strength,
-            num_steps=num_steps,
-            guidance_weight=guidance,
-            scheduler_scale=args.scheduler_scale,
-            negative_caption=args.negative_prompt,
-            clip_prompt=args.clip_prompt,
-            seed=args.seed,
-            device=pipe.device_map["dit"],
-            vae_device=pipe.device_map["vae"],
-            progress=True,
-            offload=pipe.offload,
-            force_offload=force_offload,
-            chunk_frames=chunk_frames,
-            previewer=previewer,
-            preview_interval=args.preview,
-            preview_suffix=args.preview_suffix,
-        )
+        def denoise_generate():
+            return generate_sample_denoise(
+                video_latents=video_latents,
+                caption=args.prompt,
+                dit=pipe.dit,
+                vae=pipe.vae,
+                conf=pipe.conf,
+                text_embedder=pipe.text_embedder,
+                denoise_strength=args.denoise_strength,
+                num_steps=num_steps,
+                guidance_weight=guidance,
+                scheduler_scale=args.scheduler_scale,
+                negative_caption=args.negative_prompt,
+                clip_prompt=args.clip_prompt,
+                seed=args.seed,
+                device=pipe.device_map["dit"],
+                vae_device=pipe.device_map["vae"],
+                progress=True,
+                offload=pipe.offload,
+                force_offload=force_offload,
+                chunk_frames=chunk_frames,
+                previewer=previewer,
+                preview_interval=args.preview,
+                preview_suffix=args.preview_suffix,
+            )
+
+        x = run_with_oom_retry(denoise_generate, args, pipe, mode_name="DENOISE")
 
         # Save output
         if x is not None:
@@ -1320,37 +1446,40 @@ if __name__ == "__main__":
 
             # Generate video using dual-image conditioning
             # Reuses the same function as video join mode
-            x = generate_sample_v2v_join(
-                shape,
-                args.prompt,
-                pipe.dit,
-                pipe.vae,
-                pipe.conf,
-                text_embedder=pipe.text_embedder,
-                start_cond_latents=start_cond_latents,
-                end_cond_latents=end_cond_latents,
-                num_steps=num_steps,
-                guidance_weight=args.guidance_weight if args.guidance_weight else pipe.guidance_weight,
-                scheduler_scale=args.scheduler_scale,
-                negative_caption=args.negative_prompt,
-                clip_prompt=args.clip_prompt,
-                seed=args.seed,
-                device=pipe.device_map["dit"],
-                vae_device=pipe.device_map["vae"],
-                progress=True,
-                offload=pipe.offload,
-                force_offload=force_offload,
-                previewer=previewer,
-                preview_interval=args.preview,
-                preview_suffix=args.preview_suffix,
-                stop_check=check_stop_signals,
-                checkpoint_path=checkpoint_file,
-                save_latents=args.save_latents,
-                use_apg=args.use_apg,
-                apg_momentum=args.apg_momentum,
-                apg_norm_threshold=args.apg_norm_threshold,
-                end_blend_weight=args.end_blend_weight,
-            )
+            def i2i_video_generate():
+                return generate_sample_v2v_join(
+                    shape,
+                    args.prompt,
+                    pipe.dit,
+                    pipe.vae,
+                    pipe.conf,
+                    text_embedder=pipe.text_embedder,
+                    start_cond_latents=start_cond_latents,
+                    end_cond_latents=end_cond_latents,
+                    num_steps=num_steps,
+                    guidance_weight=args.guidance_weight if args.guidance_weight else pipe.guidance_weight,
+                    scheduler_scale=args.scheduler_scale,
+                    negative_caption=args.negative_prompt,
+                    clip_prompt=args.clip_prompt,
+                    seed=args.seed,
+                    device=pipe.device_map["dit"],
+                    vae_device=pipe.device_map["vae"],
+                    progress=True,
+                    offload=pipe.offload,
+                    force_offload=force_offload,
+                    previewer=previewer,
+                    preview_interval=args.preview,
+                    preview_suffix=args.preview_suffix,
+                    stop_check=check_stop_signals,
+                    checkpoint_path=checkpoint_file,
+                    save_latents=args.save_latents,
+                    use_apg=args.use_apg,
+                    apg_momentum=args.apg_momentum,
+                    apg_norm_threshold=args.apg_norm_threshold,
+                    end_blend_weight=args.end_blend_weight,
+                )
+
+            x = run_with_oom_retry(i2i_video_generate, args, pipe, mode_name="I2I_VIDEO")
 
             # Save output video directly (no concatenation needed unlike video join mode)
             if x is not None:
@@ -1447,37 +1576,40 @@ if __name__ == "__main__":
                 print(f">>> V2V JOIN: Preview disabled (preview={args.preview})")
 
             # Generate transition using dual conditioning
-            x = generate_sample_v2v_join(
-                shape,
-                args.prompt,
-                pipe.dit,
-                pipe.vae,
-                pipe.conf,
-                text_embedder=pipe.text_embedder,
-                start_cond_latents=start_cond_latents,
-                end_cond_latents=end_cond_latents,
-                num_steps=num_steps,
-                guidance_weight=args.guidance_weight if args.guidance_weight else pipe.guidance_weight,
-                scheduler_scale=args.scheduler_scale,
-                negative_caption=args.negative_prompt,
-                clip_prompt=args.clip_prompt,
-                seed=args.seed,
-                device=pipe.device_map["dit"],
-                vae_device=pipe.device_map["vae"],
-                progress=True,
-                offload=pipe.offload,
-                force_offload=force_offload,
-                previewer=previewer,
-                preview_interval=args.preview,
-                preview_suffix=args.preview_suffix,
-                stop_check=check_stop_signals,
-                checkpoint_path=checkpoint_file,
-                save_latents=args.save_latents,
-                use_apg=args.use_apg,
-                apg_momentum=args.apg_momentum,
-                apg_norm_threshold=args.apg_norm_threshold,
-                end_blend_weight=args.end_blend_weight,
-            )
+            def v2v_join_generate():
+                return generate_sample_v2v_join(
+                    shape,
+                    args.prompt,
+                    pipe.dit,
+                    pipe.vae,
+                    pipe.conf,
+                    text_embedder=pipe.text_embedder,
+                    start_cond_latents=start_cond_latents,
+                    end_cond_latents=end_cond_latents,
+                    num_steps=num_steps,
+                    guidance_weight=args.guidance_weight if args.guidance_weight else pipe.guidance_weight,
+                    scheduler_scale=args.scheduler_scale,
+                    negative_caption=args.negative_prompt,
+                    clip_prompt=args.clip_prompt,
+                    seed=args.seed,
+                    device=pipe.device_map["dit"],
+                    vae_device=pipe.device_map["vae"],
+                    progress=True,
+                    offload=pipe.offload,
+                    force_offload=force_offload,
+                    previewer=previewer,
+                    preview_interval=args.preview,
+                    preview_suffix=args.preview_suffix,
+                    stop_check=check_stop_signals,
+                    checkpoint_path=checkpoint_file,
+                    save_latents=args.save_latents,
+                    use_apg=args.use_apg,
+                    apg_momentum=args.apg_momentum,
+                    apg_norm_threshold=args.apg_norm_threshold,
+                    end_blend_weight=args.end_blend_weight,
+                )
+
+            x = run_with_oom_retry(v2v_join_generate, args, pipe, mode_name="V2V_JOIN")
 
             # Concatenate: video1 + generated middle + video2
             if x is not None:
@@ -1664,37 +1796,40 @@ if __name__ == "__main__":
                     previewer = None
 
             # Generate video using dual conditioning (video start + image end)
-            x = generate_sample_v2v_join(
-                shape,
-                args.prompt,
-                pipe.dit,
-                pipe.vae,
-                pipe.conf,
-                text_embedder=pipe.text_embedder,
-                start_cond_latents=start_cond_latents,
-                end_cond_latents=end_cond_latents,
-                num_steps=num_steps,
-                guidance_weight=args.guidance_weight if args.guidance_weight else pipe.guidance_weight,
-                scheduler_scale=args.scheduler_scale,
-                negative_caption=args.negative_prompt,
-                clip_prompt=args.clip_prompt,
-                seed=args.seed,
-                device=pipe.device_map["dit"],
-                vae_device=pipe.device_map["vae"],
-                progress=True,
-                offload=pipe.offload,
-                force_offload=force_offload,
-                previewer=previewer,
-                preview_interval=args.preview,
-                preview_suffix=args.preview_suffix,
-                stop_check=check_stop_signals,
-                checkpoint_path=checkpoint_file,
-                save_latents=args.save_latents,
-                use_apg=args.use_apg,
-                apg_momentum=args.apg_momentum,
-                apg_norm_threshold=args.apg_norm_threshold,
-                end_blend_weight=args.end_blend_weight,
-            )
+            def video_endimage_generate():
+                return generate_sample_v2v_join(
+                    shape,
+                    args.prompt,
+                    pipe.dit,
+                    pipe.vae,
+                    pipe.conf,
+                    text_embedder=pipe.text_embedder,
+                    start_cond_latents=start_cond_latents,
+                    end_cond_latents=end_cond_latents,
+                    num_steps=num_steps,
+                    guidance_weight=args.guidance_weight if args.guidance_weight else pipe.guidance_weight,
+                    scheduler_scale=args.scheduler_scale,
+                    negative_caption=args.negative_prompt,
+                    clip_prompt=args.clip_prompt,
+                    seed=args.seed,
+                    device=pipe.device_map["dit"],
+                    vae_device=pipe.device_map["vae"],
+                    progress=True,
+                    offload=pipe.offload,
+                    force_offload=force_offload,
+                    previewer=previewer,
+                    preview_interval=args.preview,
+                    preview_suffix=args.preview_suffix,
+                    stop_check=check_stop_signals,
+                    checkpoint_path=checkpoint_file,
+                    save_latents=args.save_latents,
+                    use_apg=args.use_apg,
+                    apg_momentum=args.apg_momentum,
+                    apg_norm_threshold=args.apg_norm_threshold,
+                    end_blend_weight=args.end_blend_weight,
+                )
+
+            x = run_with_oom_retry(video_endimage_generate, args, pipe, mode_name="VIDEO_ENDIMAGE")
 
             # Concatenate input video with generated frames
             if x is not None:
@@ -1833,35 +1968,38 @@ if __name__ == "__main__":
                 print(f">>> V2V: Preview disabled (preview={args.preview})")
 
             # Generate continuation using visual conditioning (I2V approach)
-            x = generate_sample_v2v(
-                shape,
-                args.prompt,
-                pipe.dit,
-                pipe.vae,
-                pipe.conf,
-                text_embedder=pipe.text_embedder,
-                cond_latents=cond_latents,
-                num_steps=num_steps,
-                guidance_weight=args.guidance_weight if args.guidance_weight else pipe.guidance_weight,
-                scheduler_scale=args.scheduler_scale,
-                negative_caption=args.negative_prompt,
-                clip_prompt=args.clip_prompt,
-                seed=args.seed,
-                device=pipe.device_map["dit"],
-                vae_device=pipe.device_map["vae"],
-                progress=True,
-                offload=pipe.offload,
-                force_offload=force_offload,
-                previewer=previewer,
-                preview_interval=args.preview,
-                preview_suffix=args.preview_suffix,
-                stop_check=check_stop_signals,
-                checkpoint_path=checkpoint_file,
-                save_latents=args.save_latents,
-                use_apg=args.use_apg,
-                apg_momentum=args.apg_momentum,
-                apg_norm_threshold=args.apg_norm_threshold,
-            )
+            def v2v_generate():
+                return generate_sample_v2v(
+                    shape,
+                    args.prompt,
+                    pipe.dit,
+                    pipe.vae,
+                    pipe.conf,
+                    text_embedder=pipe.text_embedder,
+                    cond_latents=cond_latents,
+                    num_steps=num_steps,
+                    guidance_weight=args.guidance_weight if args.guidance_weight else pipe.guidance_weight,
+                    scheduler_scale=args.scheduler_scale,
+                    negative_caption=args.negative_prompt,
+                    clip_prompt=args.clip_prompt,
+                    seed=args.seed,
+                    device=pipe.device_map["dit"],
+                    vae_device=pipe.device_map["vae"],
+                    progress=True,
+                    offload=pipe.offload,
+                    force_offload=force_offload,
+                    previewer=previewer,
+                    preview_interval=args.preview,
+                    preview_suffix=args.preview_suffix,
+                    stop_check=check_stop_signals,
+                    checkpoint_path=checkpoint_file,
+                    save_latents=args.save_latents,
+                    use_apg=args.use_apg,
+                    apg_momentum=args.apg_momentum,
+                    apg_norm_threshold=args.apg_norm_threshold,
+                )
+
+            x = run_with_oom_retry(v2v_generate, args, pipe, mode_name="V2V")
 
             # Concatenate input video with newly generated frames
             if x is not None:
@@ -1944,40 +2082,46 @@ if __name__ == "__main__":
                 print(f"Resizing input image to {args.width}x{args.height} for i2v mode (alignment: {alignment})")
                 image_to_use = resize_image_to_resolution(args.image, args.width, args.height, alignment)
 
-            x = pipe(args.prompt,
-                     image=image_to_use,
-                     time_length=args.video_duration,
-                     num_steps=args.sample_steps,
-                     guidance_weight=args.guidance_weight,
-                     scheduler_scale=args.scheduler_scale,
-                     negative_caption=args.negative_prompt,
-                     expand_prompts=args.expand_prompt,
-                     clip_prompt=args.clip_prompt,
-                     save_path=args.output_filename,
-                     seed=args.seed,
-                     preview=args.preview,
-                     preview_suffix=args.preview_suffix,
-                     stop_check=check_stop_signals,
-                     checkpoint_path=checkpoint_file,
-                     save_latents=args.save_latents)
+            def i2v_generate():
+                return pipe(args.prompt,
+                         image=image_to_use,
+                         time_length=args.video_duration,
+                         num_steps=args.sample_steps,
+                         guidance_weight=args.guidance_weight,
+                         scheduler_scale=args.scheduler_scale,
+                         negative_caption=args.negative_prompt,
+                         expand_prompts=args.expand_prompt,
+                         clip_prompt=args.clip_prompt,
+                         save_path=args.output_filename,
+                         seed=args.seed,
+                         preview=args.preview,
+                         preview_suffix=args.preview_suffix,
+                         stop_check=check_stop_signals,
+                         checkpoint_path=checkpoint_file,
+                         save_latents=args.save_latents)
+
+            x = run_with_oom_retry(i2v_generate, args, pipe, mode_name="I2V")
     else:
-        x = pipe(args.prompt,
-             time_length=args.video_duration,
-             width=args.width,
-             height=args.height,
-             num_steps=args.sample_steps,
-             guidance_weight=args.guidance_weight,
-             scheduler_scale=args.scheduler_scale,
-             negative_caption=args.negative_prompt,
-             expand_prompts=args.expand_prompt,
-             clip_prompt=args.clip_prompt,
-             save_path=args.output_filename,
-             seed=args.seed,
-             preview=args.preview,
-             preview_suffix=args.preview_suffix,
-             stop_check=check_stop_signals,
-             checkpoint_path=checkpoint_file,
-             save_latents=args.save_latents)
+        def t2v_generate():
+            return pipe(args.prompt,
+                 time_length=args.video_duration,
+                 width=args.width,
+                 height=args.height,
+                 num_steps=args.sample_steps,
+                 guidance_weight=args.guidance_weight,
+                 scheduler_scale=args.scheduler_scale,
+                 negative_caption=args.negative_prompt,
+                 expand_prompts=args.expand_prompt,
+                 clip_prompt=args.clip_prompt,
+                 save_path=args.output_filename,
+                 seed=args.seed,
+                 preview=args.preview,
+                 preview_suffix=args.preview_suffix,
+                 stop_check=check_stop_signals,
+                 checkpoint_path=checkpoint_file,
+                 save_latents=args.save_latents)
+
+        x = run_with_oom_retry(t2v_generate, args, pipe, mode_name="T2V")
 
     print(f"TIME ELAPSED: {time.perf_counter() - start_time}")
 
