@@ -1245,6 +1245,7 @@ class Kandinsky5I2VPipeline:
         world_size: int = 1,
         conf = None,
         offload: bool = False,
+        vae_dtype: torch.dtype = torch.bfloat16,
     ):
         self.dit = dit
         self.text_embedder = text_embedder
@@ -1258,6 +1259,7 @@ class Kandinsky5I2VPipeline:
         self.guidance_weight = conf.model.guidance_weight
 
         self.offload = offload
+        self.vae_dtype = vae_dtype
 
 
     def __call__(
@@ -1424,6 +1426,7 @@ class Kandinsky5I2VPipeline:
             stop_check=stop_check,
             checkpoint_path=checkpoint_path,
             save_latents=save_latents,
+            vae_dtype=self.vae_dtype,
         )
 
         # Handle checkpoint save (images will be None)

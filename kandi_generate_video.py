@@ -956,7 +956,7 @@ if __name__ == "__main__":
             vae = pipe.vae.to("cuda")
 
             with torch.no_grad():
-                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                with torch.autocast(device_type="cuda", dtype=vae_dtype):
                     # Reshape latents: (frames, h, w, 16) -> (bs, frames, h, w, 16)
                     images = latent_visual.reshape(
                         bs,

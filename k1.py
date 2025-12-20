@@ -3329,7 +3329,7 @@ def create_interface():
 
                 with gr.Row():
                     recent_output_folder = gr.Textbox(label="Output Folder", value="outputs", scale=3)
-                    recent_max_files = gr.Slider(minimum=5, maximum=50, step=5, value=20, label="Max Files", scale=1)
+                    recent_max_files = gr.Slider(minimum=1, maximum=50, step=5, value=4, label="Max Files", scale=1)
                     refresh_recent_btn = gr.Button("Refresh", variant="primary", scale=1)
 
                 recent_gallery = gr.Gallery(

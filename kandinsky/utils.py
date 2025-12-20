@@ -290,6 +290,7 @@ def get_T2V_pipeline(
         world_size=world_size,
         conf=conf,
         offload=offload,
+        vae_dtype=vae_dtype,
     )
 
 def get_I2V_pipeline(
@@ -524,6 +525,7 @@ def get_I2V_pipeline(
         world_size=world_size,
         conf=conf,
         offload=offload,
+        vae_dtype=vae_dtype,
     )
 
 
@@ -1061,6 +1063,7 @@ def get_I2V_pipeline_with_block_swap(
         world_size=world_size,
         conf=conf,
         offload=offload,
+        vae_dtype=vae_dtype,
     )
 
 
@@ -1348,4 +1351,5 @@ def get_T2V_pipeline_with_block_swap(
         world_size=world_size,
         conf=conf,
         offload=offload,
+        vae_dtype=vae_dtype,
     )
