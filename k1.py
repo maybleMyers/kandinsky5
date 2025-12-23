@@ -191,6 +191,8 @@ def generate_video(
     vae_spatial_tile_height: int,
     vae_spatial_tile_width: int,
     use_prompt_expansion: bool,
+    use_prompt_template: bool,
+    custom_system_prompt: str,
     clip_prompt: str,
     save_latents: bool,
     enable_ultravico: bool = False,
@@ -361,6 +363,14 @@ def generate_video(
 
         # Add expand_prompt parameter
         command.extend(["--expand_prompt", "1" if use_prompt_expansion else "0"])
+
+        # Add no_prompt_template if system prompt template is disabled
+        if not use_prompt_template:
+            command.append("--no_prompt_template")
+
+        # Add custom_system_prompt if provided (only used when use_prompt_template is True)
+        if use_prompt_template and custom_system_prompt and custom_system_prompt.strip():
+            command.extend(["--custom_system_prompt", custom_system_prompt.strip()])
 
         # Add clip_prompt if provided
         if clip_prompt and clip_prompt.strip():
@@ -625,6 +635,8 @@ def generate_v2v_video(
     vae_spatial_tile_height: int,
     vae_spatial_tile_width: int,
     use_prompt_expansion: bool,
+    use_prompt_template: bool,
+    custom_system_prompt: str,
     clip_prompt: str,
     save_latents: bool,
     use_apg: bool,
@@ -824,6 +836,14 @@ def generate_v2v_video(
 
         # Add expand_prompt parameter
         command.extend(["--expand_prompt", "1" if use_prompt_expansion else "0"])
+
+        # Add no_prompt_template if system prompt template is disabled
+        if not use_prompt_template:
+            command.append("--no_prompt_template")
+
+        # Add custom_system_prompt if provided (only used when use_prompt_template is True)
+        if use_prompt_template and custom_system_prompt and custom_system_prompt.strip():
+            command.extend(["--custom_system_prompt", custom_system_prompt.strip()])
 
         # Add clip_prompt if provided
         if clip_prompt and clip_prompt.strip():
@@ -1097,6 +1117,8 @@ def submit_to_queue(
     vae_spatial_tile_height: int,
     vae_spatial_tile_width: int,
     use_prompt_expansion: bool,
+    use_prompt_template: bool,
+    custom_system_prompt: str,
     clip_prompt: str,
     save_latents: bool,
     enable_ultravico: bool = False,
@@ -1241,6 +1263,14 @@ def submit_to_queue(
 
         command.extend(["--expand_prompt", "1" if use_prompt_expansion else "0"])
 
+        # Add no_prompt_template if system prompt template is disabled
+        if not use_prompt_template:
+            command.append("--no_prompt_template")
+
+        # Add custom_system_prompt if provided (only used when use_prompt_template is True)
+        if use_prompt_template and custom_system_prompt and custom_system_prompt.strip():
+            command.extend(["--custom_system_prompt", custom_system_prompt.strip()])
+
         if clip_prompt and clip_prompt.strip():
             command.extend(["--clip_prompt", clip_prompt.strip()])
 
@@ -1343,6 +1373,8 @@ def generate_via_queue(
     vae_spatial_tile_height: int,
     vae_spatial_tile_width: int,
     use_prompt_expansion: bool,
+    use_prompt_template: bool,
+    custom_system_prompt: str,
     clip_prompt: str,
     save_latents: bool,
     enable_ultravico: bool = False,
@@ -1380,7 +1412,7 @@ def generate_via_queue(
         enable_preview, preview_steps,
         enable_vae_chunking, vae_temporal_tile_frames, vae_temporal_stride_frames,
         vae_spatial_tile_height, vae_spatial_tile_width,
-        use_prompt_expansion, clip_prompt, save_latents,
+        use_prompt_expansion, use_prompt_template, custom_system_prompt, clip_prompt, save_latents,
         enable_ultravico, ultravico_alpha, ultravico_suppress_harmonics, ultravico_beta,
         use_sdnq, sdnq_weights_dtype, sdnq_triton_mm, sdnq_compile,
         end_blend_weight,
@@ -2383,6 +2415,11 @@ def create_interface():
                             value=True,
                             info="Expand prompt using Qwen 2.5 VL"
                         )
+                        use_prompt_template = gr.Checkbox(
+                            label="Use System Prompt Template",
+                            value=True,
+                            info="Wrap prompt with system instructions for video description"
+                        )
                         clip_token_count = gr.Textbox(
                             label="CLIP prompt Tokens",
                             value="0",
@@ -2670,6 +2707,24 @@ def create_interface():
                                 info="Decay at harmonic positions (only if suppress harmonics enabled)"
                             )
 
+                    with gr.Accordion("Custom System Prompt Template", open=False):
+                        gr.Markdown("""
+                        **Customize the system prompt that instructs Qwen how to interpret your text prompt.**
+
+                        By default, prompts are wrapped with instructions telling Qwen to describe video details
+                        (camera movement, style, actions, etc.). You can customize this or leave it empty to use the default.
+
+                        **Note:** This only applies when "Use System Prompt Template" is checked above.
+                        Leave empty to use the built-in default template.
+                        """)
+                        custom_system_prompt = gr.Textbox(
+                            label="Custom System Prompt",
+                            value="",
+                            lines=6,
+                            placeholder="Leave empty to use default. Example: You are a prompt engineer. Describe the video focusing on cinematic camera movements and dramatic lighting.",
+                            info="Custom instructions for the text encoder. Leave empty for default."
+                        )
+
                     save_path = gr.Textbox(label="Save Path", value="outputs")
 
                 random_seed_btn.click(
@@ -2737,7 +2792,7 @@ def create_interface():
                         enable_preview, preview_steps,
                         enable_vae_chunking, vae_temporal_tile_frames, vae_temporal_stride_frames,
                         vae_spatial_tile_height, vae_spatial_tile_width,
-                        use_prompt_expansion, clip_prompt,
+                        use_prompt_expansion, use_prompt_template, custom_system_prompt, clip_prompt,
                         save_latents_checkbox,
                         enable_ultravico, ultravico_alpha, ultravico_suppress_harmonics, ultravico_beta,
                         use_sdnq, sdnq_weights_dtype, sdnq_triton_mm, sdnq_compile,
@@ -2919,6 +2974,11 @@ def create_interface():
                             label="Use Prompt Expansion",
                             value=True,
                             info="Expand prompt using Qwen 2.5 VL"
+                        )
+                        v2v_use_prompt_template = gr.Checkbox(
+                            label="Use System Prompt Template",
+                            value=True,
+                            info="Wrap prompt with system instructions for video description"
                         )
                         v2v_clip_token_count = gr.Textbox(
                             label="CLIP prompt Tokens",
@@ -3264,6 +3324,24 @@ def create_interface():
                                 info="Decay at harmonic positions (only if suppress harmonics enabled)"
                             )
 
+                    with gr.Accordion("Custom System Prompt Template", open=False):
+                        gr.Markdown("""
+                        **Customize the system prompt that instructs Qwen how to interpret your text prompt.**
+
+                        By default, prompts are wrapped with instructions telling Qwen to describe video details
+                        (camera movement, style, actions, etc.). You can customize this or leave it empty to use the default.
+
+                        **Note:** This only applies when "Use System Prompt Template" is checked above.
+                        Leave empty to use the built-in default template.
+                        """)
+                        v2v_custom_system_prompt = gr.Textbox(
+                            label="Custom System Prompt",
+                            value="",
+                            lines=6,
+                            placeholder="Leave empty to use default. Example: You are a prompt engineer. Describe the video focusing on cinematic camera movements and dramatic lighting.",
+                            info="Custom instructions for the text encoder. Leave empty for default."
+                        )
+
                     v2v_save_path = gr.Textbox(label="Save Path", value="outputs")
 
                 v2v_random_seed_btn.click(
@@ -3339,7 +3417,7 @@ def create_interface():
                         v2v_enable_preview, v2v_preview_steps,
                         v2v_enable_vae_chunking, v2v_vae_temporal_tile_frames, v2v_vae_temporal_stride_frames,
                         v2v_vae_spatial_tile_height, v2v_vae_spatial_tile_width,
-                        v2v_use_prompt_expansion, v2v_clip_prompt,
+                        v2v_use_prompt_expansion, v2v_use_prompt_template, v2v_custom_system_prompt, v2v_clip_prompt,
                         v2v_save_latents_checkbox,
                         v2v_use_apg, v2v_apg_momentum, v2v_apg_norm_threshold,
                         v2v_enable_denoise, v2v_denoise_strength,

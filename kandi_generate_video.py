@@ -324,6 +324,12 @@ def parse_args():
         help="Disable the system prompt template wrapper. By default, prompts are wrapped with instructions that tell Qwen to describe video details (camera movement, style, etc.). Use this flag to pass your prompt directly without the template."
     )
     parser.add_argument(
+        "--custom_system_prompt",
+        type=str,
+        default=None,
+        help="Custom system prompt to use instead of the default. Only used when --no_prompt_template is NOT set. Example: 'You are a prompt engineer. Describe the video focusing on cinematic camera movements.'"
+    )
+    parser.add_argument(
         "--sample_steps",
         type=int,
         default=None,
@@ -714,6 +720,8 @@ if __name__ == "__main__":
     # Log prompt template status
     if args.no_prompt_template:
         print(">>> Prompt template DISABLED - using raw prompts without system instruction wrapper")
+    elif args.custom_system_prompt:
+        print(f">>> Using CUSTOM system prompt: {args.custom_system_prompt[:100]}{'...' if len(args.custom_system_prompt) > 100 else ''}")
 
     # Convert string dtype to torch dtype
     dtype_map = {
@@ -1303,6 +1311,7 @@ if __name__ == "__main__":
             preview_interval=args.preview,
             preview_suffix=args.preview_suffix,
             use_prompt_template=not args.no_prompt_template,
+            custom_system_prompt=args.custom_system_prompt,
         )
 
         # Save output
@@ -1441,6 +1450,7 @@ if __name__ == "__main__":
                 apg_norm_threshold=args.apg_norm_threshold,
                 end_blend_weight=args.end_blend_weight,
                 use_prompt_template=not args.no_prompt_template,
+                custom_system_prompt=args.custom_system_prompt,
             )
 
             # Save output video directly (no concatenation needed unlike video join mode)
@@ -1569,6 +1579,7 @@ if __name__ == "__main__":
                 apg_norm_threshold=args.apg_norm_threshold,
                 end_blend_weight=args.end_blend_weight,
                 use_prompt_template=not args.no_prompt_template,
+                custom_system_prompt=args.custom_system_prompt,
             )
 
             # Concatenate: video1 + generated middle + video2
@@ -1787,6 +1798,7 @@ if __name__ == "__main__":
                 apg_norm_threshold=args.apg_norm_threshold,
                 end_blend_weight=args.end_blend_weight,
                 use_prompt_template=not args.no_prompt_template,
+                custom_system_prompt=args.custom_system_prompt,
             )
 
             # Concatenate input video with generated frames
@@ -1955,6 +1967,7 @@ if __name__ == "__main__":
                 apg_momentum=args.apg_momentum,
                 apg_norm_threshold=args.apg_norm_threshold,
                 use_prompt_template=not args.no_prompt_template,
+                custom_system_prompt=args.custom_system_prompt,
             )
 
             # Concatenate input video with newly generated frames
@@ -2054,7 +2067,8 @@ if __name__ == "__main__":
                      stop_check=check_stop_signals,
                      checkpoint_path=checkpoint_file,
                      save_latents=args.save_latents,
-                     use_prompt_template=not args.no_prompt_template)
+                     use_prompt_template=not args.no_prompt_template,
+                     custom_system_prompt=args.custom_system_prompt)
     else:
         x = pipe(args.prompt,
              time_length=args.video_duration,
@@ -2073,7 +2087,8 @@ if __name__ == "__main__":
              stop_check=check_stop_signals,
              checkpoint_path=checkpoint_file,
              save_latents=args.save_latents,
-             use_prompt_template=not args.no_prompt_template)
+             use_prompt_template=not args.no_prompt_template,
+             custom_system_prompt=args.custom_system_prompt)
 
     print(f"TIME ELAPSED: {time.perf_counter() - start_time}")
 
