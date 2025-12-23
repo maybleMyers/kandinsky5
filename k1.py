@@ -80,25 +80,30 @@ def parse_progress_line(line: str) -> Optional[str]:
 
 def get_k5_lora_options(lora_folder: str = "lora") -> List[str]:
     """
-    Get list of available Kandinsky 5 LoRA directories.
-    K5 LoRAs are directories containing config_lora.json and lora.safetensors.
-    Returns ['None'] + list of valid LoRA directory names.
+    Get list of available Kandinsky 5 LoRAs.
+    Supports two formats:
+    1. Official K5 LoRAs: directories containing config_lora.json and lora.safetensors
+    2. Musubi tuner LoRAs: single .safetensors files directly in the lora folder
+    Returns ['None'] + list of valid LoRA names.
     """
     if not os.path.exists(lora_folder):
         return ["None"]
 
-    lora_dirs = []
+    lora_items = []
     for item in os.listdir(lora_folder):
         item_path = os.path.join(lora_folder, item)
         if os.path.isdir(item_path):
-            # Check if it's a valid K5 LoRA directory
+            # Check if it's a valid K5 LoRA directory (official format)
             config_path = os.path.join(item_path, "config_lora.json")
             weights_path = os.path.join(item_path, "lora.safetensors")
             if os.path.exists(config_path) and os.path.exists(weights_path):
-                lora_dirs.append(item)
+                lora_items.append(item)
+        elif item.endswith(".safetensors"):
+            # Single safetensors file (musubi tuner format)
+            lora_items.append(item)
 
-    lora_dirs.sort(key=str.lower)
-    return ["None"] + lora_dirs
+    lora_items.sort(key=str.lower)
+    return ["None"] + lora_items
 
 
 def refresh_k5_lora_dropdowns(lora_folder: str) -> List:
@@ -396,12 +401,13 @@ def generate_video(
         if lora_folder and os.path.exists(lora_folder):
             for lora_name, weight in lora_inputs:
                 if lora_name and lora_name != "None":
-                    lora_dir = os.path.join(lora_folder, lora_name)
-                    if os.path.isdir(lora_dir):
-                        lora_paths.append(lora_dir)
+                    lora_path = os.path.join(lora_folder, lora_name)
+                    # Support both folder (PEFT format) and single file (musubi format)
+                    if os.path.isdir(lora_path) or (os.path.isfile(lora_path) and lora_name.endswith(".safetensors")):
+                        lora_paths.append(lora_path)
                         lora_weights.append(str(weight))
                     else:
-                        print(f"Warning: LoRA directory not found: {lora_dir}")
+                        print(f"Warning: LoRA not found: {lora_path}")
 
         if lora_paths:
             command.extend(["--lora_path"] + lora_paths)
@@ -858,12 +864,13 @@ def generate_v2v_video(
         if lora_folder and os.path.exists(lora_folder):
             for lora_name, weight in lora_inputs:
                 if lora_name and lora_name != "None":
-                    lora_dir = os.path.join(lora_folder, lora_name)
-                    if os.path.isdir(lora_dir):
-                        lora_paths.append(lora_dir)
+                    lora_path = os.path.join(lora_folder, lora_name)
+                    # Support both folder (PEFT format) and single file (musubi format)
+                    if os.path.isdir(lora_path) or (os.path.isfile(lora_path) and lora_name.endswith(".safetensors")):
+                        lora_paths.append(lora_path)
                         lora_weights_list.append(str(weight))
                     else:
-                        print(f"Warning: LoRA directory not found: {lora_dir}")
+                        print(f"Warning: LoRA not found: {lora_path}")
 
         if lora_paths:
             command.extend(["--lora_path"] + lora_paths)

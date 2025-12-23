@@ -937,36 +937,45 @@ if __name__ == "__main__":
         if len(lora_triggers) != len(args.lora_path):
             raise ValueError(f"Number of --lora_trigger ({len(lora_triggers)}) must match --lora_path ({len(args.lora_path)})")
 
-        for i, lora_dir in enumerate(args.lora_path):
-            # Construct paths to config and weights
-            config_path = os.path.join(lora_dir, "config_lora.json")
-            weights_path = os.path.join(lora_dir, "lora.safetensors")
+        for i, lora_item in enumerate(args.lora_path):
+            # Detect LoRA format: folder (official PEFT) or single file (musubi tuner)
+            if os.path.isdir(lora_item):
+                # Official K5 LoRA format: folder with config_lora.json + lora.safetensors
+                config_path = os.path.join(lora_item, "config_lora.json")
+                weights_path = os.path.join(lora_item, "lora.safetensors")
 
-            # Check if files exist
-            if not os.path.exists(config_path):
-                raise FileNotFoundError(f"LoRA config not found: {config_path}")
-            if not os.path.exists(weights_path):
-                raise FileNotFoundError(f"LoRA weights not found: {weights_path}")
+                if not os.path.exists(config_path):
+                    raise FileNotFoundError(f"LoRA config not found: {config_path}")
+                if not os.path.exists(weights_path):
+                    raise FileNotFoundError(f"LoRA weights not found: {weights_path}")
 
-            # Generate unique adapter name
-            adapter_name = os.path.basename(lora_dir) or f"lora_{i}"
+                adapter_name = os.path.basename(lora_item) or f"lora_{i}"
 
-            # Load the adapter
-            print(f">>> Loading LoRA {i+1}/{len(args.lora_path)}: {lora_dir}")
-            print(f"    Adapter name: {adapter_name}, Weight: {lora_weights[i]}")
+                print(f">>> Loading LoRA {i+1}/{len(args.lora_path)} (PEFT format): {lora_item}")
+                print(f"    Adapter name: {adapter_name}, Weight: {lora_weights[i]}")
 
-            pipe.load_adapter(
-                adapter_config=config_path,
-                adapter_path=weights_path,
-                adapter_name=adapter_name,
-                trigger=lora_triggers[i]
-            )
+                pipe.load_adapter(
+                    adapter_config=config_path,
+                    adapter_path=weights_path,
+                    adapter_name=adapter_name,
+                    trigger=lora_triggers[i]
+                )
 
-            # Note: PEFT doesn't support weight merging directly. The weight parameter is stored
-            # for potential future use with weight-based merging implementations.
-            if lora_weights[i] != 1.0:
-                print(f"    Note: LoRA weight {lora_weights[i]} specified but PEFT adapter system uses full weight.")
-                print(f"    For weight-based merging, consider using a merge tool before loading.")
+                if lora_weights[i] != 1.0:
+                    print(f"    Note: LoRA weight {lora_weights[i]} specified but PEFT adapter system uses full weight.")
+
+            elif os.path.isfile(lora_item) and lora_item.endswith(".safetensors"):
+                # Musubi tuner format: single .safetensors file
+                print(f">>> Loading LoRA {i+1}/{len(args.lora_path)} (musubi format): {lora_item}")
+                print(f"    Weight: {lora_weights[i]}")
+
+                pipe.load_musubi_lora(
+                    lora_path=lora_item,
+                    multiplier=lora_weights[i],
+                    trigger=lora_triggers[i]
+                )
+            else:
+                raise ValueError(f"Invalid LoRA path: {lora_item}. Must be a directory or .safetensors file.")
 
         print(f">>> All LoRA adapters loaded successfully\n")
 

@@ -218,6 +218,97 @@ class Kandinsky5T2VPipeline:
         self.peft_trigger = ""
         logging.info("All LoRA adapters disabled.")
 
+    def load_musubi_lora(self, lora_path: str, multiplier: float = 1.0, trigger: Optional[str] = None) -> None:
+        """
+        Load a LoRA trained with musubi tuner (single safetensors file format).
+        This merges the LoRA weights directly into the model instead of using PEFT adapters.
+
+        Args:
+            lora_path: Path to the .safetensors LoRA file
+            multiplier: Weight multiplier for the LoRA (0.0-2.0)
+            trigger: Optional trigger word to prepend to prompts
+        """
+        import re
+
+        logging.info(f"Loading musubi-format LoRA from {lora_path} with multiplier {multiplier}")
+
+        # Load the LoRA weights
+        lora_sd = load_file(lora_path)
+
+        # Try to get trigger from metadata
+        try:
+            metadata = read_safetensors_json(lora_path)
+            if trigger is None and "__metadata__" in metadata:
+                trigger = metadata["__metadata__"].get("trigger", "")
+        except:
+            pass
+
+        if trigger:
+            self.peft_trigger = trigger
+            logging.info(f"LoRA trigger word: '{trigger}'")
+
+        # Group LoRA weights by module
+        lora_modules = {}
+        for key, weight in lora_sd.items():
+            if not key.startswith("lora_unet_"):
+                continue
+
+            # Parse the key: lora_unet_<module_path>.lora_down.weight or .lora_up.weight or .alpha
+            match = re.match(r"lora_unet_(.+)\.(lora_down|lora_up|alpha)(\.weight)?$", key)
+            if not match:
+                continue
+
+            module_key = match.group(1)
+            weight_type = match.group(2)
+
+            if module_key not in lora_modules:
+                lora_modules[module_key] = {}
+            lora_modules[module_key][weight_type] = weight
+
+        # Apply LoRA weights to matching DiT parameters
+        applied_count = 0
+        for module_key, weights in lora_modules.items():
+            if "lora_down" not in weights or "lora_up" not in weights:
+                continue
+
+            lora_down = weights["lora_down"]
+            lora_up = weights["lora_up"]
+            alpha = weights.get("alpha", torch.tensor(lora_down.shape[0]))
+
+            rank = lora_down.shape[0]
+            scale = (alpha.item() / rank) * multiplier
+
+            # Try to find the matching parameter in the DiT
+            target_param = None
+            for name, param in self.dit.named_parameters():
+                normalized_name = name.replace(".", "_")
+                if normalized_name == module_key or module_key in normalized_name:
+                    if name.endswith(".weight"):
+                        target_param = param
+                        break
+
+            if target_param is not None:
+                with torch.no_grad():
+                    lora_down = lora_down.to(target_param.device, target_param.dtype)
+                    lora_up = lora_up.to(target_param.device, target_param.dtype)
+
+                    if len(target_param.shape) == 2:
+                        delta = (lora_up @ lora_down) * scale
+                    elif len(target_param.shape) == 1:
+                        delta = (lora_up.squeeze() * lora_down.squeeze()) * scale
+                    else:
+                        delta = (lora_up @ lora_down) * scale
+                        if delta.shape != target_param.shape:
+                            delta = delta.view(target_param.shape)
+
+                    target_param.add_(delta)
+                    applied_count += 1
+
+        logging.info(f"Applied {applied_count} LoRA modules from {lora_path}")
+
+        if applied_count == 0:
+            logging.warning(f"No LoRA modules were applied from {lora_path}. Check if the LoRA is compatible.")
+
     def expand_prompt(self, prompt):
         messages = [
             {
