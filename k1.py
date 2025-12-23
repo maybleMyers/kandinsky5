@@ -78,6 +78,42 @@ def parse_progress_line(line: str) -> Optional[str]:
 
     return None
 
+def get_k5_lora_options(lora_folder: str = "lora") -> List[str]:
+    """
+    Get list of available Kandinsky 5 LoRA directories.
+    K5 LoRAs are directories containing config_lora.json and lora.safetensors.
+    Returns ['None'] + list of valid LoRA directory names.
+    """
+    if not os.path.exists(lora_folder):
+        return ["None"]
+
+    lora_dirs = []
+    for item in os.listdir(lora_folder):
+        item_path = os.path.join(lora_folder, item)
+        if os.path.isdir(item_path):
+            # Check if it's a valid K5 LoRA directory
+            config_path = os.path.join(item_path, "config_lora.json")
+            weights_path = os.path.join(item_path, "lora.safetensors")
+            if os.path.exists(config_path) and os.path.exists(weights_path):
+                lora_dirs.append(item)
+
+    lora_dirs.sort(key=str.lower)
+    return ["None"] + lora_dirs
+
+
+def refresh_k5_lora_dropdowns(lora_folder: str) -> List:
+    """Refresh LoRA dropdown choices, resetting selections to 'None'."""
+    import gradio as gr
+    new_choices = get_k5_lora_options(lora_folder)
+    updates = []
+    for _ in range(4):
+        updates.extend([
+            gr.update(choices=new_choices, value="None"),
+            gr.update()  # Keep multiplier value unchanged
+        ])
+    return updates
+
+
 def get_recent_outputs(output_folder: str = "outputs", max_files: int = 20) -> List[Tuple[str, str]]:
     """
     Scan the output folder for recent video files.
@@ -165,6 +201,16 @@ def generate_video(
     sdnq_compile: bool = True,
     # End frame blending (0.0 = use denoised result, 1.0 = use target)
     end_blend_weight: float = 0.0,
+    # LoRA parameters
+    lora_folder: str = "lora",
+    lora1: str = "None",
+    lora2: str = "None",
+    lora3: str = "None",
+    lora4: str = "None",
+    lora1_weight: float = 1.0,
+    lora2_weight: float = 1.0,
+    lora3_weight: float = 1.0,
+    lora4_weight: float = 1.0,
 ) -> Generator[Tuple[List[Tuple[str, str]], Optional[str], str, str], None, None]:
     global stop_event, current_process, current_output_filename
     stop_event.clear()
@@ -340,6 +386,29 @@ def generate_video(
                 command.append("--no_sdnq_triton_mm")
             if not sdnq_compile:
                 command.append("--no_sdnq_compile")
+
+        # Add LoRA parameters if any are specified
+        lora_paths = []
+        lora_weights = []
+        lora_inputs = [
+            (lora1, lora1_weight),
+            (lora2, lora2_weight),
+            (lora3, lora3_weight),
+            (lora4, lora4_weight)
+        ]
+        if lora_folder and os.path.exists(lora_folder):
+            for lora_name, weight in lora_inputs:
+                if lora_name and lora_name != "None":
+                    lora_dir = os.path.join(lora_folder, lora_name)
+                    if os.path.isdir(lora_dir):
+                        lora_paths.append(lora_dir)
+                        lora_weights.append(str(weight))
+                    else:
+                        print(f"Warning: LoRA directory not found: {lora_dir}")
+
+        if lora_paths:
+            command.extend(["--lora_path"] + lora_paths)
+            command.extend(["--lora_weight"] + lora_weights)
 
         # Print the command for debugging/transparency
         print("\n" + "="*80)
@@ -570,6 +639,16 @@ def generate_v2v_video(
     sdnq_compile: bool = True,
     # End frame blending (0.0 = use denoised result, 1.0 = use target)
     end_blend_weight: float = 0.0,
+    # LoRA parameters
+    lora_folder: str = "lora",
+    lora1: str = "None",
+    lora2: str = "None",
+    lora3: str = "None",
+    lora4: str = "None",
+    lora1_weight: float = 1.0,
+    lora2_weight: float = 1.0,
+    lora3_weight: float = 1.0,
+    lora4_weight: float = 1.0,
 ) -> Generator[Tuple[List[Tuple[str, str]], Optional[str], str, str], None, None]:
     """Generate video from video input (video continuation/v2v mode)."""
     global stop_event, current_process, current_output_filename
@@ -769,6 +848,29 @@ def generate_v2v_video(
                 command.append("--no_sdnq_triton_mm")
             if not sdnq_compile:
                 command.append("--no_sdnq_compile")
+
+        # Add LoRA parameters if any are specified
+        lora_paths = []
+        lora_weights_list = []
+        lora_inputs = [
+            (lora1, lora1_weight),
+            (lora2, lora2_weight),
+            (lora3, lora3_weight),
+            (lora4, lora4_weight)
+        ]
+        if lora_folder and os.path.exists(lora_folder):
+            for lora_name, weight in lora_inputs:
+                if lora_name and lora_name != "None":
+                    lora_dir = os.path.join(lora_folder, lora_name)
+                    if os.path.isdir(lora_dir):
+                        lora_paths.append(lora_dir)
+                        lora_weights_list.append(str(weight))
+                    else:
+                        print(f"Warning: LoRA directory not found: {lora_dir}")
+
+        if lora_paths:
+            command.extend(["--lora_path"] + lora_paths)
+            command.extend(["--lora_weight"] + lora_weights_list)
 
         # Print the command for debugging/transparency
         print("\n" + "="*80)
@@ -2416,6 +2518,33 @@ def create_interface():
                             columns=[2], rows=[2], object_fit="contain", height="auto",
                             show_label=True, elem_id="gallery_k1", allow_preview=True, preview=True
                         )
+
+                        # LoRA Section
+                        with gr.Accordion("LoRA (Style Adapters)", open=False):
+                            lora_folder = gr.Textbox(
+                                label="LoRA Folder",
+                                value="lora",
+                                info="Folder containing K5 LoRA directories (each with config_lora.json + lora.safetensors)"
+                            )
+                            lora_refresh_btn = gr.Button("🔄 Refresh LoRAs", size="sm")
+                            lora_weights = []
+                            lora_multipliers = []
+                            for i in range(4):
+                                with gr.Row():
+                                    lora_weights.append(gr.Dropdown(
+                                        label=f"LoRA {i+1}",
+                                        choices=get_k5_lora_options("lora"),
+                                        value="None",
+                                        allow_custom_value=False,
+                                        interactive=True,
+                                        scale=2
+                                    ))
+                                    lora_multipliers.append(gr.Slider(
+                                        minimum=0.0, maximum=2.0, value=1.0, step=0.05,
+                                        label="Weight",
+                                        scale=1
+                                    ))
+
                         with gr.Accordion("Latent Preview (During Generation)", open=True):
                             enable_preview = gr.Checkbox(label="Enable Latent Preview", value=True)
                             preview_steps = gr.Slider(minimum=1, maximum=50, step=1, value=5,
@@ -2583,6 +2712,13 @@ def create_interface():
                     outputs=[height]
                 )
 
+                # LoRA refresh button handler
+                lora_refresh_btn.click(
+                    fn=refresh_k5_lora_dropdowns,
+                    inputs=[lora_folder],
+                    outputs=lora_weights + lora_multipliers
+                )
+
                 # Generate button - uses Gradio's built-in queue for browser-independent generation
                 generate_btn.click(
                     fn=generate_video,
@@ -2601,7 +2737,11 @@ def create_interface():
                         save_latents_checkbox,
                         enable_ultravico, ultravico_alpha, ultravico_suppress_harmonics, ultravico_beta,
                         use_sdnq, sdnq_weights_dtype, sdnq_triton_mm, sdnq_compile,
-                        end_blend_weight
+                        end_blend_weight,
+                        # LoRA inputs
+                        lora_folder,
+                        lora_weights[0], lora_weights[1], lora_weights[2], lora_weights[3],
+                        lora_multipliers[0], lora_multipliers[1], lora_multipliers[2], lora_multipliers[3]
                     ],
                     outputs=[output, preview_output, batch_progress, progress_text]
                 )
@@ -2973,6 +3113,33 @@ def create_interface():
                             columns=[2], rows=[2], object_fit="contain", height="auto",
                             show_label=True, elem_id="gallery_v2v", allow_preview=True, preview=True
                         )
+
+                        # LoRA Section for V2V
+                        with gr.Accordion("LoRA (Style Adapters)", open=False):
+                            v2v_lora_folder = gr.Textbox(
+                                label="LoRA Folder",
+                                value="lora",
+                                info="Folder containing K5 LoRA directories (each with config_lora.json + lora.safetensors)"
+                            )
+                            v2v_lora_refresh_btn = gr.Button("🔄 Refresh LoRAs", size="sm")
+                            v2v_lora_weights = []
+                            v2v_lora_multipliers = []
+                            for i in range(4):
+                                with gr.Row():
+                                    v2v_lora_weights.append(gr.Dropdown(
+                                        label=f"LoRA {i+1}",
+                                        choices=get_k5_lora_options("lora"),
+                                        value="None",
+                                        allow_custom_value=False,
+                                        interactive=True,
+                                        scale=2
+                                    ))
+                                    v2v_lora_multipliers.append(gr.Slider(
+                                        minimum=0.0, maximum=2.0, value=1.0, step=0.05,
+                                        label="Weight",
+                                        scale=1
+                                    ))
+
                         with gr.Accordion("Latent Preview (During Generation)", open=True):
                             v2v_enable_preview = gr.Checkbox(label="Enable Latent Preview", value=True)
                             v2v_preview_steps = gr.Slider(minimum=1, maximum=50, step=1, value=5,
@@ -3147,6 +3314,13 @@ def create_interface():
                     outputs=[v2v_height]
                 )
 
+                # V2V LoRA refresh button handler
+                v2v_lora_refresh_btn.click(
+                    fn=refresh_k5_lora_dropdowns,
+                    inputs=[v2v_lora_folder],
+                    outputs=v2v_lora_weights + v2v_lora_multipliers
+                )
+
                 v2v_generate_btn.click(
                     fn=generate_v2v_video,
                     inputs=[
@@ -3168,7 +3342,11 @@ def create_interface():
                         v2v_enable_denoise, v2v_denoise_strength,
                         v2v_enable_ultravico, v2v_ultravico_alpha, v2v_ultravico_suppress_harmonics, v2v_ultravico_beta,
                         v2v_use_sdnq, v2v_sdnq_weights_dtype, v2v_sdnq_triton_mm, v2v_sdnq_compile,
-                        v2v_end_blend_weight
+                        v2v_end_blend_weight,
+                        # LoRA inputs
+                        v2v_lora_folder,
+                        v2v_lora_weights[0], v2v_lora_weights[1], v2v_lora_weights[2], v2v_lora_weights[3],
+                        v2v_lora_multipliers[0], v2v_lora_multipliers[1], v2v_lora_multipliers[2], v2v_lora_multipliers[3]
                     ],
                     outputs=[v2v_output, v2v_preview_output, v2v_batch_progress, v2v_progress_text]
                 )

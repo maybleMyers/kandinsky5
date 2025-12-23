@@ -642,6 +642,29 @@ def parse_args():
         help="Denoise strength (0.1-0.5 typical). Higher = more change. Default: 0.2"
     )
 
+    # LoRA support
+    parser.add_argument(
+        "--lora_path",
+        type=str,
+        nargs="*",
+        default=None,
+        help="Path(s) to LoRA directories containing config_lora.json and lora.safetensors. Multiple LoRAs can be loaded (e.g., --lora_path ./lora1 ./lora2)"
+    )
+    parser.add_argument(
+        "--lora_weight",
+        type=float,
+        nargs="*",
+        default=None,
+        help="Weight(s) for each LoRA (0.0-1.0). Must match number of --lora_path entries. Default: 1.0 for each"
+    )
+    parser.add_argument(
+        "--lora_trigger",
+        type=str,
+        nargs="*",
+        default=None,
+        help="Override trigger word(s) for each LoRA. If not specified, auto-detected from LoRA metadata"
+    )
+
     # UltraViCo: Attention decay for long video extrapolation
     parser.add_argument(
         "--ultravico",
@@ -899,6 +922,53 @@ if __name__ == "__main__":
                 vae_spatial_tile_height=args.vae_spatial_tile_height,
                 vae_spatial_tile_width=args.vae_spatial_tile_width,
             )
+
+    # Load LoRA adapters if specified
+    if args.lora_path is not None and len(args.lora_path) > 0:
+        print(f"\n>>> Loading {len(args.lora_path)} LoRA adapter(s)...")
+
+        # Set default weights if not specified
+        lora_weights = args.lora_weight if args.lora_weight else [1.0] * len(args.lora_path)
+        if len(lora_weights) != len(args.lora_path):
+            raise ValueError(f"Number of --lora_weight ({len(lora_weights)}) must match --lora_path ({len(args.lora_path)})")
+
+        # Set default triggers if not specified
+        lora_triggers = args.lora_trigger if args.lora_trigger else [None] * len(args.lora_path)
+        if len(lora_triggers) != len(args.lora_path):
+            raise ValueError(f"Number of --lora_trigger ({len(lora_triggers)}) must match --lora_path ({len(args.lora_path)})")
+
+        for i, lora_dir in enumerate(args.lora_path):
+            # Construct paths to config and weights
+            config_path = os.path.join(lora_dir, "config_lora.json")
+            weights_path = os.path.join(lora_dir, "lora.safetensors")
+
+            # Check if files exist
+            if not os.path.exists(config_path):
+                raise FileNotFoundError(f"LoRA config not found: {config_path}")
+            if not os.path.exists(weights_path):
+                raise FileNotFoundError(f"LoRA weights not found: {weights_path}")
+
+            # Generate unique adapter name
+            adapter_name = os.path.basename(lora_dir) or f"lora_{i}"
+
+            # Load the adapter
+            print(f">>> Loading LoRA {i+1}/{len(args.lora_path)}: {lora_dir}")
+            print(f"    Adapter name: {adapter_name}, Weight: {lora_weights[i]}")
+
+            pipe.load_adapter(
+                adapter_config=config_path,
+                adapter_path=weights_path,
+                adapter_name=adapter_name,
+                trigger=lora_triggers[i]
+            )
+
+            # Note: PEFT doesn't support weight merging directly. The weight parameter is stored
+            # for potential future use with weight-based merging implementations.
+            if lora_weights[i] != 1.0:
+                print(f"    Note: LoRA weight {lora_weights[i]} specified but PEFT adapter system uses full weight.")
+                print(f"    For weight-based merging, consider using a merge tool before loading.")
+
+        print(f">>> All LoRA adapters loaded successfully\n")
 
     if args.output_filename is None:
         # Determine file extension based on generation mode
