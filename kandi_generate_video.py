@@ -145,20 +145,20 @@ def collect_generation_metadata(args, mode="i2v", expanded_prompt=None):
     metadata = {
         "model_type": "Kandinsky 5.0",
         "mode": mode,
-        "prompt": args.prompt,
-        "negative_prompt": args.negative_prompt,
-        "seed": args.seed,
-        "width": args.width,
-        "height": args.height,
-        "video_duration": args.video_duration,
-        "sample_steps": args.sample_steps,
-        "guidance_weight": args.guidance_weight,
-        "scheduler_scale": args.scheduler_scale,
-        "expand_prompt": args.expand_prompt,
-        "use_prompt_template": not args.no_prompt_template,
-        "custom_system_prompt": args.custom_system_prompt if args.custom_system_prompt else None,
-        "clip_prompt": args.clip_prompt if args.clip_prompt else None,
-        "config_file": args.config,
+        "prompt": getattr(args, 'prompt', None),
+        "negative_prompt": getattr(args, 'negative_prompt', None),
+        "seed": getattr(args, 'seed', None),
+        "width": getattr(args, 'width', None),
+        "height": getattr(args, 'height', None),
+        "video_duration": getattr(args, 'video_duration', None),
+        "sample_steps": getattr(args, 'sample_steps', None),
+        "guidance_weight": getattr(args, 'guidance_weight', None),
+        "scheduler_scale": getattr(args, 'scheduler_scale', None),
+        "expand_prompt": getattr(args, 'expand_prompt', None),
+        "use_prompt_template": not getattr(args, 'no_prompt_template', False),
+        "custom_system_prompt": getattr(args, 'custom_system_prompt', None),
+        "clip_prompt": getattr(args, 'clip_prompt', None),
+        "config_file": getattr(args, 'config', None),
     }
 
     # Add expanded prompt if available
@@ -168,10 +168,10 @@ def collect_generation_metadata(args, mode="i2v", expanded_prompt=None):
         metadata["expanded_prompt"] = _expanded_prompt
 
     # Add LoRA information if used
-    if args.lora_path and len(args.lora_path) > 0:
+    if hasattr(args, 'lora_path') and args.lora_path and len(args.lora_path) > 0:
         lora_info = []
-        lora_weights = args.lora_weight if args.lora_weight else [1.0] * len(args.lora_path)
-        lora_triggers = args.lora_trigger if args.lora_trigger else [None] * len(args.lora_path)
+        lora_weights = getattr(args, 'lora_weight', None) or [1.0] * len(args.lora_path)
+        lora_triggers = getattr(args, 'lora_trigger', None) or [None] * len(args.lora_path)
         for i, path in enumerate(args.lora_path):
             lora_info.append({
                 "path": os.path.basename(path),
@@ -181,27 +181,27 @@ def collect_generation_metadata(args, mode="i2v", expanded_prompt=None):
         metadata["loras"] = lora_info
 
     # Add input image/video info if applicable
-    if args.image:
+    if hasattr(args, 'image') and args.image:
         metadata["image_path"] = os.path.basename(args.image)
     if hasattr(args, 'end_image') and args.end_image:
         metadata["end_image_path"] = os.path.basename(args.end_image)
-    if args.video:
+    if hasattr(args, 'video') and args.video:
         metadata["input_video"] = os.path.basename(args.video)
     if hasattr(args, 'video2') and args.video2:
         metadata["input_video2"] = os.path.basename(args.video2)
 
     # Add APG settings if used
-    if args.use_apg:
+    if hasattr(args, 'use_apg') and args.use_apg:
         metadata["apg"] = {
             "enabled": True,
-            "momentum": args.apg_momentum,
-            "norm_threshold": args.apg_norm_threshold
+            "momentum": getattr(args, 'apg_momentum', None),
+            "norm_threshold": getattr(args, 'apg_norm_threshold', None)
         }
 
     # Add quantization info
-    if args.quantized_qwen:
+    if hasattr(args, 'quantized_qwen') and args.quantized_qwen:
         metadata["quantized_qwen"] = True
-    if args.use_fp8:
+    if hasattr(args, 'use_fp8') and args.use_fp8:
         metadata["fp8_enabled"] = True
     if hasattr(args, 'use_sdnq') and args.use_sdnq:
         metadata["sdnq_enabled"] = True
@@ -220,11 +220,12 @@ def collect_generation_metadata(args, mode="i2v", expanded_prompt=None):
 
     # Add UltraViCo settings if used
     if hasattr(args, 'ultravico') and args.ultravico:
+        suppress_harmonics = getattr(args, 'suppress_harmonics', False)
         metadata["ultravico"] = {
             "enabled": True,
-            "alpha": args.ultravico_alpha,
-            "suppress_harmonics": args.suppress_harmonics,
-            "beta": args.beta if args.suppress_harmonics else None
+            "alpha": getattr(args, 'ultravico_alpha', None),
+            "suppress_harmonics": suppress_harmonics,
+            "beta": getattr(args, 'beta', None) if suppress_harmonics else None
         }
 
     # Add dtype settings
@@ -240,7 +241,7 @@ def collect_generation_metadata(args, mode="i2v", expanded_prompt=None):
     # Add block swap info
     if hasattr(args, 'enable_block_swap') and args.enable_block_swap:
         metadata["enable_block_swap"] = True
-        metadata["blocks_in_memory"] = args.blocks_in_memory
+        metadata["blocks_in_memory"] = getattr(args, 'blocks_in_memory', None)
 
     # Num conditioning frames for V2V
     if hasattr(args, 'num_cond_frames') and args.num_cond_frames:
