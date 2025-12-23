@@ -407,6 +407,7 @@ def generate_sample(
     stop_check=None,
     checkpoint_path=None,
     save_latents=None,
+    vae_dtype=torch.bfloat16,
 ):
     bs, duration, height, width, dim = shape
     if duration == 1:
@@ -555,7 +556,7 @@ def generate_sample(
         vae = vae.to(vae_device, non_blocking=True)
 
     with torch.no_grad():
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        with torch.autocast(device_type="cuda", dtype=vae_dtype):
             images = latent_visual.reshape(
                 bs,
                 -1,
@@ -1066,6 +1067,7 @@ def generate_sample_v2v_join(
     apg_norm_threshold=55.0,
     # End frame blending (0.0 = use denoised result, 1.0 = use target)
     end_blend_weight=0.0,
+    vae_dtype=torch.bfloat16,
 ):
     """
     Generate video joining with dual conditioning (start and end frames).
@@ -1243,7 +1245,7 @@ def generate_sample_v2v_join(
         vae = vae.to(vae_device, non_blocking=True)
 
     with torch.no_grad():
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        with torch.autocast(device_type="cuda", dtype=vae_dtype):
             images = latent_visual.reshape(
                 bs,
                 -1,
@@ -1293,6 +1295,7 @@ def generate_sample_v2v(
     use_apg=False,
     apg_momentum=-0.75,
     apg_norm_threshold=55.0,
+    vae_dtype=torch.bfloat16,
 ):
     """
     Generate video continuation from conditioning latents using KV cache.
@@ -1471,7 +1474,7 @@ def generate_sample_v2v(
         vae = vae.to(vae_device, non_blocking=True)
 
     with torch.no_grad():
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        with torch.autocast(device_type="cuda", dtype=vae_dtype):
             images = latent_visual.reshape(
                 bs,
                 -1,
@@ -1518,6 +1521,7 @@ def generate_sample_i2v(
     stop_check=None,
     checkpoint_path=None,
     save_latents=None,
+    vae_dtype=torch.bfloat16,
 ):
     text_embedder.embedder.mode = "i2v"
 
@@ -1647,7 +1651,7 @@ def generate_sample_i2v(
 
     # Apply first frame normalization for i2v
     with torch.no_grad():
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        with torch.autocast(device_type="cuda", dtype=vae_dtype):
             if first_frames is not None:
                 first_frames = first_frames.to(device=latent_visual.device, dtype=latent_visual.dtype)
                 latent_visual[:1] = first_frames
@@ -1681,7 +1685,7 @@ def generate_sample_i2v(
         vae = vae.to(vae_device, non_blocking=True)
 
     with torch.no_grad():
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        with torch.autocast(device_type="cuda", dtype=vae_dtype):
             images = latent_visual.reshape(
                 bs,
                 -1,
@@ -1849,6 +1853,7 @@ def generate_sample_from_checkpoint(
     preview_suffix=None,
     stop_check=None,
     new_checkpoint_path=None,
+    vae_dtype=torch.bfloat16,
 ):
     """Resume T2V generation from a saved checkpoint."""
     print(f">>> Loading checkpoint from {checkpoint_path}", flush=True)
@@ -1946,7 +1951,7 @@ def generate_sample_from_checkpoint(
         vae = vae.to(vae_device, non_blocking=True)
 
     with torch.no_grad():
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        with torch.autocast(device_type="cuda", dtype=vae_dtype):
             images = latent_visual.reshape(
                 bs,
                 -1,
@@ -2173,6 +2178,7 @@ def generate_sample_denoise(
     previewer=None,
     preview_interval=None,
     preview_suffix=None,
+    vae_dtype=torch.bfloat16,
 ):
     """
     Apply light denoising to video latents (v2v img2img style).
@@ -2373,7 +2379,7 @@ def generate_sample_denoise(
     print(f">>> Decoding {total_frames} latent frames to video...", flush=True)
 
     with torch.no_grad():
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        with torch.autocast(device_type="cuda", dtype=vae_dtype):
             # VAE can handle more frames than DiT, but still chunk for safety
             vae_chunk_size = 31  # ~5 seconds of video at a time
             decoded_chunks = []
@@ -2426,6 +2432,7 @@ def generate_sample_i2v_from_checkpoint(
     preview_suffix=None,
     stop_check=None,
     new_checkpoint_path=None,
+    vae_dtype=torch.bfloat16,
 ):
     """Resume I2V generation from a saved checkpoint."""
     print(f">>> Loading checkpoint from {checkpoint_path}", flush=True)
@@ -2518,7 +2525,7 @@ def generate_sample_i2v_from_checkpoint(
 
     # Apply first frame normalization for i2v
     with torch.no_grad():
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        with torch.autocast(device_type="cuda", dtype=vae_dtype):
             if first_frames is not None:
                 first_frames = first_frames.to(device=latent_visual.device, dtype=latent_visual.dtype)
                 latent_visual[:1] = first_frames
@@ -2536,7 +2543,7 @@ def generate_sample_i2v_from_checkpoint(
         vae = vae.to(vae_device, non_blocking=True)
 
     with torch.no_grad():
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        with torch.autocast(device_type="cuda", dtype=vae_dtype):
             images = latent_visual.reshape(
                 bs,
                 -1,

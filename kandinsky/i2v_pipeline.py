@@ -1,6 +1,8 @@
 from math import floor, sqrt
-from typing import Union, Tuple, Optional
+from typing import Union, Tuple, Optional, List
 from contextlib import contextmanager, nullcontext
+import json
+import logging
 
 import transformers
 import torch
@@ -8,9 +10,20 @@ import torchvision
 import torchvision.transforms.functional as F
 from torchvision.transforms import ToPILImage
 from PIL import Image
+from peft import PeftConfig, LoraConfig, inject_adapter_in_model, set_peft_model_state_dict
+from safetensors.torch import load_file
 
 from .generation_utils import generate_sample_i2v, generate_sample_v2v, generate_sample_denoise
 from .models import vae_v2v
+
+
+def read_safetensors_json(path):
+    """Read metadata from a safetensors file."""
+    import struct
+    with open(path, "rb") as f:
+        header_size = struct.unpack("<Q", f.read(8))[0]
+        header_json = f.read(header_size).decode("utf-8")
+    return json.loads(header_json)
 
 torch._dynamo.config.suppress_errors = True
 torch._dynamo.config.verbose = True
@@ -1245,6 +1258,7 @@ class Kandinsky5I2VPipeline:
         world_size: int = 1,
         conf = None,
         offload: bool = False,
+        vae_dtype: torch.dtype = torch.bfloat16,
     ):
         self.dit = dit
         self.text_embedder = text_embedder
@@ -1258,7 +1272,162 @@ class Kandinsky5I2VPipeline:
         self.guidance_weight = conf.model.guidance_weight
 
         self.offload = offload
+        self.vae_dtype = vae_dtype
 
+        # LoRA/PEFT support
+        self._hf_peft_config_loaded = False
+        self.peft_config = {}
+        self.peft_triggers = {}
+        self.peft_trigger = ""
+
+    def load_adapter(self, adapter_config: Union[PeftConfig, str], adapter_path: Optional[str] = None,
+                     adapter_name: Optional[str] = None, trigger: Optional[str] = None) -> None:
+        """
+        Load a LoRA adapter into the pipeline.
+
+        Args:
+            adapter_config: Either a PeftConfig object or path to a config JSON file
+            adapter_path: Path to the LoRA weights (.safetensors file)
+            adapter_name: Name for this adapter (for switching between multiple adapters)
+            trigger: Optional trigger word to prepend to prompts (auto-detected from metadata if not provided)
+        """
+        if adapter_name is None:
+            adapter_name = "default"
+        if self._hf_peft_config_loaded and adapter_name in self.peft_config:
+            raise ValueError(f"Adapter with name {adapter_name} already exists. Please use a different name.")
+
+        if not isinstance(adapter_config, PeftConfig):
+            try:
+                with open(adapter_config, "r") as f:
+                    adapter_config = json.load(f)
+                adapter_config = LoraConfig(**adapter_config)
+            except:
+                raise TypeError(f"adapter_config should be an instance of PeftConfig or a path to a json file.")
+        self.peft_config[adapter_name] = adapter_config
+
+        inject_adapter_in_model(adapter_config, self.dit, adapter_name)
+
+        if not self._hf_peft_config_loaded:
+            self._hf_peft_config_loaded = True
+        adapter_state_dict = load_file(adapter_path)
+        adapter_metadata = read_safetensors_json(adapter_path)
+        if trigger is not None:
+            self.peft_trigger = trigger
+        else:
+            if "__metadata__" in adapter_metadata and "trigger" in adapter_metadata["__metadata__"]:
+                self.peft_trigger = adapter_metadata["__metadata__"]["trigger"]
+            else:
+                self.peft_trigger = ""
+        self.peft_triggers[adapter_name] = self.peft_trigger
+
+        processed_adapter_state_dict = {}
+        for key, value in adapter_state_dict.items():
+            new_key = key
+            for prefix in ["base_model.model.", "transformer."]:
+                if new_key.startswith(prefix):
+                    new_key = new_key[len(prefix):]
+                    break
+
+            new_key = new_key.replace(".default", "")
+            processed_adapter_state_dict[new_key] = value
+
+        incompatible_keys = set_peft_model_state_dict(
+            self.dit, processed_adapter_state_dict, adapter_name
+        )
+
+        if incompatible_keys is not None:
+            err_msg = ""
+            origin_name = adapter_path
+
+            # Check for unexpected keys
+            unexpected_keys = getattr(incompatible_keys, "unexpected_keys", None)
+            if unexpected_keys:
+                err_msg += (
+                    f"Loading adapter weights from {origin_name} led to unexpected keys not found in the model: "
+                    f"{', '.join(unexpected_keys)}. "
+                )
+
+            # Check for missing keys.
+            missing_keys = getattr(incompatible_keys, "missing_keys", None)
+            if missing_keys:
+                # Filter missing keys specific to the current adapter, as missing base model keys are expected.
+                lora_missing_keys = [k for k in missing_keys if "lora_" in k and adapter_name in k]
+                if lora_missing_keys:
+                    err_msg += (
+                        f"Loading adapter weights from {origin_name} led to missing keys in the model: "
+                        f"{', '.join(lora_missing_keys)}"
+                    )
+
+            if err_msg:
+                logging.warning(err_msg)
+
+        self.set_adapter(adapter_name)
+        logging.info(f"LoRA adapter '{adapter_name}' loaded successfully. Trigger: '{self.peft_trigger}'")
+
+    def set_adapter(self, adapter_name: Union[List[str], str]) -> None:
+        """
+        Set the active LoRA adapter(s).
+
+        Args:
+            adapter_name: Name of the adapter to activate, or list of adapter names
+        """
+        if not self._hf_peft_config_loaded:
+            raise ValueError("No adapter loaded. Please load an adapter first.")
+        elif isinstance(adapter_name, list):
+            missing = set(adapter_name) - set(self.peft_config)
+            if len(missing) > 0:
+                raise ValueError(
+                    f"Following adapter(s) could not be found: {', '.join(missing)}. Make sure you are passing the correct adapter name(s)."
+                    f" current loaded adapters are: {list(self.peft_config.keys())}"
+                )
+        elif adapter_name not in self.peft_config:
+            raise ValueError(
+                f"Adapter with name {adapter_name} not found. Please pass the correct adapter name among {list(self.peft_config.keys())}"
+            )
+
+        from peft.tuners.tuners_utils import BaseTunerLayer
+        from peft.utils import ModulesToSaveWrapper
+
+        _adapters_has_been_set = False
+
+        for _, module in self.dit.named_modules():
+            if isinstance(module, BaseTunerLayer):
+                # The recent version of PEFT need to call `enable_adapters` instead
+                if hasattr(module, "enable_adapters"):
+                    module.enable_adapters(enabled=True)
+                else:
+                    module.disable_adapters = False
+            if isinstance(module, (BaseTunerLayer, ModulesToSaveWrapper)):
+                # For backward compatibility with previous PEFT versions
+                if hasattr(module, "set_adapter"):
+                    module.set_adapter(adapter_name)
+                else:
+                    module.active_adapter = adapter_name
+                _adapters_has_been_set = True
+
+        if not _adapters_has_been_set:
+            raise ValueError(
+                "Did not succeeded in setting the adapter. Please make sure you are using a model that supports adapters."
+            )
+        self.peft_trigger = self.peft_triggers[adapter_name] if isinstance(adapter_name, str) else ""
+
+    def disable_adapters(self) -> None:
+        """Disable all LoRA adapters."""
+        if not self._hf_peft_config_loaded:
+            raise ValueError("No adapter loaded. Please load an adapter first.")
+
+        from peft.tuners.tuners_utils import BaseTunerLayer
+        from peft.utils import ModulesToSaveWrapper
+
+        for _, module in self.dit.named_modules():
+            if isinstance(module, (BaseTunerLayer, ModulesToSaveWrapper)):
+                # The recent version of PEFT need to call `enable_adapters` instead
+                if hasattr(module, "enable_adapters"):
+                    module.enable_adapters(enabled=False)
+                else:
+                    module.disable_adapters = True
+        self.peft_trigger = ""
+        logging.info("All LoRA adapters disabled.")
 
     def __call__(
         self,
@@ -1349,6 +1518,13 @@ class Kandinsky5I2VPipeline:
                 torch.distributed.broadcast_object_list(caption, 0)
                 caption = caption[0]
 
+        # Prepend LoRA trigger word if an adapter is active AND has a trigger word
+        # Empty string evaluates to False, so LoRAs without triggers are unaffected
+        if self.peft_trigger:
+            caption = self.peft_trigger + caption
+            if self.local_dit_rank == 0:
+                print(f">>> LoRA trigger prepended: '{self.peft_trigger}'")
+
         height, width = image_lat.shape[1:3]
         shape = (1, num_frames, height, width, 16)
 
@@ -1424,6 +1600,7 @@ class Kandinsky5I2VPipeline:
             stop_check=stop_check,
             checkpoint_path=checkpoint_path,
             save_latents=save_latents,
+            vae_dtype=self.vae_dtype,
         )
 
         # Handle checkpoint save (images will be None)
