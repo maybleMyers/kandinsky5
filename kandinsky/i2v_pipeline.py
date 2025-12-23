@@ -1496,9 +1496,16 @@ class Kandinsky5I2VPipeline:
             lora_modules[module_key][weight_type] = weight
         print(f"    [LoRA] Grouped {len(lora_modules)} modules in {time.perf_counter() - t0:.2f}s", flush=True)
 
-        # Apply LoRA weights using fast dictionary lookup
+        # Apply LoRA weights - use GPU for fast matmul even when model is on CPU
         t0 = time.perf_counter()
         applied_count = 0
+
+        # Use GPU for computation if available (much faster than CPU matmul)
+        compute_device = "cuda" if torch.cuda.is_available() else "cpu"
+        compute_dtype = torch.bfloat16
+        if compute_device == "cuda":
+            print(f"    [LoRA] Using GPU for fast LoRA computation", flush=True)
+
         for module_key, weights in lora_modules.items():
             if "lora_down" not in weights or "lora_up" not in weights:
                 continue
@@ -1521,11 +1528,9 @@ class Kandinsky5I2VPipeline:
 
             if target_param is not None:
                 with torch.no_grad():
-                    # Always compute LoRA delta in bf16 for speed (especially on CPU with mixed weights)
-                    # This avoids slow fp32 matmuls when target param is fp32
-                    compute_dtype = torch.bfloat16
-                    lora_down = lora_down.to(target_param.device, compute_dtype)
-                    lora_up = lora_up.to(target_param.device, compute_dtype)
+                    # Compute on GPU for speed, then transfer result to target device
+                    lora_down = lora_down.to(compute_device, compute_dtype)
+                    lora_up = lora_up.to(compute_device, compute_dtype)
 
                     if len(target_param.shape) == 2:
                         delta = (lora_up @ lora_down) * scale
@@ -1536,12 +1541,9 @@ class Kandinsky5I2VPipeline:
                         if delta.shape != target_param.shape:
                             delta = delta.view(target_param.shape)
 
-                    # Convert delta to target param dtype before adding
-                    target_param.add_(delta.to(target_param.dtype))
+                    # Move delta to target device/dtype and add to weights
+                    target_param.add_(delta.to(target_param.device, target_param.dtype))
                     applied_count += 1
-
-                    if applied_count % 50 == 0:
-                        print(f"    [LoRA] Applied {applied_count} modules...", flush=True)
 
         print(f"    [LoRA] Applied all {applied_count} modules in {time.perf_counter() - t0:.2f}s", flush=True)
         logging.info(f"Applied {applied_count} LoRA modules from {lora_path}")
