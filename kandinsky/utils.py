@@ -1048,6 +1048,14 @@ def get_I2V_pipeline_with_block_swap(
             else:
                 dit = dit.to(device_map["dit"], dtype=computation_dtype)
 
+    # Clear state_dict reference before return to avoid slow GC with mixed dtypes
+    print(f"[TIMING] Clearing state_dict...", flush=True)
+    t0 = time.perf_counter()
+    del state_dict
+    import gc
+    gc.collect()
+    print(f"[TIMING] state_dict cleared and GC done in {time.perf_counter() - t0:.1f}s", flush=True)
+
     if world_size > 1:
         if enable_block_swap:
             print("Warning: Parallelization with block swapping not supported. Skipping parallelization.")

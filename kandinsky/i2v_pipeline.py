@@ -1513,8 +1513,11 @@ class Kandinsky5I2VPipeline:
 
             if target_param is not None:
                 with torch.no_grad():
-                    lora_down = lora_down.to(target_param.device, target_param.dtype)
-                    lora_up = lora_up.to(target_param.device, target_param.dtype)
+                    # Always compute LoRA delta in bf16 for speed (especially on CPU with mixed weights)
+                    # This avoids slow fp32 matmuls when target param is fp32
+                    compute_dtype = torch.bfloat16
+                    lora_down = lora_down.to(target_param.device, compute_dtype)
+                    lora_up = lora_up.to(target_param.device, compute_dtype)
 
                     if len(target_param.shape) == 2:
                         delta = (lora_up @ lora_down) * scale
@@ -1525,7 +1528,8 @@ class Kandinsky5I2VPipeline:
                         if delta.shape != target_param.shape:
                             delta = delta.view(target_param.shape)
 
-                    target_param.add_(delta)
+                    # Convert delta to target param dtype before adding
+                    target_param.add_(delta.to(target_param.dtype))
                     applied_count += 1
 
         logging.info(f"Applied {applied_count} LoRA modules from {lora_path}")
