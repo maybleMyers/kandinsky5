@@ -1458,6 +1458,19 @@ class Kandinsky5I2VPipeline:
             self.peft_trigger = trigger
             logging.info(f"LoRA trigger word: '{trigger}'")
 
+        # Build parameter lookup dictionary ONCE for O(1) lookups
+        param_dict = {}
+        param_by_normalized = {}
+        for name, param in self.dit.named_parameters():
+            param_dict[name] = param
+            # Also index by underscore-normalized name (without .weight suffix)
+            normalized = name.replace(".", "_")
+            param_by_normalized[normalized] = (name, param)
+            if name.endswith(".weight"):
+                # Also store without .weight suffix
+                base_normalized = name[:-7].replace(".", "_")
+                param_by_normalized[base_normalized] = (name, param)
+
         # Group LoRA weights by module
         lora_modules = {}
         for key, weight in lora_sd.items():
@@ -1465,7 +1478,6 @@ class Kandinsky5I2VPipeline:
                 continue
 
             # Parse the key: lora_unet_<module_path>.lora_down.weight or .lora_up.weight or .alpha
-            # Example: lora_unet_encoder_0_self_attention_to_query.lora_down.weight
             match = re.match(r"lora_unet_(.+)\.(lora_down|lora_up|alpha)(\.weight)?$", key)
             if not match:
                 continue
@@ -1477,8 +1489,7 @@ class Kandinsky5I2VPipeline:
                 lora_modules[module_key] = {}
             lora_modules[module_key][weight_type] = weight
 
-        # Build a mapping from LoRA module keys to actual DiT module paths
-        # The musubi format uses underscores where the actual path uses dots
+        # Apply LoRA weights using fast dictionary lookup
         applied_count = 0
         for module_key, weights in lora_modules.items():
             if "lora_down" not in weights or "lora_up" not in weights:
@@ -1488,63 +1499,28 @@ class Kandinsky5I2VPipeline:
             lora_up = weights["lora_up"]
             alpha = weights.get("alpha", torch.tensor(lora_down.shape[0]))
 
-            # Calculate the LoRA delta: (up @ down) * (alpha / rank) * multiplier
             rank = lora_down.shape[0]
             scale = (alpha.item() / rank) * multiplier
 
-            # Convert module_key back to module path
-            # lora_unet_encoder_0_self_attention_to_query -> encoder.0.self_attention.to_query
-            module_path = module_key.replace("_", ".")
-
-            # Try to find the matching parameter in the DiT
+            # Fast lookup using normalized key
             target_param = None
-            for name, param in self.dit.named_parameters():
-                # Normalize the name for comparison
-                normalized_name = name.replace(".", "_")
-                if normalized_name == module_key or name == module_path:
-                    target_param = param
-                    break
-                # Also try partial matching for nested modules
-                if module_key in normalized_name.replace(".", "_"):
-                    # Check if it's a weight parameter
-                    if name.endswith(".weight"):
-                        target_param = param
-                        break
+            target_key = module_key + "_weight"
 
-            if target_param is None:
-                # Try alternative matching: convert underscores to dots more carefully
-                # encoder_0_self_attention_to_query_weight -> encoder.0.self_attention.to_query.weight
-                parts = module_key.split("_")
-                reconstructed = []
-                i = 0
-                while i < len(parts):
-                    part = parts[i]
-                    if part.isdigit():
-                        reconstructed.append(part)
-                    else:
-                        reconstructed.append(part)
-                    i += 1
-                alt_path = ".".join(reconstructed) + ".weight"
-
-                for name, param in self.dit.named_parameters():
-                    if alt_path in name or name.endswith(alt_path):
-                        target_param = param
-                        break
+            if target_key in param_by_normalized:
+                _, target_param = param_by_normalized[target_key]
+            elif module_key in param_by_normalized:
+                _, target_param = param_by_normalized[module_key]
 
             if target_param is not None:
-                # Compute and apply the LoRA delta
                 with torch.no_grad():
-                    # Move LoRA weights to same device/dtype as target
                     lora_down = lora_down.to(target_param.device, target_param.dtype)
                     lora_up = lora_up.to(target_param.device, target_param.dtype)
 
-                    # Compute delta: up @ down for linear layers
                     if len(target_param.shape) == 2:
                         delta = (lora_up @ lora_down) * scale
                     elif len(target_param.shape) == 1:
                         delta = (lora_up.squeeze() * lora_down.squeeze()) * scale
                     else:
-                        # For conv layers or other shapes, reshape as needed
                         delta = (lora_up @ lora_down) * scale
                         if delta.shape != target_param.shape:
                             delta = delta.view(target_param.shape)

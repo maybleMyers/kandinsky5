@@ -247,13 +247,21 @@ class Kandinsky5T2VPipeline:
             self.peft_trigger = trigger
             logging.info(f"LoRA trigger word: '{trigger}'")
 
+        # Build parameter lookup dictionary ONCE for O(1) lookups
+        param_by_normalized = {}
+        for name, param in self.dit.named_parameters():
+            normalized = name.replace(".", "_")
+            param_by_normalized[normalized] = (name, param)
+            if name.endswith(".weight"):
+                base_normalized = name[:-7].replace(".", "_")
+                param_by_normalized[base_normalized] = (name, param)
+
         # Group LoRA weights by module
         lora_modules = {}
         for key, weight in lora_sd.items():
             if not key.startswith("lora_unet_"):
                 continue
 
-            # Parse the key: lora_unet_<module_path>.lora_down.weight or .lora_up.weight or .alpha
             match = re.match(r"lora_unet_(.+)\.(lora_down|lora_up|alpha)(\.weight)?$", key)
             if not match:
                 continue
@@ -265,7 +273,7 @@ class Kandinsky5T2VPipeline:
                 lora_modules[module_key] = {}
             lora_modules[module_key][weight_type] = weight
 
-        # Apply LoRA weights to matching DiT parameters
+        # Apply LoRA weights using fast dictionary lookup
         applied_count = 0
         for module_key, weights in lora_modules.items():
             if "lora_down" not in weights or "lora_up" not in weights:
@@ -278,14 +286,14 @@ class Kandinsky5T2VPipeline:
             rank = lora_down.shape[0]
             scale = (alpha.item() / rank) * multiplier
 
-            # Try to find the matching parameter in the DiT
+            # Fast lookup using normalized key
             target_param = None
-            for name, param in self.dit.named_parameters():
-                normalized_name = name.replace(".", "_")
-                if normalized_name == module_key or module_key in normalized_name:
-                    if name.endswith(".weight"):
-                        target_param = param
-                        break
+            target_key = module_key + "_weight"
+
+            if target_key in param_by_normalized:
+                _, target_param = param_by_normalized[target_key]
+            elif module_key in param_by_normalized:
+                _, target_param = param_by_normalized[module_key]
 
             if target_param is not None:
                 with torch.no_grad():
