@@ -3,6 +3,7 @@ from typing import Union, Tuple, Optional, List
 from contextlib import contextmanager, nullcontext
 import json
 import logging
+import re
 
 import transformers
 import torch
@@ -15,6 +16,9 @@ from safetensors.torch import load_file
 
 from .generation_utils import generate_sample_i2v, generate_sample_v2v, generate_sample_denoise
 from .models import vae_v2v
+
+# Pre-compiled regex for fast LoRA key matching
+LORA_KEY_PATTERN = re.compile(r"lora_unet_(.+)\.(lora_down|lora_up|alpha)(\.weight)?$")
 
 
 def read_safetensors_json(path):
@@ -1280,6 +1284,16 @@ class Kandinsky5I2VPipeline:
         self.peft_triggers = {}
         self.peft_trigger = ""
 
+        # Build param lookup ONCE at init for fast musubi LoRA loading
+        # This avoids iterating through all 3.4B params every time a LoRA is loaded
+        self._param_lookup = {}
+        for name, param in self.dit.named_parameters():
+            normalized = name.replace(".", "_")
+            self._param_lookup[normalized] = param
+            if name.endswith(".weight"):
+                base_normalized = name[:-7].replace(".", "_")
+                self._param_lookup[base_normalized] = param
+
     def load_adapter(self, adapter_config: Union[PeftConfig, str], adapter_path: Optional[str] = None,
                      adapter_name: Optional[str] = None, trigger: Optional[str] = None) -> None:
         """
@@ -1439,7 +1453,6 @@ class Kandinsky5I2VPipeline:
             multiplier: Weight multiplier for the LoRA (0.0-2.0)
             trigger: Optional trigger word to prepend to prompts
         """
-        import re
         import time
 
         logging.info(f"Loading musubi-format LoRA from {lora_path} with multiplier {multiplier}")
@@ -1461,20 +1474,9 @@ class Kandinsky5I2VPipeline:
             self.peft_trigger = trigger
             logging.info(f"LoRA trigger word: '{trigger}'")
 
-        # Build parameter lookup dictionary ONCE for O(1) lookups
-        t0 = time.perf_counter()
-        param_dict = {}
-        param_by_normalized = {}
-        for name, param in self.dit.named_parameters():
-            param_dict[name] = param
-            # Also index by underscore-normalized name (without .weight suffix)
-            normalized = name.replace(".", "_")
-            param_by_normalized[normalized] = (name, param)
-            if name.endswith(".weight"):
-                # Also store without .weight suffix
-                base_normalized = name[:-7].replace(".", "_")
-                param_by_normalized[base_normalized] = (name, param)
-        print(f"    [LoRA] Built param lookup in {time.perf_counter() - t0:.2f}s ({len(param_by_normalized)} entries)", flush=True)
+        # Use cached param lookup (built once at init) for O(1) lookups
+        # This avoids the 20+ minute iteration through 3.4B params
+        print(f"    [LoRA] Using cached param lookup ({len(self._param_lookup)} entries)", flush=True)
 
         # Group LoRA weights by module
         t0 = time.perf_counter()
@@ -1484,7 +1486,7 @@ class Kandinsky5I2VPipeline:
                 continue
 
             # Parse the key: lora_unet_<module_path>.lora_down.weight or .lora_up.weight or .alpha
-            match = re.match(r"lora_unet_(.+)\.(lora_down|lora_up|alpha)(\.weight)?$", key)
+            match = LORA_KEY_PATTERN.match(key)
             if not match:
                 continue
 
@@ -1517,14 +1519,9 @@ class Kandinsky5I2VPipeline:
             rank = lora_down.shape[0]
             scale = (alpha.item() / rank) * multiplier
 
-            # Fast lookup using normalized key
-            target_param = None
+            # Fast lookup using cached param dictionary
             target_key = module_key + "_weight"
-
-            if target_key in param_by_normalized:
-                _, target_param = param_by_normalized[target_key]
-            elif module_key in param_by_normalized:
-                _, target_param = param_by_normalized[module_key]
+            target_param = self._param_lookup.get(target_key) or self._param_lookup.get(module_key)
 
             if target_param is not None:
                 with torch.no_grad():

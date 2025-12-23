@@ -1,6 +1,7 @@
 from typing import Union, Optional, List
 import json
 import logging
+import re
 
 import transformers
 import torch
@@ -10,6 +11,9 @@ from peft import PeftConfig, LoraConfig, inject_adapter_in_model, set_peft_model
 from safetensors.torch import load_file
 
 from .generation_utils import generate_sample
+
+# Pre-compiled regex for fast LoRA key matching
+LORA_KEY_PATTERN = re.compile(r"lora_unet_(.+)\.(lora_down|lora_up|alpha)(\.weight)?$")
 
 
 def read_safetensors_json(path):
@@ -68,6 +72,16 @@ class Kandinsky5T2VPipeline:
         self.peft_config = {}
         self.peft_triggers = {}
         self.peft_trigger = ""
+
+        # Build param lookup ONCE at init for fast musubi LoRA loading
+        # This avoids iterating through all 3.4B params every time a LoRA is loaded
+        self._param_lookup = {}
+        for name, param in self.dit.named_parameters():
+            normalized = name.replace(".", "_")
+            self._param_lookup[normalized] = param
+            if name.endswith(".weight"):
+                base_normalized = name[:-7].replace(".", "_")
+                self._param_lookup[base_normalized] = param
 
     def load_adapter(self, adapter_config: Union[PeftConfig, str], adapter_path: Optional[str] = None,
                      adapter_name: Optional[str] = None, trigger: Optional[str] = None) -> None:
@@ -228,8 +242,6 @@ class Kandinsky5T2VPipeline:
             multiplier: Weight multiplier for the LoRA (0.0-2.0)
             trigger: Optional trigger word to prepend to prompts
         """
-        import re
-
         logging.info(f"Loading musubi-format LoRA from {lora_path} with multiplier {multiplier}")
 
         # Load the LoRA weights
@@ -247,14 +259,8 @@ class Kandinsky5T2VPipeline:
             self.peft_trigger = trigger
             logging.info(f"LoRA trigger word: '{trigger}'")
 
-        # Build parameter lookup dictionary ONCE for O(1) lookups
-        param_by_normalized = {}
-        for name, param in self.dit.named_parameters():
-            normalized = name.replace(".", "_")
-            param_by_normalized[normalized] = (name, param)
-            if name.endswith(".weight"):
-                base_normalized = name[:-7].replace(".", "_")
-                param_by_normalized[base_normalized] = (name, param)
+        # Use cached param lookup (built once at init) for O(1) lookups
+        # This avoids the 20+ minute iteration through 3.4B params
 
         # Group LoRA weights by module
         lora_modules = {}
@@ -262,7 +268,7 @@ class Kandinsky5T2VPipeline:
             if not key.startswith("lora_unet_"):
                 continue
 
-            match = re.match(r"lora_unet_(.+)\.(lora_down|lora_up|alpha)(\.weight)?$", key)
+            match = LORA_KEY_PATTERN.match(key)
             if not match:
                 continue
 
@@ -291,14 +297,9 @@ class Kandinsky5T2VPipeline:
             rank = lora_down.shape[0]
             scale = (alpha.item() / rank) * multiplier
 
-            # Fast lookup using normalized key
-            target_param = None
+            # Fast lookup using cached param dictionary
             target_key = module_key + "_weight"
-
-            if target_key in param_by_normalized:
-                _, target_param = param_by_normalized[target_key]
-            elif module_key in param_by_normalized:
-                _, target_param = param_by_normalized[module_key]
+            target_param = self._param_lookup.get(target_key) or self._param_lookup.get(module_key)
 
             if target_param is not None:
                 with torch.no_grad():
