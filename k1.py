@@ -519,61 +519,6 @@ def generate_video(
             elapsed = time.perf_counter() - start_time
 
             if return_code == 0 and os.path.exists(output_filename):
-                # Save metadata to video
-                params_for_meta = {
-                    "model_type": "Kandinsky 5.0",
-                    "mode": mode,
-                    "prompt": prompt,
-                    "negative_prompt": negative_prompt,
-                    "image_path": os.path.basename(input_image) if input_image else None,
-                    "end_image_path": os.path.basename(end_image) if end_image else None,
-                    "width": int(width),
-                    "height": int(height),
-                    "video_duration": video_duration,
-                    "sample_steps": sample_steps,
-                    "guidance_weight": guidance_weight,
-                    "scheduler_scale": scheduler_scale,
-                    "seed": current_seed,
-                    "use_mixed_weights": use_mixed_weights,
-                    "use_int8": use_int8,
-                    "use_torch_compile": use_torch_compile,
-                    "use_magcache": use_magcache,
-                    "enable_block_swap": enable_block_swap,
-                    "blocks_in_memory": int(blocks_in_memory) if enable_block_swap else None,
-                    "dtype": dtype_str,
-                    "text_encoder_dtype": text_encoder_dtype_str if text_encoder_dtype_str else None,
-                    "vae_dtype": vae_dtype_str if vae_dtype_str else None,
-                    "computation_dtype": computation_dtype_str if computation_dtype_str else None,
-                    "config_file": config_file,
-                    "model_config": model_config,
-                    "dit_checkpoint_path": dit_checkpoint_path if dit_checkpoint_path and dit_checkpoint_path.strip() else None,
-                    "attention_engine": attention_engine,
-                    "attention_type": attention_type if attention_type != "auto" else None,
-                    "nabla_P": nabla_P if attention_type == "nabla" else None,
-                    "nabla_wT": int(nabla_wT) if attention_type == "nabla" else None,
-                    "nabla_wW": int(nabla_wW) if attention_type == "nabla" else None,
-                    "nabla_wH": int(nabla_wH) if attention_type == "nabla" else None,
-                    "enable_vae_chunking": enable_vae_chunking,
-                    "vae_temporal_tile_frames": int(vae_temporal_tile_frames) if enable_vae_chunking and vae_temporal_tile_frames else None,
-                    "vae_temporal_stride_frames": int(vae_temporal_stride_frames) if enable_vae_chunking and vae_temporal_stride_frames else None,
-                    "vae_spatial_tile_height": int(vae_spatial_tile_height) if enable_vae_chunking and vae_spatial_tile_height else None,
-                    "vae_spatial_tile_width": int(vae_spatial_tile_width) if enable_vae_chunking and vae_spatial_tile_width else None,
-                    "clip_prompt": clip_prompt if clip_prompt and clip_prompt.strip() else None,
-                    "ultravico_enabled": enable_ultravico,
-                    "ultravico_alpha": ultravico_alpha if enable_ultravico else None,
-                    "ultravico_suppress_harmonics": ultravico_suppress_harmonics if enable_ultravico else None,
-                    "ultravico_beta": ultravico_beta if enable_ultravico and ultravico_suppress_harmonics else None,
-                    "use_sdnq": use_sdnq,
-                    "sdnq_weights_dtype": sdnq_weights_dtype if use_sdnq else None,
-                    "sdnq_triton_mm": sdnq_triton_mm if use_sdnq else None,
-                    "sdnq_compile": sdnq_compile if use_sdnq else None,
-                }
-                try:
-                    add_metadata_to_video(output_filename, params_for_meta)
-                    print(f"Added metadata to {output_filename}")
-                except Exception as meta_err:
-                    print(f"Warning: Failed to add metadata to {output_filename}: {meta_err}")
-
                 all_generated_videos.append((output_filename, f"Seed: {current_seed}"))
                 progress_msg = f"Completed {i+1}/{batch_size} in {elapsed:.1f}s"
                 yield all_generated_videos.copy(), None, status_text, progress_msg
@@ -993,64 +938,6 @@ def generate_v2v_video(
             elapsed = time.perf_counter() - start_time
 
             if return_code == 0 and os.path.exists(output_filename):
-                # Save metadata to video
-                params_for_meta = {
-                    "model_type": "Kandinsky 5.0",
-                    "mode": "v2v",
-                    "prompt": prompt,
-                    "negative_prompt": negative_prompt,
-                    "video_path": os.path.basename(input_video) if input_video else None,
-                    "num_cond_frames": int(num_cond_frames),
-                    "width": int(width),
-                    "height": int(height),
-                    "video_duration": video_duration,
-                    "sample_steps": sample_steps,
-                    "guidance_weight": guidance_weight,
-                    "scheduler_scale": scheduler_scale,
-                    "seed": current_seed,
-                    "use_mixed_weights": use_mixed_weights,
-                    "use_int8": use_int8,
-                    "use_torch_compile": use_torch_compile,
-                    "use_magcache": use_magcache,
-                    "enable_block_swap": enable_block_swap,
-                    "blocks_in_memory": int(blocks_in_memory) if enable_block_swap else None,
-                    "dtype": dtype_str,
-                    "text_encoder_dtype": text_encoder_dtype_str if text_encoder_dtype_str else None,
-                    "vae_dtype": vae_dtype_str if vae_dtype_str else None,
-                    "computation_dtype": computation_dtype_str if computation_dtype_str else None,
-                    "config_file": config_file,
-                    "model_config": model_config,
-                    "dit_checkpoint_path": dit_checkpoint_path if dit_checkpoint_path and dit_checkpoint_path.strip() else None,
-                    "attention_engine": attention_engine,
-                    "attention_type": attention_type if attention_type != "auto" else None,
-                    "nabla_P": nabla_P if attention_type == "nabla" else None,
-                    "nabla_wT": int(nabla_wT) if attention_type == "nabla" else None,
-                    "nabla_wW": int(nabla_wW) if attention_type == "nabla" else None,
-                    "nabla_wH": int(nabla_wH) if attention_type == "nabla" else None,
-                    "enable_vae_chunking": enable_vae_chunking,
-                    "vae_temporal_tile_frames": int(vae_temporal_tile_frames) if enable_vae_chunking and vae_temporal_tile_frames else None,
-                    "vae_temporal_stride_frames": int(vae_temporal_stride_frames) if enable_vae_chunking and vae_temporal_stride_frames else None,
-                    "vae_spatial_tile_height": int(vae_spatial_tile_height) if enable_vae_chunking and vae_spatial_tile_height else None,
-                    "vae_spatial_tile_width": int(vae_spatial_tile_width) if enable_vae_chunking and vae_spatial_tile_width else None,
-                    "use_apg": use_apg,
-                    "apg_momentum": apg_momentum if use_apg else None,
-                    "apg_norm_threshold": apg_norm_threshold if use_apg else None,
-                    "clip_prompt": clip_prompt if clip_prompt and clip_prompt.strip() else None,
-                    "ultravico_enabled": enable_ultravico,
-                    "ultravico_alpha": ultravico_alpha if enable_ultravico else None,
-                    "ultravico_suppress_harmonics": ultravico_suppress_harmonics if enable_ultravico else None,
-                    "ultravico_beta": ultravico_beta if enable_ultravico and ultravico_suppress_harmonics else None,
-                    "use_sdnq": use_sdnq,
-                    "sdnq_weights_dtype": sdnq_weights_dtype if use_sdnq else None,
-                    "sdnq_triton_mm": sdnq_triton_mm if use_sdnq else None,
-                    "sdnq_compile": sdnq_compile if use_sdnq else None,
-                }
-                try:
-                    add_metadata_to_video(output_filename, params_for_meta)
-                    print(f"Added metadata to {output_filename}")
-                except Exception as meta_err:
-                    print(f"Warning: Failed to add metadata to {output_filename}: {meta_err}")
-
                 all_generated_videos.append((output_filename, f"Seed: {current_seed}"))
                 progress_msg = f"Completed {i+1}/{batch_size} in {elapsed:.1f}s"
                 yield all_generated_videos.copy(), None, status_text, progress_msg

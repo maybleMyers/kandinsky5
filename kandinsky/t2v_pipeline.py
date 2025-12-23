@@ -411,6 +411,7 @@ class Kandinsky5T2VPipeline:
         num_frames = 1 if time_length == 0 else time_length * 24 // 4 + 1
 
         caption = text
+        self.last_expanded_prompt = None  # Store expanded prompt for metadata
         if expand_prompts:
             transformers.set_seed(seed)
             if self.local_dit_rank == 0:
@@ -419,6 +420,7 @@ class Kandinsky5T2VPipeline:
                 if self.offload or force_offload:
                     self.text_embedder = self.text_embedder.to(self.device_map["text_embedder"])
                 caption = self.expand_prompt(caption)
+                self.last_expanded_prompt = caption  # Store for metadata
                 print("\n" + "="*80)
                 print("EXPANDED QWEN 2.5 PROMPT:")
                 print("="*80)

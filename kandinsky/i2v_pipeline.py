@@ -1619,6 +1619,7 @@ class Kandinsky5I2VPipeline:
         log_vram_usage("AFTER VAE OFFLOAD (I2V)", dit=self.dit, vae=self.vae, text_embedder=self.text_embedder)
 
         caption = text
+        self.last_expanded_prompt = None  # Store expanded prompt for metadata
         if expand_prompts:
             transformers.set_seed(seed)
             if self.local_dit_rank == 0:
@@ -1627,6 +1628,7 @@ class Kandinsky5I2VPipeline:
                 if self.offload or force_offload:
                     self.text_embedder = self.text_embedder.to(self.device_map["text_embedder"])
                 caption = self.text_embedder.embedder.expand_text_prompt(caption, image, device=self.device_map["text_embedder"])
+                self.last_expanded_prompt = caption  # Store for metadata
                 print("\n" + "="*80)
                 print("EXPANDED QWEN 2.5 PROMPT:")
                 print("="*80)

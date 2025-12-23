@@ -74,6 +74,213 @@ try:
 except ImportError:
     LatentPreviewer = None
 
+# Global variable to store expanded prompt for metadata
+_expanded_prompt = None
+
+def get_ffmpeg_path():
+    """Get ffmpeg executable path."""
+    import shutil
+    # Try imageio_ffmpeg first (most reliable)
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except ImportError:
+        pass
+    # Fall back to system ffmpeg
+    ffmpeg_path = shutil.which("ffmpeg")
+    if ffmpeg_path:
+        return ffmpeg_path
+    raise RuntimeError("ffmpeg not found. Install imageio-ffmpeg or add ffmpeg to PATH.")
+
+
+def add_metadata_to_video(video_path: str, parameters: dict) -> None:
+    """Add generation parameters to video metadata using ffmpeg."""
+    import subprocess
+    import json
+
+    # Convert parameters to JSON string
+    params_json = json.dumps(parameters, indent=2)
+
+    # Temporary output path
+    temp_path = video_path.replace(".mp4", "_temp.mp4")
+
+    # FFmpeg command to add metadata without re-encoding
+    cmd = [
+        get_ffmpeg_path(),
+        '-y',  # Overwrite output
+        '-i', video_path,
+        '-metadata', f'comment={params_json}',
+        '-codec', 'copy',
+        temp_path
+    ]
+
+    try:
+        # Execute FFmpeg command
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        # Replace original file with the metadata-enhanced version
+        os.replace(temp_path, video_path)
+        print(f">>> Metadata added to {video_path}")
+    except subprocess.CalledProcessError as e:
+        print(f">>> Warning: Failed to add metadata: {e.stderr.decode() if e.stderr else str(e)}")
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+    except Exception as e:
+        print(f">>> Warning: Metadata error: {str(e)}")
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
+
+def collect_generation_metadata(args, mode="i2v", expanded_prompt=None):
+    """
+    Collect generation metadata from args and runtime info.
+
+    Args:
+        args: Parsed command line arguments
+        mode: Generation mode (i2v, t2v, v2v, etc.)
+        expanded_prompt: The expanded prompt if prompt expansion was used
+
+    Returns:
+        dict: Metadata dictionary
+    """
+    metadata = {
+        "model_type": "Kandinsky 5.0",
+        "mode": mode,
+        "prompt": args.prompt,
+        "negative_prompt": args.negative_prompt,
+        "seed": args.seed,
+        "width": args.width,
+        "height": args.height,
+        "video_duration": args.video_duration,
+        "sample_steps": args.sample_steps,
+        "guidance_weight": args.guidance_weight,
+        "scheduler_scale": args.scheduler_scale,
+        "expand_prompt": args.expand_prompt,
+        "use_prompt_template": not args.no_prompt_template,
+        "custom_system_prompt": args.custom_system_prompt if args.custom_system_prompt else None,
+        "clip_prompt": args.clip_prompt if args.clip_prompt else None,
+        "config_file": args.config,
+    }
+
+    # Add expanded prompt if available
+    if expanded_prompt:
+        metadata["expanded_prompt"] = expanded_prompt
+    elif _expanded_prompt:
+        metadata["expanded_prompt"] = _expanded_prompt
+
+    # Add LoRA information if used
+    if args.lora_path and len(args.lora_path) > 0:
+        lora_info = []
+        lora_weights = args.lora_weight if args.lora_weight else [1.0] * len(args.lora_path)
+        lora_triggers = args.lora_trigger if args.lora_trigger else [None] * len(args.lora_path)
+        for i, path in enumerate(args.lora_path):
+            lora_info.append({
+                "path": os.path.basename(path),
+                "weight": lora_weights[i] if i < len(lora_weights) else 1.0,
+                "trigger": lora_triggers[i] if i < len(lora_triggers) else None
+            })
+        metadata["loras"] = lora_info
+
+    # Add input image/video info if applicable
+    if args.image:
+        metadata["image_path"] = os.path.basename(args.image)
+    if hasattr(args, 'end_image') and args.end_image:
+        metadata["end_image_path"] = os.path.basename(args.end_image)
+    if args.video:
+        metadata["input_video"] = os.path.basename(args.video)
+    if hasattr(args, 'video2') and args.video2:
+        metadata["input_video2"] = os.path.basename(args.video2)
+
+    # Add APG settings if used
+    if args.use_apg:
+        metadata["apg"] = {
+            "enabled": True,
+            "momentum": args.apg_momentum,
+            "norm_threshold": args.apg_norm_threshold
+        }
+
+    # Add quantization info
+    if args.quantized_qwen:
+        metadata["quantized_qwen"] = True
+    if args.use_fp8:
+        metadata["fp8_enabled"] = True
+    if hasattr(args, 'use_sdnq') and args.use_sdnq:
+        metadata["sdnq_enabled"] = True
+
+    # Add VAE chunking settings
+    if hasattr(args, 'vae_temporal_tile_frames') and args.vae_temporal_tile_frames:
+        metadata["vae_temporal_tile_frames"] = args.vae_temporal_tile_frames
+        metadata["vae_temporal_stride_frames"] = args.vae_temporal_stride_frames
+    if hasattr(args, 'vae_spatial_tile_height') and args.vae_spatial_tile_height:
+        metadata["vae_spatial_tile_height"] = args.vae_spatial_tile_height
+        metadata["vae_spatial_tile_width"] = args.vae_spatial_tile_width
+
+    # Add denoise settings if applicable
+    if hasattr(args, 'denoise_strength') and args.denoise_strength:
+        metadata["denoise_strength"] = args.denoise_strength
+
+    # Add UltraViCo settings if used
+    if hasattr(args, 'ultravico') and args.ultravico:
+        metadata["ultravico"] = {
+            "enabled": True,
+            "alpha": args.ultravico_alpha,
+            "suppress_harmonics": args.suppress_harmonics,
+            "beta": args.beta if args.suppress_harmonics else None
+        }
+
+    # Add dtype settings
+    if hasattr(args, 'dtype') and args.dtype:
+        metadata["dtype"] = args.dtype
+    if hasattr(args, 'vae_dtype') and args.vae_dtype:
+        metadata["vae_dtype"] = args.vae_dtype
+    if hasattr(args, 'text_encoder_dtype') and args.text_encoder_dtype:
+        metadata["text_encoder_dtype"] = args.text_encoder_dtype
+    if hasattr(args, 'computation_dtype') and args.computation_dtype:
+        metadata["computation_dtype"] = args.computation_dtype
+
+    # Add block swap info
+    if hasattr(args, 'enable_block_swap') and args.enable_block_swap:
+        metadata["enable_block_swap"] = True
+        metadata["blocks_in_memory"] = args.blocks_in_memory
+
+    # Num conditioning frames for V2V
+    if hasattr(args, 'num_cond_frames') and args.num_cond_frames:
+        metadata["num_cond_frames"] = args.num_cond_frames
+
+    # Add optimization/quantization flags
+    if hasattr(args, 'use_mixed_weights'):
+        metadata["use_mixed_weights"] = args.use_mixed_weights
+    if hasattr(args, 'use_int8'):
+        metadata["use_int8"] = args.use_int8
+    if hasattr(args, 'use_magcache'):
+        metadata["use_magcache"] = args.use_magcache
+    if hasattr(args, 'no_compile'):
+        metadata["use_torch_compile"] = not args.no_compile
+
+    # Add attention settings
+    if hasattr(args, 'attention_engine') and args.attention_engine:
+        metadata["attention_engine"] = args.attention_engine
+    if hasattr(args, 'attention_type') and args.attention_type:
+        metadata["attention_type"] = args.attention_type
+        if args.attention_type == "nabla":
+            metadata["nabla_P"] = getattr(args, 'nabla_P', None)
+            metadata["nabla_wT"] = getattr(args, 'nabla_wT', None)
+            metadata["nabla_wW"] = getattr(args, 'nabla_wW', None)
+            metadata["nabla_wH"] = getattr(args, 'nabla_wH', None)
+            metadata["nabla_method"] = getattr(args, 'nabla_method', None)
+            metadata["nabla_add_sta"] = getattr(args, 'nabla_add_sta', None)
+
+    # Add SDNQ settings
+    if hasattr(args, 'use_sdnq') and args.use_sdnq:
+        metadata["use_sdnq"] = True
+        metadata["sdnq_weights_dtype"] = getattr(args, 'sdnq_weights_dtype', None)
+        metadata["sdnq_triton_mm"] = not getattr(args, 'no_sdnq_triton_mm', False)
+        metadata["sdnq_compile"] = not getattr(args, 'no_sdnq_compile', False)
+
+    # Add checkpoint path if specified
+    if hasattr(args, 'checkpoint') and args.checkpoint:
+        metadata["dit_checkpoint_path"] = os.path.basename(args.checkpoint)
+
+    return metadata
 
 
 def disable_warnings():
@@ -1095,6 +1302,9 @@ if __name__ == "__main__":
                             fps=24,
                             options={"crf": "5"},
                         )
+                    # Add metadata to video
+                    metadata = collect_generation_metadata(args, mode="decode")
+                    add_metadata_to_video(args.output_filename, metadata)
                     print(f"TIME ELAPSED: {time.perf_counter() - start_time}")
                     print(f"Decoded video saved to {args.output_filename}")
 
@@ -1160,6 +1370,9 @@ if __name__ == "__main__":
                         fps=24,
                         options={"crf": "5"},
                     )
+                # Add metadata to video
+                metadata = collect_generation_metadata(args, mode="resume")
+                add_metadata_to_video(args.output_filename, metadata)
 
             print(f"TIME ELAPSED: {time.perf_counter() - start_time}")
             if x is None:
@@ -1323,6 +1536,9 @@ if __name__ == "__main__":
                 fps=24,
                 options={"crf": "5"},
             )
+            # Add metadata to video
+            metadata = collect_generation_metadata(args, mode="denoise")
+            add_metadata_to_video(args.output_filename, metadata)
             print(f">>> Saved denoised video to {args.output_filename}")
 
     elif is_i2v:
@@ -1462,6 +1678,9 @@ if __name__ == "__main__":
                     fps=24,
                     options={"crf": "5"},
                 )
+                # Add metadata to video
+                metadata = collect_generation_metadata(args, mode="i2i2v")
+                add_metadata_to_video(args.output_filename, metadata)
                 print(f">>> Saved image-to-image video to {args.output_filename}")
 
         elif args.video is not None and args.video2 is not None:
@@ -1685,6 +1904,9 @@ if __name__ == "__main__":
                     fps=24,
                     options={"crf": "5"},
                 )
+                # Add metadata to video
+                metadata = collect_generation_metadata(args, mode="v2v_join")
+                add_metadata_to_video(args.output_filename, metadata)
                 print(f">>> Saved joined video to {args.output_filename}")
 
         elif args.video is not None and args.end_image is not None:
@@ -1853,6 +2075,9 @@ if __name__ == "__main__":
                     fps=24,
                     options={"crf": "5"},
                 )
+                # Add metadata to video
+                metadata = collect_generation_metadata(args, mode="v2v_endimg")
+                add_metadata_to_video(args.output_filename, metadata)
                 print(f">>> Saved video + end image result to {args.output_filename}")
 
         elif args.video is not None:
@@ -2042,6 +2267,9 @@ if __name__ == "__main__":
                     fps=24,
                     options={"crf": "5"},
                 )
+                # Add metadata to video
+                metadata = collect_generation_metadata(args, mode="v2v")
+                add_metadata_to_video(args.output_filename, metadata)
                 print(f">>> Saved concatenated video to {args.output_filename}")
         else:
             # Standard Image-to-Video mode
@@ -2098,4 +2326,12 @@ if __name__ == "__main__":
     else:
         output_type = "image" if is_t2i else "video"
         print(f"Generated {output_type} is saved to {args.output_filename}")
+
+        # Add metadata to video (not images)
+        if not is_t2i and os.path.exists(args.output_filename):
+            # Get expanded prompt from pipeline if available
+            expanded_prompt = getattr(pipe, 'last_expanded_prompt', None)
+            mode = "i2v" if is_i2v else "t2v"
+            metadata = collect_generation_metadata(args, mode=mode, expanded_prompt=expanded_prompt)
+            add_metadata_to_video(args.output_filename, metadata)
     
