@@ -107,10 +107,7 @@ def refresh_k5_lora_dropdowns(lora_folder: str) -> List:
     new_choices = get_k5_lora_options(lora_folder)
     updates = []
     for _ in range(4):
-        updates.extend([
-            gr.update(choices=new_choices, value="None"),
-            gr.update()  # Keep multiplier value unchanged
-        ])
+        updates.append(gr.update(choices=new_choices, value="None"))
     return updates
 
 
@@ -2518,6 +2515,14 @@ def create_interface():
                             columns=[2], rows=[2], object_fit="contain", height="auto",
                             show_label=True, elem_id="gallery_k1", allow_preview=True, preview=True
                         )
+                        with gr.Accordion("Latent Preview (During Generation)", open=True):
+                            enable_preview = gr.Checkbox(label="Enable Latent Preview", value=True)
+                            preview_steps = gr.Slider(minimum=1, maximum=50, step=1, value=5,
+                                                    label="Preview Every N Steps")
+                            preview_output = gr.Video(
+                                label="Latest Preview", height=300,
+                                interactive=False, elem_id="k1_preview_video"
+                            )
 
                         # LoRA Section
                         with gr.Accordion("LoRA (Style Adapters)", open=False):
@@ -2545,14 +2550,6 @@ def create_interface():
                                         scale=1
                                     ))
 
-                        with gr.Accordion("Latent Preview (During Generation)", open=True):
-                            enable_preview = gr.Checkbox(label="Enable Latent Preview", value=True)
-                            preview_steps = gr.Slider(minimum=1, maximum=50, step=1, value=5,
-                                                    label="Preview Every N Steps")
-                            preview_output = gr.Video(
-                                label="Latest Preview", height=300,
-                                interactive=False, elem_id="k1_preview_video"
-                            )
                         stop_decode_btn = gr.Button("Stop & Decode", elem_classes="light-blue-btn", visible=False)
                         stop_save_btn = gr.Button("Stop & Save inference ckpoint", elem_classes="light-blue-btn")
                         checkpoint_file = gr.Textbox(
@@ -2716,7 +2713,7 @@ def create_interface():
                 lora_refresh_btn.click(
                     fn=refresh_k5_lora_dropdowns,
                     inputs=[lora_folder],
-                    outputs=lora_weights + lora_multipliers
+                    outputs=lora_weights
                 )
 
                 # Generate button - uses Gradio's built-in queue for browser-independent generation
@@ -3113,6 +3110,14 @@ def create_interface():
                             columns=[2], rows=[2], object_fit="contain", height="auto",
                             show_label=True, elem_id="gallery_v2v", allow_preview=True, preview=True
                         )
+                        with gr.Accordion("Latent Preview (During Generation)", open=True):
+                            v2v_enable_preview = gr.Checkbox(label="Enable Latent Preview", value=True)
+                            v2v_preview_steps = gr.Slider(minimum=1, maximum=50, step=1, value=5,
+                                                    label="Preview Every N Steps")
+                            v2v_preview_output = gr.Video(
+                                label="Latest Preview", height=300,
+                                interactive=False, elem_id="v2v_preview_video"
+                            )
 
                         # LoRA Section for V2V
                         with gr.Accordion("LoRA (Style Adapters)", open=False):
@@ -3139,15 +3144,6 @@ def create_interface():
                                         label="Weight",
                                         scale=1
                                     ))
-
-                        with gr.Accordion("Latent Preview (During Generation)", open=True):
-                            v2v_enable_preview = gr.Checkbox(label="Enable Latent Preview", value=True)
-                            v2v_preview_steps = gr.Slider(minimum=1, maximum=50, step=1, value=5,
-                                                    label="Preview Every N Steps")
-                            v2v_preview_output = gr.Video(
-                                label="Latest Preview", height=300,
-                                interactive=False, elem_id="v2v_preview_video"
-                            )
                         v2v_stop_decode_btn = gr.Button("Stop & Decode", elem_classes="light-blue-btn", visible=False)
                         v2v_stop_save_btn = gr.Button("Stop & Save inference ckpoint", elem_classes="light-blue-btn")
                         v2v_checkpoint_file = gr.Textbox(
@@ -3318,7 +3314,7 @@ def create_interface():
                 v2v_lora_refresh_btn.click(
                     fn=refresh_k5_lora_dropdowns,
                     inputs=[v2v_lora_folder],
-                    outputs=v2v_lora_weights + v2v_lora_multipliers
+                    outputs=v2v_lora_weights
                 )
 
                 v2v_generate_btn.click(
