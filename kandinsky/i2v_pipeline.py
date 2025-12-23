@@ -1440,11 +1440,14 @@ class Kandinsky5I2VPipeline:
             trigger: Optional trigger word to prepend to prompts
         """
         import re
+        import time
 
         logging.info(f"Loading musubi-format LoRA from {lora_path} with multiplier {multiplier}")
 
         # Load the LoRA weights
+        t0 = time.perf_counter()
         lora_sd = load_file(lora_path)
+        print(f"    [LoRA] Loaded file in {time.perf_counter() - t0:.2f}s", flush=True)
 
         # Try to get trigger from metadata
         try:
@@ -1459,6 +1462,7 @@ class Kandinsky5I2VPipeline:
             logging.info(f"LoRA trigger word: '{trigger}'")
 
         # Build parameter lookup dictionary ONCE for O(1) lookups
+        t0 = time.perf_counter()
         param_dict = {}
         param_by_normalized = {}
         for name, param in self.dit.named_parameters():
@@ -1470,8 +1474,10 @@ class Kandinsky5I2VPipeline:
                 # Also store without .weight suffix
                 base_normalized = name[:-7].replace(".", "_")
                 param_by_normalized[base_normalized] = (name, param)
+        print(f"    [LoRA] Built param lookup in {time.perf_counter() - t0:.2f}s ({len(param_by_normalized)} entries)", flush=True)
 
         # Group LoRA weights by module
+        t0 = time.perf_counter()
         lora_modules = {}
         for key, weight in lora_sd.items():
             if not key.startswith("lora_unet_"):
@@ -1488,8 +1494,10 @@ class Kandinsky5I2VPipeline:
             if module_key not in lora_modules:
                 lora_modules[module_key] = {}
             lora_modules[module_key][weight_type] = weight
+        print(f"    [LoRA] Grouped {len(lora_modules)} modules in {time.perf_counter() - t0:.2f}s", flush=True)
 
         # Apply LoRA weights using fast dictionary lookup
+        t0 = time.perf_counter()
         applied_count = 0
         for module_key, weights in lora_modules.items():
             if "lora_down" not in weights or "lora_up" not in weights:
@@ -1532,6 +1540,10 @@ class Kandinsky5I2VPipeline:
                     target_param.add_(delta.to(target_param.dtype))
                     applied_count += 1
 
+                    if applied_count % 50 == 0:
+                        print(f"    [LoRA] Applied {applied_count} modules...", flush=True)
+
+        print(f"    [LoRA] Applied all {applied_count} modules in {time.perf_counter() - t0:.2f}s", flush=True)
         logging.info(f"Applied {applied_count} LoRA modules from {lora_path}")
 
         if applied_count == 0:
