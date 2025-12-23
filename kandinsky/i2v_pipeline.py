@@ -1521,7 +1521,9 @@ class Kandinsky5I2VPipeline:
 
             # Fast lookup using cached param dictionary
             target_key = module_key + "_weight"
-            target_param = self._param_lookup.get(target_key) or self._param_lookup.get(module_key)
+            target_param = self._param_lookup.get(target_key)
+            if target_param is None:
+                target_param = self._param_lookup.get(module_key)
 
             if target_param is not None:
                 with torch.no_grad():
