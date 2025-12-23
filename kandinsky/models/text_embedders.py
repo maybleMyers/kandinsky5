@@ -146,10 +146,15 @@ class Qwen2_5_VLTextEmbedder:
         self.max_length = conf.max_length
         self.text_token_padding = text_token_padding
 
-    def __call__(self, texts, images=None, type_of_content="video"):
-        prompt_template = "\n".join(self.PROMPT_TEMPLATE["template"][type_of_content])
-        crop_start = self.PROMPT_TEMPLATE["crop_start"][type_of_content]
-        full_texts = list(map(lambda x: prompt_template.format(x), texts))
+    def __call__(self, texts, images=None, type_of_content="video", use_prompt_template=True):
+        if use_prompt_template:
+            prompt_template = "\n".join(self.PROMPT_TEMPLATE["template"][type_of_content])
+            crop_start = self.PROMPT_TEMPLATE["crop_start"][type_of_content]
+            full_texts = list(map(lambda x: prompt_template.format(x), texts))
+        else:
+            # Raw prompt mode - no template wrapping
+            crop_start = 0
+            full_texts = texts
 
         max_length = self.max_length + crop_start
         inputs = self.processor(
@@ -230,8 +235,8 @@ class Kandinsky5TextEmbedder:
         self.clip_embedder = ClipTextEmbedder(conf.clip, device, dtype, use_fp8=use_fp8)
         self.conf = conf
 
-    def encode(self, texts, images=None, type_of_content="image", clip_texts=None):
-        text_embeds, cu_seqlens, attention_mask = self.embedder(texts, images=images, type_of_content=type_of_content)
+    def encode(self, texts, images=None, type_of_content="image", clip_texts=None, use_prompt_template=True):
+        text_embeds, cu_seqlens, attention_mask = self.embedder(texts, images=images, type_of_content=type_of_content, use_prompt_template=use_prompt_template)
         # Use separate clip_texts if provided, otherwise use main texts
         clip_input = clip_texts if clip_texts is not None else texts
         pooled_embed = self.clip_embedder(clip_input)

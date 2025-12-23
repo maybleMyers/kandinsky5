@@ -318,6 +318,12 @@ def parse_args():
         help="Whether to use prompt expansion."
     )
     parser.add_argument(
+        "--no_prompt_template",
+        action='store_true',
+        default=False,
+        help="Disable the system prompt template wrapper. By default, prompts are wrapped with instructions that tell Qwen to describe video details (camera movement, style, etc.). Use this flag to pass your prompt directly without the template."
+    )
+    parser.add_argument(
         "--sample_steps",
         type=int,
         default=None,
@@ -704,6 +710,10 @@ def parse_args():
 if __name__ == "__main__":
     disable_warnings()
     args = parse_args()
+
+    # Log prompt template status
+    if args.no_prompt_template:
+        print(">>> Prompt template DISABLED - using raw prompts without system instruction wrapper")
 
     # Convert string dtype to torch dtype
     dtype_map = {
@@ -1292,6 +1302,7 @@ if __name__ == "__main__":
             previewer=previewer,
             preview_interval=args.preview,
             preview_suffix=args.preview_suffix,
+            use_prompt_template=not args.no_prompt_template,
         )
 
         # Save output
@@ -1429,6 +1440,7 @@ if __name__ == "__main__":
                 apg_momentum=args.apg_momentum,
                 apg_norm_threshold=args.apg_norm_threshold,
                 end_blend_weight=args.end_blend_weight,
+                use_prompt_template=not args.no_prompt_template,
             )
 
             # Save output video directly (no concatenation needed unlike video join mode)
@@ -1556,6 +1568,7 @@ if __name__ == "__main__":
                 apg_momentum=args.apg_momentum,
                 apg_norm_threshold=args.apg_norm_threshold,
                 end_blend_weight=args.end_blend_weight,
+                use_prompt_template=not args.no_prompt_template,
             )
 
             # Concatenate: video1 + generated middle + video2
@@ -1773,6 +1786,7 @@ if __name__ == "__main__":
                 apg_momentum=args.apg_momentum,
                 apg_norm_threshold=args.apg_norm_threshold,
                 end_blend_weight=args.end_blend_weight,
+                use_prompt_template=not args.no_prompt_template,
             )
 
             # Concatenate input video with generated frames
@@ -1940,6 +1954,7 @@ if __name__ == "__main__":
                 use_apg=args.use_apg,
                 apg_momentum=args.apg_momentum,
                 apg_norm_threshold=args.apg_norm_threshold,
+                use_prompt_template=not args.no_prompt_template,
             )
 
             # Concatenate input video with newly generated frames
@@ -2038,7 +2053,8 @@ if __name__ == "__main__":
                      preview_suffix=args.preview_suffix,
                      stop_check=check_stop_signals,
                      checkpoint_path=checkpoint_file,
-                     save_latents=args.save_latents)
+                     save_latents=args.save_latents,
+                     use_prompt_template=not args.no_prompt_template)
     else:
         x = pipe(args.prompt,
              time_length=args.video_duration,
@@ -2056,7 +2072,8 @@ if __name__ == "__main__":
              preview_suffix=args.preview_suffix,
              stop_check=check_stop_signals,
              checkpoint_path=checkpoint_file,
-             save_latents=args.save_latents)
+             save_latents=args.save_latents,
+             use_prompt_template=not args.no_prompt_template)
 
     print(f"TIME ELAPSED: {time.perf_counter() - start_time}")
 

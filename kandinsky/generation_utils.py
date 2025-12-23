@@ -408,6 +408,7 @@ def generate_sample(
     checkpoint_path=None,
     save_latents=None,
     vae_dtype=torch.bfloat16,
+    use_prompt_template=True,
 ):
     bs, duration, height, width, dim = shape
     if duration == 1:
@@ -424,10 +425,10 @@ def generate_sample(
         t0 = time.perf_counter()
         clip_texts = [clip_prompt] if clip_prompt else None
         bs_text_embed, text_cu_seqlens, attention_mask = text_embedder.encode(
-            [caption], type_of_content=type_of_content, clip_texts=clip_texts
+            [caption], type_of_content=type_of_content, clip_texts=clip_texts, use_prompt_template=use_prompt_template
         )
         bs_null_text_embed, null_text_cu_seqlens, null_attention_mask = text_embedder.encode(
-            [negative_caption], type_of_content=type_of_content
+            [negative_caption], type_of_content=type_of_content, use_prompt_template=use_prompt_template
         )
         print(f"[TIMING] Text encoding done in {time.perf_counter() - t0:.1f}s", flush=True)
 
@@ -1068,6 +1069,7 @@ def generate_sample_v2v_join(
     # End frame blending (0.0 = use denoised result, 1.0 = use target)
     end_blend_weight=0.0,
     vae_dtype=torch.bfloat16,
+    use_prompt_template=True,
 ):
     """
     Generate video joining with dual conditioning (start and end frames).
@@ -1106,10 +1108,10 @@ def generate_sample_v2v_join(
         t0 = time.perf_counter()
         clip_texts = [clip_prompt] if clip_prompt else None
         bs_text_embed, text_cu_seqlens, attention_mask = text_embedder.encode(
-            [caption], type_of_content=type_of_content, clip_texts=clip_texts
+            [caption], type_of_content=type_of_content, clip_texts=clip_texts, use_prompt_template=use_prompt_template
         )
         bs_null_text_embed, null_text_cu_seqlens, null_attention_mask = text_embedder.encode(
-            [negative_caption], type_of_content=type_of_content
+            [negative_caption], type_of_content=type_of_content, use_prompt_template=use_prompt_template
         )
         print(f"[TIMING] Text encoding done in {time.perf_counter() - t0:.1f}s", flush=True)
 
@@ -1296,6 +1298,7 @@ def generate_sample_v2v(
     apg_momentum=-0.75,
     apg_norm_threshold=55.0,
     vae_dtype=torch.bfloat16,
+    use_prompt_template=True,
 ):
     """
     Generate video continuation from conditioning latents using KV cache.
@@ -1332,10 +1335,10 @@ def generate_sample_v2v(
         t0 = time.perf_counter()
         clip_texts = [clip_prompt] if clip_prompt else None
         bs_text_embed, text_cu_seqlens, attention_mask = text_embedder.encode(
-            [caption], type_of_content=type_of_content, clip_texts=clip_texts
+            [caption], type_of_content=type_of_content, clip_texts=clip_texts, use_prompt_template=use_prompt_template
         )
         bs_null_text_embed, null_text_cu_seqlens, null_attention_mask = text_embedder.encode(
-            [negative_caption], type_of_content=type_of_content
+            [negative_caption], type_of_content=type_of_content, use_prompt_template=use_prompt_template
         )
         print(f"[TIMING] Text encoding done in {time.perf_counter() - t0:.1f}s", flush=True)
 
@@ -1522,6 +1525,7 @@ def generate_sample_i2v(
     checkpoint_path=None,
     save_latents=None,
     vae_dtype=torch.bfloat16,
+    use_prompt_template=True,
 ):
     text_embedder.embedder.mode = "i2v"
 
@@ -1540,10 +1544,10 @@ def generate_sample_i2v(
         t0 = time.perf_counter()
         clip_texts = [clip_prompt] if clip_prompt else None
         bs_text_embed, text_cu_seqlens, attention_mask = text_embedder.encode(
-            [caption], type_of_content=type_of_content, clip_texts=clip_texts
+            [caption], type_of_content=type_of_content, clip_texts=clip_texts, use_prompt_template=use_prompt_template
         )
         bs_null_text_embed, null_text_cu_seqlens, null_attention_mask = text_embedder.encode(
-            [negative_caption], type_of_content=type_of_content
+            [negative_caption], type_of_content=type_of_content, use_prompt_template=use_prompt_template
         )
         print(f"[TIMING] Text encoding done in {time.perf_counter() - t0:.1f}s", flush=True)
 
@@ -2179,6 +2183,7 @@ def generate_sample_denoise(
     preview_interval=None,
     preview_suffix=None,
     vae_dtype=torch.bfloat16,
+    use_prompt_template=True,
 ):
     """
     Apply light denoising to video latents (v2v img2img style).
@@ -2222,10 +2227,10 @@ def generate_sample_denoise(
         t0 = time.perf_counter()
         clip_texts = [clip_prompt] if clip_prompt else None
         bs_text_embed, text_cu_seqlens, attention_mask = text_embedder.encode(
-            [caption], type_of_content=type_of_content, clip_texts=clip_texts
+            [caption], type_of_content=type_of_content, clip_texts=clip_texts, use_prompt_template=use_prompt_template
         )
         bs_null_text_embed, null_text_cu_seqlens, null_attention_mask = text_embedder.encode(
-            [negative_caption], type_of_content=type_of_content
+            [negative_caption], type_of_content=type_of_content, use_prompt_template=use_prompt_template
         )
         print(f"[TIMING] Text encoding done in {time.perf_counter() - t0:.1f}s", flush=True)
 

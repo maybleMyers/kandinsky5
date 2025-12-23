@@ -380,6 +380,7 @@ class Kandinsky5T2VPipeline:
         stop_check=None,
         checkpoint_path=None,
         save_latents=None,
+        use_prompt_template: bool = True,
     ):
         num_steps = self.num_steps if num_steps is None else num_steps
         guidance_weight = self.guidance_weight if guidance_weight is None else guidance_weight
@@ -490,6 +491,7 @@ class Kandinsky5T2VPipeline:
             checkpoint_path=checkpoint_path,
             save_latents=save_latents,
             vae_dtype=self.vae_dtype,
+            use_prompt_template=use_prompt_template,
         )
 
         # Handle checkpoint save (images will be None)
