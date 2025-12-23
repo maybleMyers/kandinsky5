@@ -958,7 +958,12 @@ def get_I2V_pipeline_with_block_swap(
     # Convert state dict to specified dtype (unless using mixed weights or SDNQ)
     if use_mixed_weights:
         # Preserve original weight dtypes for mixed precision
+        # Clone tensors to ensure they're fully materialized (not mmap-backed) for fast operations
         print("Using mixed weights mode - preserving original weight dtypes (fp32 for critical layers)")
+        print("[TIMING] Cloning tensors to ensure fast access...", flush=True)
+        t0 = time.perf_counter()
+        state_dict = {k: v.clone() for k, v in state_dict.items()}
+        print(f"[TIMING] Tensors cloned in {time.perf_counter() - t0:.1f}s", flush=True)
     elif not use_sdnq:
         print("[TIMING] Converting dtype...", flush=True)
         t0 = time.perf_counter()
@@ -1047,6 +1052,14 @@ def get_I2V_pipeline_with_block_swap(
                 dit = dit.to(device_map["dit"])
             else:
                 dit = dit.to(device_map["dit"], dtype=computation_dtype)
+
+    # Clear state_dict reference before return to avoid slow GC with mixed dtypes
+    print(f"[TIMING] Clearing state_dict...", flush=True)
+    t0 = time.perf_counter()
+    del state_dict
+    import gc
+    gc.collect()
+    print(f"[TIMING] state_dict cleared and GC done in {time.perf_counter() - t0:.1f}s", flush=True)
 
     if world_size > 1:
         if enable_block_swap:
@@ -1245,7 +1258,12 @@ def get_T2V_pipeline_with_block_swap(
     # Convert state dict to specified dtype (unless using mixed weights or SDNQ)
     if use_mixed_weights:
         # Preserve original weight dtypes for mixed precision
+        # Clone tensors to ensure they're fully materialized (not mmap-backed) for fast operations
         print("Using mixed weights mode - preserving original weight dtypes (fp32 for critical layers)")
+        print("[TIMING] Cloning tensors to ensure fast access...", flush=True)
+        t0 = time.perf_counter()
+        state_dict = {k: v.clone() for k, v in state_dict.items()}
+        print(f"[TIMING] Tensors cloned in {time.perf_counter() - t0:.1f}s", flush=True)
     elif not use_sdnq:
         print("[TIMING] Converting dtype...", flush=True)
         t0 = time.perf_counter()

@@ -1,6 +1,7 @@
 from typing import Union, Optional, List
 import json
 import logging
+import re
 
 import transformers
 import torch
@@ -10,6 +11,9 @@ from peft import PeftConfig, LoraConfig, inject_adapter_in_model, set_peft_model
 from safetensors.torch import load_file
 
 from .generation_utils import generate_sample
+
+# Pre-compiled regex for fast LoRA key matching
+LORA_KEY_PATTERN = re.compile(r"lora_unet_(.+)\.(lora_down|lora_up|alpha)(\.weight)?$")
 
 
 def read_safetensors_json(path):
@@ -68,6 +72,16 @@ class Kandinsky5T2VPipeline:
         self.peft_config = {}
         self.peft_triggers = {}
         self.peft_trigger = ""
+
+        # Build param lookup ONCE at init for fast musubi LoRA loading
+        # This avoids iterating through all 3.4B params every time a LoRA is loaded
+        self._param_lookup = {}
+        for name, param in self.dit.named_parameters():
+            normalized = name.replace(".", "_")
+            self._param_lookup[normalized] = param
+            if name.endswith(".weight"):
+                base_normalized = name[:-7].replace(".", "_")
+                self._param_lookup[base_normalized] = param
 
     def load_adapter(self, adapter_config: Union[PeftConfig, str], adapter_path: Optional[str] = None,
                      adapter_name: Optional[str] = None, trigger: Optional[str] = None) -> None:
@@ -218,6 +232,101 @@ class Kandinsky5T2VPipeline:
         self.peft_trigger = ""
         logging.info("All LoRA adapters disabled.")
 
+    def load_musubi_lora(self, lora_path: str, multiplier: float = 1.0, trigger: Optional[str] = None) -> None:
+        """
+        Load a LoRA trained with musubi tuner (single safetensors file format).
+        This merges the LoRA weights directly into the model instead of using PEFT adapters.
+
+        Args:
+            lora_path: Path to the .safetensors LoRA file
+            multiplier: Weight multiplier for the LoRA (0.0-2.0)
+            trigger: Optional trigger word to prepend to prompts
+        """
+        logging.info(f"Loading musubi-format LoRA from {lora_path} with multiplier {multiplier}")
+
+        # Load the LoRA weights
+        lora_sd = load_file(lora_path)
+
+        # Try to get trigger from metadata
+        try:
+            metadata = read_safetensors_json(lora_path)
+            if trigger is None and "__metadata__" in metadata:
+                trigger = metadata["__metadata__"].get("trigger", "")
+        except:
+            pass
+
+        if trigger:
+            self.peft_trigger = trigger
+            logging.info(f"LoRA trigger word: '{trigger}'")
+
+        # Use cached param lookup (built once at init) for O(1) lookups
+        # This avoids the 20+ minute iteration through 3.4B params
+
+        # Group LoRA weights by module
+        lora_modules = {}
+        for key, weight in lora_sd.items():
+            if not key.startswith("lora_unet_"):
+                continue
+
+            match = LORA_KEY_PATTERN.match(key)
+            if not match:
+                continue
+
+            module_key = match.group(1)
+            weight_type = match.group(2)
+
+            if module_key not in lora_modules:
+                lora_modules[module_key] = {}
+            lora_modules[module_key][weight_type] = weight
+
+        # Apply LoRA weights - use GPU for fast matmul even when model is on CPU
+        applied_count = 0
+
+        # Use GPU for computation if available (much faster than CPU matmul)
+        compute_device = "cuda" if torch.cuda.is_available() else "cpu"
+        compute_dtype = torch.bfloat16
+
+        for module_key, weights in lora_modules.items():
+            if "lora_down" not in weights or "lora_up" not in weights:
+                continue
+
+            lora_down = weights["lora_down"]
+            lora_up = weights["lora_up"]
+            alpha = weights.get("alpha", torch.tensor(lora_down.shape[0]))
+
+            rank = lora_down.shape[0]
+            scale = (alpha.item() / rank) * multiplier
+
+            # Fast lookup using cached param dictionary
+            target_key = module_key + "_weight"
+            target_param = self._param_lookup.get(target_key)
+            if target_param is None:
+                target_param = self._param_lookup.get(module_key)
+
+            if target_param is not None:
+                with torch.no_grad():
+                    # Compute on GPU for speed, then transfer result to target device
+                    lora_down = lora_down.to(compute_device, compute_dtype)
+                    lora_up = lora_up.to(compute_device, compute_dtype)
+
+                    if len(target_param.shape) == 2:
+                        delta = (lora_up @ lora_down) * scale
+                    elif len(target_param.shape) == 1:
+                        delta = (lora_up.squeeze() * lora_down.squeeze()) * scale
+                    else:
+                        delta = (lora_up @ lora_down) * scale
+                        if delta.shape != target_param.shape:
+                            delta = delta.view(target_param.shape)
+
+                    # Move delta to target device/dtype and add to weights
+                    target_param.add_(delta.to(target_param.device, target_param.dtype))
+                    applied_count += 1
+
+        logging.info(f"Applied {applied_count} LoRA modules from {lora_path}")
+
+        if applied_count == 0:
+            logging.warning(f"No LoRA modules were applied from {lora_path}. Check if the LoRA is compatible.")
+
     def expand_prompt(self, prompt):
         messages = [
             {
@@ -281,6 +390,7 @@ class Kandinsky5T2VPipeline:
         stop_check=None,
         checkpoint_path=None,
         save_latents=None,
+        use_prompt_template: bool = True,
     ):
         num_steps = self.num_steps if num_steps is None else num_steps
         guidance_weight = self.guidance_weight if guidance_weight is None else guidance_weight
@@ -391,6 +501,7 @@ class Kandinsky5T2VPipeline:
             checkpoint_path=checkpoint_path,
             save_latents=save_latents,
             vae_dtype=self.vae_dtype,
+            use_prompt_template=use_prompt_template,
         )
 
         # Handle checkpoint save (images will be None)
