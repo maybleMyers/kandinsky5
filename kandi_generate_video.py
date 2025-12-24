@@ -1443,27 +1443,24 @@ if __name__ == "__main__":
         custom_start_latent = None
         if args.denoise_start_image:
             print(f">>> Encoding custom start image...", flush=True)
+            # Calculate target pixel dimensions from video latents
+            # Video latents shape is [frames, H, W, C] where H,W are latent dims (8x compression)
+            target_h = video_latents.shape[1] * 8
+            target_w = video_latents.shape[2] * 8
+            print(f">>> Resizing start image to {target_w}x{target_h} to match video...", flush=True)
+
+            # Load and resize image to match video dimensions before encoding
+            from PIL import Image
+            pil_image = Image.open(args.denoise_start_image).convert('RGB')
+            pil_image = pil_image.resize((target_w, target_h), Image.LANCZOS)
+
             _, start_image_latent, _ = get_first_frame_from_image(
-                args.denoise_start_image,
+                pil_image,
                 pipe.vae,
                 pipe.device_map["vae"],
                 alignment=alignment,
                 use_deterministic=True
             )
-            # Verify dimensions match video latents (H, W, C)
-            if start_image_latent.shape[1:] != video_latents.shape[1:]:
-                print(f">>> Warning: Start image latent shape {start_image_latent.shape[1:]} doesn't match video latent shape {video_latents.shape[1:]}")
-                print(f">>> The custom start image will be resized to match video dimensions")
-                # Resize start image latent to match video dimensions
-                from torch.nn.functional import interpolate
-                start_image_latent = start_image_latent.permute(0, 3, 1, 2)  # [1, C, H, W]
-                start_image_latent = interpolate(
-                    start_image_latent,
-                    size=(video_latents.shape[1], video_latents.shape[2]),
-                    mode='bilinear',
-                    align_corners=False
-                )
-                start_image_latent = start_image_latent.permute(0, 2, 3, 1)  # [1, H, W, C]
             custom_start_latent = start_image_latent
             print(f">>> Custom start latent shape: {custom_start_latent.shape}")
 
