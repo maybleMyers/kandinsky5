@@ -2993,10 +2993,9 @@ def create_interface():
                                 info="Low (0.1-0.3) = subtle refinement, Medium (0.4-0.6) = noticeable changes, High (0.7-1.0) = major regeneration"
                             )
                             v2v_denoise_start_image = gr.Image(
-                                label="Starting Image (Optional)",
+                                label="Starting Image (Optional) - Custom first frame; video still used for motion/noise",
                                 type="filepath",
-                                sources=["upload", "clipboard"],
-                                info="Custom image to use as the first frame. If not provided, uses the video's first frame. The video is still used for motion/noise structure."
+                                sources=["upload", "clipboard"]
                             )
 
                         with gr.Accordion("NABLA Sparse Attention Settings", open=False):
