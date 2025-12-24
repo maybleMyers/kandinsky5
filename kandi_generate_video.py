@@ -66,6 +66,7 @@ from kandinsky.i2v_pipeline import (
     get_conditioning_latents_from_two_images,
     get_conditioning_video_and_image,
     encode_video_to_latents,
+    get_first_frame_from_image,
     Kandinsky5DenoisePipeline
 )
 from kandinsky.generation_utils import generate_sample_denoise
@@ -861,6 +862,12 @@ def parse_args():
         default=0.2,
         help="Denoise strength (0.1-0.5 typical). Higher = more change. Default: 0.2"
     )
+    parser.add_argument(
+        "--denoise_start_image",
+        type=str,
+        default=None,
+        help="Custom starting image for video denoise mode. When provided, this image is used as the first frame instead of the video's first frame, while the input video is still used for noise structure."
+    )
 
     # LoRA support
     parser.add_argument(
@@ -1403,6 +1410,8 @@ if __name__ == "__main__":
         print(f">>> VIDEO DENOISE MODE")
         print(f">>> Input video: {args.video}")
         print(f">>> Denoise strength: {args.denoise_strength}")
+        if args.denoise_start_image:
+            print(f">>> Custom start image: {args.denoise_start_image}")
 
         alignment = 128 if args.attention_type == "nabla" else 32
         force_offload = hasattr(pipe.dit, 'enable_block_swap') and pipe.dit.enable_block_swap
@@ -1429,6 +1438,34 @@ if __name__ == "__main__":
             target_width=args.width,
             target_height=args.height
         )
+
+        # Encode custom starting image if provided
+        custom_start_latent = None
+        if args.denoise_start_image:
+            print(f">>> Encoding custom start image...", flush=True)
+            _, start_image_latent, _ = get_first_frame_from_image(
+                args.denoise_start_image,
+                pipe.vae,
+                pipe.device_map["vae"],
+                alignment=alignment,
+                use_deterministic=True
+            )
+            # Verify dimensions match video latents (H, W, C)
+            if start_image_latent.shape[1:] != video_latents.shape[1:]:
+                print(f">>> Warning: Start image latent shape {start_image_latent.shape[1:]} doesn't match video latent shape {video_latents.shape[1:]}")
+                print(f">>> The custom start image will be resized to match video dimensions")
+                # Resize start image latent to match video dimensions
+                from torch.nn.functional import interpolate
+                start_image_latent = start_image_latent.permute(0, 3, 1, 2)  # [1, C, H, W]
+                start_image_latent = interpolate(
+                    start_image_latent,
+                    size=(video_latents.shape[1], video_latents.shape[2]),
+                    mode='bilinear',
+                    align_corners=False
+                )
+                start_image_latent = start_image_latent.permute(0, 2, 3, 1)  # [1, H, W, C]
+            custom_start_latent = start_image_latent
+            print(f">>> Custom start latent shape: {custom_start_latent.shape}")
 
         # Offload VAE after encoding
         if pipe.offload or force_offload:
@@ -1526,6 +1563,7 @@ if __name__ == "__main__":
             preview_suffix=args.preview_suffix,
             use_prompt_template=not args.no_prompt_template,
             custom_system_prompt=args.custom_system_prompt,
+            custom_start_latent=custom_start_latent,
         )
 
         # Save output

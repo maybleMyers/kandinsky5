@@ -2004,6 +2004,7 @@ def generate_denoise(
     previewer=None,
     preview_interval=None,
     preview_suffix=None,
+    custom_start_latent=None,
 ):
     """
     Denoise latents starting from a given timestep (for v2v img2img style processing).
@@ -2023,6 +2024,10 @@ def generate_denoise(
         scheduler_scale: Scheduler scale
         conf: Model configuration
         preserve_first_frame: If True, don't add noise to first frame (preserves video quality)
+        custom_start_latent: Optional custom latent [1, H, W, C] to use as the first frame
+                            instead of the video's first frame. When provided, this latent
+                            is used for the preserved first frame while the input video
+                            is still used for noise structure.
 
     Returns:
         Denoised latents
@@ -2064,7 +2069,15 @@ def generate_denoise(
     print(f">>> Raw timestep: {raw_start_t:.4f}, Scaled timestep: {actual_start_timestep:.4f}", flush=True)
 
     # Save the clean first frame if we need to preserve it
-    first_frame_clean = latents[0:1].clone() if preserve_first_frame else None
+    # Use custom_start_latent if provided, otherwise use video's first frame
+    if preserve_first_frame:
+        if custom_start_latent is not None:
+            first_frame_clean = custom_start_latent.to(device=latents.device, dtype=latents.dtype)
+            print(f">>> Using custom start image as first frame", flush=True)
+        else:
+            first_frame_clean = latents[0:1].clone()
+    else:
+        first_frame_clean = None
 
     # Generate noise using seeded generator (same as i2v for consistency)
     g = torch.Generator(device=device)
@@ -2189,6 +2202,7 @@ def generate_sample_denoise(
     vae_dtype=torch.bfloat16,
     use_prompt_template=True,
     custom_system_prompt=None,
+    custom_start_latent=None,
 ):
     """
     Apply light denoising to video latents (v2v img2img style).
@@ -2210,6 +2224,9 @@ def generate_sample_denoise(
         scheduler_scale: Scheduler scale
         chunk_frames: Max frames per chunk (default 31 = 5 seconds)
         chunk_overlap: Overlap frames between chunks for blending (default 4)
+        custom_start_latent: Optional custom latent [1, H, W, C] to use as the first frame
+                            instead of the video's first frame. The video is still used
+                            for noise structure.
         ...
 
     Returns:
@@ -2309,6 +2326,7 @@ def generate_sample_denoise(
                 # Denoise this chunk
                 # Only preserve the first frame when processing the first chunk (chunk_start == 0)
                 # This ensures the original video's first frame is never noised
+                # Pass custom_start_latent only for the first chunk
                 chunk_result = generate_denoise(
                     dit,
                     device,
@@ -2331,6 +2349,7 @@ def generate_sample_denoise(
                     previewer=previewer,
                     preview_interval=preview_interval,
                     preview_suffix=preview_suffix,
+                    custom_start_latent=custom_start_latent if chunk_start == 0 else None,
                 )
 
                 # Move result back to CPU to save VRAM

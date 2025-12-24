@@ -589,6 +589,7 @@ def generate_v2v_video(
     apg_norm_threshold: float,
     enable_denoise: bool,
     denoise_strength: float,
+    denoise_start_image: str,
     enable_ultravico: bool = False,
     ultravico_alpha: float = 0.9,
     ultravico_suppress_harmonics: bool = False,
@@ -756,6 +757,8 @@ def generate_v2v_video(
         if enable_denoise:
             command.append("--denoise")
             command.extend(["--denoise_strength", str(denoise_strength)])
+            if denoise_start_image:
+                command.extend(["--denoise_start_image", denoise_start_image])
 
         if enable_block_swap:
             command.append("--enable_block_swap")
@@ -2989,6 +2992,12 @@ def create_interface():
                                 label="Denoise Strength",
                                 info="Low (0.1-0.3) = subtle refinement, Medium (0.4-0.6) = noticeable changes, High (0.7-1.0) = major regeneration"
                             )
+                            v2v_denoise_start_image = gr.Image(
+                                label="Starting Image (Optional)",
+                                type="filepath",
+                                sources=["upload", "clipboard"],
+                                info="Custom image to use as the first frame. If not provided, uses the video's first frame. The video is still used for motion/noise structure."
+                            )
 
                         with gr.Accordion("NABLA Sparse Attention Settings", open=False):
                             gr.Markdown("""
@@ -3307,7 +3316,7 @@ def create_interface():
                         v2v_use_prompt_expansion, v2v_use_prompt_template, v2v_custom_system_prompt, v2v_clip_prompt,
                         v2v_save_latents_checkbox,
                         v2v_use_apg, v2v_apg_momentum, v2v_apg_norm_threshold,
-                        v2v_enable_denoise, v2v_denoise_strength,
+                        v2v_enable_denoise, v2v_denoise_strength, v2v_denoise_start_image,
                         v2v_enable_ultravico, v2v_ultravico_alpha, v2v_ultravico_suppress_harmonics, v2v_ultravico_beta,
                         v2v_use_sdnq, v2v_sdnq_weights_dtype, v2v_sdnq_triton_mm, v2v_sdnq_compile,
                         v2v_end_blend_weight,
